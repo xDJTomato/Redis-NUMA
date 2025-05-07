@@ -139,7 +139,7 @@ start_server {tags {"hll"}} {
 
     test {Corrupted sparse HyperLogLogs doesn't cause overflow and out-of-bounds with XZERO opcode} {
         r del hll
-        
+
         # Create a sparse-encoded HyperLogLog header
         set header "HYLL"
         set payload [binary format c12 {1 0 0 0 0 0 0 0 0 0 0 0}]
@@ -167,7 +167,7 @@ start_server {tags {"hll"}} {
 
     test {Corrupted sparse HyperLogLogs doesn't cause overflow and out-of-bounds with ZERO opcode} {
         r del hll
-        
+
         # Create a sparse-encoded HyperLogLog header
         set header "HYLL"
         set payload [binary format c12 {1 0 0 0 0 0 0 0 0 0 0 0}]
