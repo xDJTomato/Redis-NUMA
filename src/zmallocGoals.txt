@@ -1,0 +1,32 @@
+# Redis-CXL v0.0.1 
+## 基本需求
+    本项目的总目标是通过libNUMA改造Redis v6.2.21，使得其内存分配机制NUMA节点感知，实现冷热缓存的分层控制机制。
+    以此为CXL服务器设备提供良好的支持。
+    以下分阶段提出需求。
+### Phase 1 LibNUMA适配
+    改造zmalloc.c/zmalloc.h，在不改变对外接口的函数返回值的基础上实现NUMA支持，当前的设计思路为：
+    1.在redis-server服务启动时，查询系统NUMA信息，维护一组元数据，如系统NUMA可用性，
+    按照NUMA相对距离升序排列的一组节点数组等，并提供一个用户接口通过特定指令修改NUMA分配策略，
+    在本阶段，我们首先指定默认策略为最近节点优先，其余策略留下空间，先不实现，供后续开发。
+    2.通过libNUMA提供的能力重写zmalloc，使得当系统NUMA可用时，使用libNUMA代替malloc作最底层的
+    内存分配行为，注意：必须在原有的接口中实现，使用NUMA状态值作为条件来选择zmalloc的具体行为。
+### 注意事项
+#### 环境要求
+    本设备暂时只运行在Ubuntu系统，并只是用libc作为内存分配器，MAKEFILE中需要禁用其他的内存分配器
+    Redis提供了两种策略来维护zmalloc分配内存的大小，一种是使用PREFIX_SIZE在指针前4字节维护大小，
+    而在部分系统上则直接使用malloc的能力，两种zmalloc策略返回的指针意义不同
+    已知libNUMA不具备查询已分配内存大小的能力，因此不论系统是否支持malloc_size，都需要完全实现PREFIX_SIZE的策略。
+    ✅ NUMA信息查询：启动时自动检测系统NUMA信息
+    ✅ 节点距离排序：使用numa_distance()获取距离矩阵并按升序排列
+    ✅ 最近节点优先策略：基于redis-server进程CPU亲和性确定最近节点
+    ✅ libnuma集成：使用libnuma代替malloc作为底层分配器
+    ✅ PREFIX_SIZE策略：为libnuma实现了完整的内存大小跟踪
+    ✅ 向后兼容：初始化过程中发现NUMA不可用时自动回退到标准分配器
+
+###当前问题
+    server启动时，2572行第五次调用createObject(OBJ_STRING,
+            sdscatprintf(sdsempty(),
+                "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n",
+                dictid_len, dictid_str));
+    时,sdscatprintf->sdscatvprintf:sdscatlen->sdsmakeRoomFor->realloc()出现段错误,
+    其在调用numa_free函数时发生错误，传入参数(ptr=0x7ffff7e9c000, size=65536)

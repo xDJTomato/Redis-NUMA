@@ -1,0 +1,9 @@
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/hiredis.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/hiredis-test.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/test.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/edit_cache.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/rebuild_cache.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/list_install_components.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/install.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/install/local.dir
+/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build/CMakeFiles/install/strip.dir

@@ -1,0 +1,1 @@
+/usr/bin/clang -g "CMakeFiles/hiredis-test.dir/test.c.o" -o hiredis-test  -Wl,-rpath,"/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/build" libhiredis.so.1.0.0 

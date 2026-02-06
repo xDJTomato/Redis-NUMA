@@ -1,0 +1,70 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-0455033d5dc04ec11d16.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.4.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "hiredis",
+					"targetIndexes" : 
+					[
+						0,
+						1
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "hiredis::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-hiredis-Debug-c12fc32620656859159b.json",
+					"name" : "hiredis",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "hiredis-test::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-hiredis-test-Debug-4b5d50874502e771829c.json",
+					"name" : "hiredis-test",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/xdjtomato/\u4e0b\u8f7d/Redis with CXL/redis-CXL in v6.2.21/build",
+		"source" : "/home/xdjtomato/\u4e0b\u8f7d/Redis with CXL/redis-CXL in v6.2.21/deps/hiredis"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 6
+	}
+}
