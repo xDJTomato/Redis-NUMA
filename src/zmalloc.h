@@ -31,6 +31,9 @@
 #ifndef __ZMALLOC_H
 #define __ZMALLOC_H
 
+/* Force disable HAVE_MALLOC_SIZE for NUMA compatibility */
+#define NO_MALLOC_USABLE_SIZE
+
 /* Double expansion needed for stringification of macro values. */
 #define __xstr(s) __str(s)
 #define __str(s) #s

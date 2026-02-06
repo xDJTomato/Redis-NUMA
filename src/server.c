@@ -6257,7 +6257,7 @@ int main(int argc, char **argv) {
     char config_from_stdin = 0;
 
 #ifdef HAVE_NUMA
-    printf("DEBUG: 调用numa_init()\n");
+    //printf("DEBUG: 调用numa_init()\n");
     numa_init();
     printf("DEBUG: numa_init()完成\n");
 #endif

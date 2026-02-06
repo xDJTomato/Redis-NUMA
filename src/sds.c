@@ -233,94 +233,52 @@ void sdsclear(sds s) {
 sds sdsMakeRoomFor(sds s, size_t addlen) {
     void *sh, *newsh;
     size_t avail = sdsavail(s);
+    // printf("DEBUG: sdsMakeRoomFor(s=%p, addlen=%zu), avail=%zu\n", (void*)s, addlen, avail);
     size_t len, newlen, reqlen;
     char type, oldtype = s[-1] & SDS_TYPE_MASK;
     int hdrlen;
     size_t usable;
-    
-    printf("DEBUG: sdsMakeRoomFor(s=%p, addlen=%lu), sdslen=%lu, avail=%lu\n", 
-           (void*)s, (unsigned long)addlen, (unsigned long)sdslen(s), (unsigned long)avail);
 
     /* Return ASAP if there is enough space left. */
-    if (avail >= addlen) {
-        printf("DEBUG: sdsMakeRoomFor - 已有足够空间，直接返回\n");
-        return s;
-    }
+    if (avail >= addlen) return s;
 
     len = sdslen(s);
     sh = (char*)s-sdsHdrSize(oldtype);
     reqlen = newlen = (len+addlen);
     assert(newlen > len);   /* Catch size_t overflow */
-    
-    printf("DEBUG: sdsMakeRoomFor - len=%lu, reqlen=%lu, oldtype=%d\n", 
-           (unsigned long)len, (unsigned long)reqlen, oldtype);
-    
-    if (newlen < SDS_MAX_PREALLOC) {
+    if (newlen < SDS_MAX_PREALLOC)
         newlen *= 2;
-        printf("DEBUG: sdsMakeRoomFor - newlen < SDS_MAX_PREALLOC，翻倍至%lu\n", (unsigned long)newlen);
-    } else {
+    else
         newlen += SDS_MAX_PREALLOC;
-        printf("DEBUG: sdsMakeRoomFor - newlen >= SDS_MAX_PREALLOC，增加至%lu\n", (unsigned long)newlen);
-    }
 
     type = sdsReqType(newlen);
 
     /* Don't use type 5: the user is appending to the string and type 5 is
      * not able to remember empty space, so sdsMakeRoomFor() must be called
      * at every appending operation. */
-    if (type == SDS_TYPE_5) {
-        type = SDS_TYPE_8;
-        printf("DEBUG: sdsMakeRoomFor - 避免使用TYPE_5，改为TYPE_8\n");
-    }
-    
-    printf("DEBUG: sdsMakeRoomFor - newlen=%lu, type=%d\n", (unsigned long)newlen, type);
+    if (type == SDS_TYPE_5) type = SDS_TYPE_8;
 
     hdrlen = sdsHdrSize(type);
     assert(hdrlen + newlen + 1 > reqlen);  /* Catch size_t overflow */
-    
-    printf("DEBUG: sdsMakeRoomFor - hdrlen=%d, oldtype=%d, type=%d\n", hdrlen, oldtype, type);
-    
     if (oldtype==type) {
-        printf("DEBUG: sdsMakeRoomFor - 类型不变，使用realloc扩容\n");
         newsh = s_realloc_usable(sh, hdrlen+newlen+1, &usable);
-        if (newsh == NULL) {
-            printf("DEBUG: sdsMakeRoomFor - realloc失败\n");
-            return NULL;
-        }
-        printf("DEBUG: sdsMakeRoomFor - realloc成功，sh=%p -> newsh=%p, usable=%lu\n", 
-               sh, newsh, (unsigned long)usable);
+        if (newsh == NULL) return NULL;
         s = (char*)newsh+hdrlen;
     } else {
-        printf("DEBUG: sdsMakeRoomFor - 类型变化，需要重新分配内存\n");
         /* Since the header size changes, need to move the string forward,
          * and can't use realloc */
         newsh = s_malloc_usable(hdrlen+newlen+1, &usable);
-        if (newsh == NULL) {
-            printf("DEBUG: sdsMakeRoomFor - malloc失败\n");
-            return NULL;
-        }
-        printf("DEBUG: sdsMakeRoomFor - malloc成功，newsh=%p, usable=%lu\n", 
-               newsh, (unsigned long)usable);
+        if (newsh == NULL) return NULL;
         memcpy((char*)newsh+hdrlen, s, len+1);
-        printf("DEBUG: sdsMakeRoomFor - 复制数据成功\n");
         s_free(sh);
-        printf("DEBUG: sdsMakeRoomFor - 释放旧内存成功\n");
         s = (char*)newsh+hdrlen;
         s[-1] = type;
         sdssetlen(s, len);
-        printf("DEBUG: sdsMakeRoomFor - 设置新类型和长度\n");
     }
     usable = usable-hdrlen-1;
-    if (usable > sdsTypeMaxSize(type)) {
+    if (usable > sdsTypeMaxSize(type))
         usable = sdsTypeMaxSize(type);
-        printf("DEBUG: sdsMakeRoomFor - 可用空间超过类型最大值，限制为%lu\n", 
-               (unsigned long)sdsTypeMaxSize(type));
-    }
-    
-    printf("DEBUG: sdsMakeRoomFor - 设置可用空间: usable=%lu\n", (unsigned long)usable);
     sdssetalloc(s, usable);
-    
-    printf("DEBUG: sdsMakeRoomFor - 完成，返回新指针=%p\n", (void*)s);
     return s;
 }
 
@@ -507,7 +465,7 @@ sds sdsgrowzero(sds s, size_t len) {
 sds sdscatlen(sds s, const void *t, size_t len) {
 
     size_t curlen = sdslen(s);
-    printf("DEBUG: sdscatlen(s=%p, t=%p, len=%zu), curlen=%zu, trying sdsMakeRoomFor()\n", (void*)s, (void*)t, len, curlen);
+    // printf("DEBUG: sdscatlen(s=%p, t=%p, len=%zu), curlen=%zu, trying sdsMakeRoomFor()\n", (void*)s, (void*)t, len, curlen);
     s = sdsMakeRoomFor(s,len);
     //printf ("DEBUG: sdsMakeRoomFor() returns %p\n", (void*)s);
     if (s == NULL) return NULL;
@@ -633,7 +591,7 @@ sds sdsfromlonglong(long long value) {
 /* Like sdscatprintf() but gets va_list instead of being variadic. */
 sds sdscatvprintf(sds s, const char *fmt, va_list ap) {
     va_list cpy;
-    printf("DEBUG: try sdscatvprintf(s=%p, fmt=%s, ap=%p)\n", (void*)s, fmt, (void*)ap);
+    // printf("DEBUG: try sdscatvprintf(s=%p, fmt=%s, ap=%p)\n", (void*)s, fmt, (void*)ap);
     char staticbuf[1024], *buf = staticbuf, *t;
     // printf("DEBUG: staticbuf is %p\n", (void*)staticbuf);
     size_t buflen = strlen(fmt)*2;
@@ -673,7 +631,7 @@ sds sdscatvprintf(sds s, const char *fmt, va_list ap) {
     }
 
     /* Finally concat the obtained string to the SDS string and return it. */
-    printf("DEBUG: trying sdscatlen(s=%p, buf=%p, bufstrlen=%d)\n", (void*)s, (void*)buf, bufstrlen);
+    //printf("DEBUG: trying sdscatlen(s=%p, buf=%p, bufstrlen=%d)\n", (void*)s, (void*)buf, bufstrlen);
     t = sdscatlen(s, buf, bufstrlen);
     //printf("DEBUG: sdscatlen() returns %p\n", (void*)t);
     if (buf != staticbuf) s_free(buf);

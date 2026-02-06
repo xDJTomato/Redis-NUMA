@@ -24,9 +24,27 @@
     ✅ 向后兼容：初始化过程中发现NUMA不可用时自动回退到标准分配器
 
 ###当前问题
-    server启动时，2572行第五次调用createObject(OBJ_STRING,
-            sdscatprintf(sdsempty(),
-                "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n",
-                dictid_len, dictid_str));
-    时,sdscatprintf->sdscatvprintf:sdscatlen->sdsmakeRoomFor->realloc()出现段错误,
-    其在调用numa_free函数时发生错误，传入参数(ptr=0x7ffff7e9c000, size=65536)
+    server启动后无法正确处理指令
+    使用Redis的调试命令
+2.1 启用Redis的调试模式
+
+bash
+# 启动Redis服务器
+./redis-server --loglevel debug
+
+# 在另一个终端连接并设置调试模式
+redis-cli
+127.0.0.1:6379> DEBUG SET-ACTIVE-EXPIRE 0  # 禁用过期键处理
+127.0.0.1:6379> MONITOR                    # 监控所有命令
+2.2 使用gdb attach到运行中的Redis进程
+
+bash
+# 查找Redis进程ID
+ps aux | grep redis-server
+
+# 附加到进程
+gdb -p <redis_pid>
+
+# 设置断点
+(gdb) break dbAdd
+(gdb) break setKey
