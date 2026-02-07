@@ -101,9 +101,12 @@ ifneq (,$(findstring armv,$(uname_M)))
 endif
 
 # Add libnuma support for NUMA-aware memory allocation
+# NUMA allocator is incompatible with jemalloc, must use libc
 ifneq (,$(findstring Linux,$(uname_S)))
         FINAL_LIBS+=-lnuma
         FINAL_CFLAGS+=-DHAVE_NUMA
+        # Force libc allocator when NUMA is enabled
+        MALLOC=libc
 endif
 
 ifeq ($(uname_S),SunOS)

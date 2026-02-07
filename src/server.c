@@ -3233,7 +3233,7 @@ void initServer(void) {
         exit(1);
     }
 
-    printf("DEBUG\n");
+    // printf("DEBUG\n");
     createSharedObjects();
 
     adjustOpenFilesLimit();
@@ -6256,12 +6256,14 @@ int main(int argc, char **argv) {
     int j;
     char config_from_stdin = 0;
 
+    printf("DEBUG: main() 开始\n");
 #ifdef HAVE_NUMA
-    //printf("DEBUG: 调用numa_init()\n");
+    printf("DEBUG: 调用numa_init()\n");
     numa_init();
     printf("DEBUG: numa_init()完成\n");
 #endif
 
+    printf("DEBUG: 检查REDIS_TEST\n");
 #ifdef REDIS_TEST
     if (argc >= 3 && !strcasecmp(argv[1], "test")) {
         int accurate = 0;
@@ -6302,36 +6304,55 @@ int main(int argc, char **argv) {
     }
 #endif
 
+    printf("DEBUG: 初始化库\n");
     /* We need to initialize our libraries, and the server configuration. */
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
     spt_init(argc, argv);
 #endif
+    printf("DEBUG: setlocale\n");
     setlocale(LC_COLLATE,"");
+    printf("DEBUG: tzset\n");
     tzset(); /* Populates 'timezone' global. */
+    printf("DEBUG: zmalloc_set_oom_handler\n");
     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
 
+    printf("DEBUG: 计算随机数\n");
     /* To achieve entropy, in case of containers, their time() and getpid() can
      * be the same. But value of tv_usec is fast enough to make the difference */
     gettimeofday(&tv,NULL);
+    printf("DEBUG: srand\n");
     srand(time(NULL)^getpid()^tv.tv_usec);
+    printf("DEBUG: srandom\n");
     srandom(time(NULL)^getpid()^tv.tv_usec);
+    printf("DEBUG: init_genrand64\n");
     init_genrand64(((long long) tv.tv_sec * 1000000 + tv.tv_usec) ^ getpid());
+    printf("DEBUG: crc64_init\n");
     crc64_init();
 
+    printf("DEBUG: umask\n");
     /* Store umask value. Because umask(2) only offers a set-and-get API we have
      * to reset it and restore it back. We do this early to avoid a potential
      * race condition with threads that could be creating files or directories.
      */
     umask(server.umask = umask(0777));
 
+    printf("DEBUG: 读取命令行参数\n");
+
     uint8_t hashseed[16];
+    printf("DEBUG: getRandomBytes\n");
     getRandomBytes(hashseed,sizeof(hashseed));
+    printf("DEBUG: dictSetHashFunctionSeed\n");
     dictSetHashFunctionSeed(hashseed);
+    printf("DEBUG: checkForSentinelMode\n");
     server.sentinel_mode = checkForSentinelMode(argc,argv);
+    printf("DEBUG: initServerConfig\n");
     initServerConfig();
+    printf("DEBUG: ACLInit\n");
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
+    printf("DEBUG: moduleInitModulesSystem\n");
     moduleInitModulesSystem();
+    printf("DEBUG: tlsInit\n");
     tlsInit();
 
     /* Store the executable path and arguments in a safe place in order
