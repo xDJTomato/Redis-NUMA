@@ -6,10 +6,155 @@
 #include <string.h>
 #include <numa.h>
 #include <sched.h>
+#include <time.h>
 
 /* Include the migration module */
 #include "src/zmalloc.h"
 #include "src/numa_migrate.h"
+
+/* Get current time in microseconds */
+static uint64_t get_time_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
+}
+
+/* Test function: Migrate a test buffer and verify */
+static int numa_migrate_test(void)
+{
+    int num_nodes = numa_max_node() + 1;
+    
+    printf("=== NUMA Migration Test ===\n");
+    printf("Available NUMA nodes: %d\n", num_nodes);
+    
+    if (num_nodes < 2) {
+        printf("\nNote: Only 1 NUMA node available. Running basic allocation test.\n");
+        
+        /* Basic allocation and free test */
+        size_t test_size = 1024;
+        char *test_data = zmalloc(test_size);
+        if (!test_data) {
+            printf("Failed to allocate test buffer\n");
+            return -1;
+        }
+        
+        /* Fill with test pattern */
+        for (size_t i = 0; i < test_size; i++) {
+            test_data[i] = (char)(i % 256);
+        }
+        
+        /* Verify data */
+        int data_ok = 1;
+        for (size_t i = 0; i < test_size; i++) {
+            if (test_data[i] != (char)(i % 256)) {
+                data_ok = 0;
+                break;
+            }
+        }
+        
+        zfree(test_data);
+        
+        if (data_ok) {
+            printf("Basic allocation test: PASSED\n");
+            printf("\n=== Migration Test COMPLETED (single node) ===\n");
+            return 0;
+        } else {
+            printf("Basic allocation test: FAILED\n");
+            return -1;
+        }
+    }
+    
+    /* Test 1: Basic migration */
+    printf("\nTest 1: Basic memory migration\n");
+    
+    size_t test_size = 1024;
+    char *test_data = zmalloc(test_size);
+    if (!test_data) {
+        printf("Failed to allocate test buffer\n");
+        return -1;
+    }
+    
+    /* Fill with test pattern */
+    for (size_t i = 0; i < test_size; i++) {
+        test_data[i] = (char)(i % 256);
+    }
+    
+    printf("Allocated %zu bytes on node %d\n", test_size, numa_node_of_cpu(sched_getcpu()));
+    
+    /* Try to migrate to another node */
+    int target_node = (numa_node_of_cpu(sched_getcpu()) + 1) % num_nodes;
+    printf("Migrating to node %d...\n", target_node);
+    
+    uint64_t start_time = get_time_us();
+    char *migrated_data = numa_migrate_memory(test_data, test_size, target_node);
+    uint64_t elapsed = get_time_us() - start_time;
+    
+    if (!migrated_data) {
+        printf("Migration failed!\n");
+        zfree(test_data);
+        return -1;
+    }
+    
+    printf("Migration completed in %lu us\n", (unsigned long)elapsed);
+    
+    /* Verify data integrity */
+    int data_ok = 1;
+    for (size_t i = 0; i < test_size; i++) {
+        if (migrated_data[i] != (char)(i % 256)) {
+            data_ok = 0;
+            printf("Data corruption at offset %zu: expected %d, got %d\n",
+                   i, (int)(i % 256), (int)migrated_data[i]);
+            break;
+        }
+    }
+    
+    if (data_ok) {
+        printf("Data integrity check: PASSED\n");
+    } else {
+        printf("Data integrity check: FAILED\n");
+        zfree(migrated_data);
+        return -1;
+    }
+    
+    /* Test 2: Multiple migrations */
+    printf("\nTest 2: Multiple migrations\n");
+    
+    numa_migrate_reset_stats();
+    int num_migrations = 10;
+    char *current_ptr = migrated_data;
+    
+    for (int i = 0; i < num_migrations; i++) {
+        int next_node = (target_node + i) % num_nodes;
+        char *new_ptr = numa_migrate_memory(current_ptr, test_size, next_node);
+        if (!new_ptr) {
+            printf("Migration %d failed!\n", i + 1);
+            break;
+        }
+        current_ptr = new_ptr;
+        printf("Migration %d: moved to node %d\n", i + 1, next_node);
+    }
+    
+    /* Check final statistics */
+    numa_migrate_stats_t stats;
+    numa_migrate_get_stats(&stats);
+    
+    printf("\nMigration Statistics:\n");
+    printf("  Total migrations: %lu\n", (unsigned long)stats.total_migrations);
+    printf("  Bytes migrated: %lu\n", (unsigned long)stats.bytes_migrated);
+    printf("  Failed migrations: %lu\n", (unsigned long)stats.failed_migrations);
+    printf("  Total time: %lu us\n", (unsigned long)stats.migration_time_us);
+    if (stats.total_migrations > 0) {
+        printf("  Average time per migration: %lu us\n",
+               (unsigned long)(stats.migration_time_us / stats.total_migrations));
+    }
+    
+    /* Cleanup */
+    zfree(current_ptr);
+    
+    printf("\n=== Migration Test COMPLETED ===\n");
+    return 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -37,7 +182,7 @@ int main(int argc, char **argv)
     }
     printf("Migration module initialized\n");
     
-    /* Run the built-in test */
+    /* Run the test */
     printf("\nRunning migration test...\n");
     int result = numa_migrate_test();
     

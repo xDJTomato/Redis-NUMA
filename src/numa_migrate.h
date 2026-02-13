@@ -48,7 +48,4 @@ void numa_migrate_get_stats(numa_migrate_stats_t *stats);
 /* Reset migration statistics */
 void numa_migrate_reset_stats(void);
 
-/* Test function: Migrate a test buffer and verify */
-int numa_migrate_test(void);
-
 #endif /* NUMA_MIGRATE_H */
