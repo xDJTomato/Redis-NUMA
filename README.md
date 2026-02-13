@@ -517,6 +517,7 @@ OK
    - [05-numa-key-migrate.md](docs/modules/05-numa-key-migrate.md) - Key迁移设计
    - [06-numa-strategy-slots.md](docs/modules/06-numa-strategy-slots.md) - 策略框架
    - [07-numa-composite-lru.md](docs/modules/07-numa-composite-lru.md) - 复合LRU策略
+   - [08-numa-configurable-strategy.md](docs/modules/08-numa-configurable-strategy.md) - 可配置NUMA分配策略
 
 ### 源码导读
 

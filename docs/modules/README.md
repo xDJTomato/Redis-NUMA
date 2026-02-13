@@ -67,11 +67,15 @@
 - [05-numa-key-migrate.md](./05-numa-key-migrate.md) - Key级别迁移核心模块
 - [06-numa-strategy-slots.md](./06-numa-strategy-slots.md) - 策略插槽框架
 - [07-numa-composite-lru.md](./07-numa-composite-lru.md) - 复合LRU策略实现
+- [08-numa-configurable-strategy.md](./08-numa-configurable-strategy.md) - 可配置NUMA分配策略
 
 ## 版本历史
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| v2.5 | 2026-02-14 | 添加可配置NUMA分配策略，支持6种分配模式 |
+| v2.4 | 2026-02-13 | Key级别迁移模块实现 |
+| v2.3 | 2026-02-13 | 策略插槽框架完成 |
 | v2.2 | 2026-02-13 | 添加迁移模块，模块化重构完成 |
 | v2.1 | 2026-02-13 | 内存池模块化，分离为独立模块 |
 | v2.0 | 2026-02-07 | 性能优化，166K req/s达成 |

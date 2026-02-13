@@ -15,14 +15,14 @@ NUMA可配置分配策略模块提供运行时动态配置的NUMA内存分配机
 
 ### 1. 多种分配策略
 
-| 策略类型 | 描述 | 适用场景 |
-|---------|------|----------|
-| LOCAL_FIRST | 本地节点优先分配 | 单节点优化，最小延迟 |
-| INTERLEAVE | 交错分配到所有节点 | 负载均衡，多节点环境 |
-| ROUND_ROBIN | 轮询分配 | 简单均衡，均匀分布 |
-| WEIGHTED | 加权分配 | 按节点性能差异化分配 |
-| PRESSURE_AWARE | 压力感知分配 | 动态负载均衡 |
-| CXL_OPTIMIZED | CXL优化分配 | CXL内存架构优化 |
+| 策略类型 | 描述 | 适用场景 | 实现原理 |
+|---------|------|----------|----------|
+| LOCAL_FIRST | 本地节点优先分配 | 单节点优化，最小延迟 | 总是选择NUMA节点0，适用于单节点或主节点优先场景 |
+| INTERLEAVE | 交错分配到所有节点 | 负载均衡，多节点环境 | 使用线程局部随机数生成器，在所有节点间均匀分配 |
+| ROUND_ROBIN | 轮询分配 | 简单均衡，均匀分布 | 线程局部轮询计数器，依次选择节点0、1、2... |
+| WEIGHTED | 加权分配 | 按节点性能差异化分配 | 基于配置权重进行概率选择，高性能节点获得更高分配概率 |
+| PRESSURE_AWARE | 压力感知分配 | 动态负载均衡 | 实时监控各节点内存利用率，选择负载最轻的节点 |
+| CXL_OPTIMIZED | CXL优化分配 | CXL内存架构优化 | 小对象本地分配(节点0)，大对象分配到CXL远端节点 |
 
 ### 2. 配置管理
 
@@ -153,6 +153,79 @@ void addReplyLongLong(client *c, long long ll);
 - **原因**：`addReplyArrayLen`是Redis推荐的现代API，提供更好的类型安全和性能
 - **影响范围**：NUMACONFIG命令的所有响应构建部分
 - **兼容性**：完全向后兼容，不影响外部接口
+
+## 策略算法详解
+
+### LOCAL_FIRST (本地优先)
+```c
+selected_node = 0; /* 总是选择节点0 */
+```
+- **实现简单**：直接返回固定节点
+- **性能最优**：无计算开销，最低延迟
+- **适用场景**：单NUMA节点环境或主节点优先
+
+### INTERLEAVE (交错分配)
+```c
+static __thread unsigned int seed = 0;
+if (seed == 0) seed = getpid() ^ pthread_self();
+selected_node = rand_r(&seed) % num_nodes;
+```
+- **线程安全**：使用线程局部种子避免竞争
+- **均匀分布**：伪随机确保各节点负载均衡
+- **适用场景**：多节点环境的通用负载均衡
+
+### ROUND_ROBIN (轮询分配)
+```c
+static __thread int rr_index = 0;
+selected_node = rr_index % num_nodes;
+rr_index++;
+```
+- **确定性**：可预测的分配序列
+- **公平性**：严格轮询确保绝对均匀
+- **适用场景**：需要确定性分配的场景
+
+### WEIGHTED (加权分配)
+```c
+int total_weight = sum(node_weights);
+int random_value = rand_r(&seed) % total_weight;
+int cumulative_weight = 0;
+for (each node) {
+    cumulative_weight += node_weights[i];
+    if (random_value < cumulative_weight) {
+        selected_node = i;
+        break;
+    }
+}
+```
+- **灵活配置**：支持动态调整节点权重
+- **概率选择**：根据权重比例进行概率分配
+- **适用场景**：异构NUMA节点环境
+
+### PRESSURE_AWARE (压力感知)
+```c
+for (each node) {
+    double utilization = get_node_utilization(i);
+    if (utilization < min_utilization) {
+        min_utilization = utilization;
+        selected_node = i;
+    }
+}
+```
+- **动态监控**：实时计算节点内存利用率
+- **智能选择**：总是选择当前负载最轻的节点
+- **适用场景**：动态负载变化的生产环境
+
+### CXL_OPTIMIZED (CXL优化)
+```c
+if (size < min_allocation_size) {
+    selected_node = 0; /* 小对象本地 */
+} else {
+    selected_node = (num_nodes > 1) ? 1 : 0; /* 大对象CXL */
+}
+```
+- **大小感知**：根据对象大小选择分配策略
+- **架构优化**：充分利用CXL内存特性
+- **适用场景**：配备CXL内存扩展的系统
 
 ## 实现架构
 
