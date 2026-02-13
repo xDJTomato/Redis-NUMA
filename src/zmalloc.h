@@ -128,6 +128,8 @@ void *numa_zmalloc(size_t size);
 void *numa_zcalloc(size_t size);
 void *numa_zrealloc(void *ptr, size_t size);
 void numa_zfree(void *ptr);
+void *numa_zmalloc_onnode(size_t size, int node);
+void *numa_zcalloc_onnode(size_t size, int node);
 
 #endif /* HAVE_NUMA */
 void *zrealloc(void *ptr, size_t size);

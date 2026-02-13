@@ -55,44 +55,13 @@ void zlibc_free(void *ptr)
 #include <numa.h>
 #include <sched.h>
 #include <unistd.h>
+#include "numa_pool.h"
 
-/* NUMA内存池配置 */
-#define NUMA_POOL_SIZE_CLASSES 8
-#define NUMA_POOL_CHUNK_SIZE (64 * 1024)  /* 64KB per chunk */
-#define NUMA_POOL_MAX_ALLOC 512            /* 最大池分配大小 */
-
-/* 大小级别定义 */
-static const size_t numa_size_classes[NUMA_POOL_SIZE_CLASSES] = {
-    16, 32, 64, 128, 256, 512, 1024, 2048
-};
-
-/* 内存池块 */
-typedef struct numa_pool_chunk {
-    void *memory;                  /* NUMA分配的大块内存 */
-    size_t size;                   /* 块大小 */
-    size_t offset;                 /* 当前分配偏移 */
-    struct numa_pool_chunk *next;  /* 下一个块 */
-} numa_pool_chunk_t;
-
-/* 大小级别池 */
-typedef struct {
-    size_t obj_size;               /* 对象大小 */
-    numa_pool_chunk_t *chunks;     /* 块链表 */
-    pthread_mutex_t lock;          /* 线程安全锁 */
-} numa_size_class_pool_t;
-
-/* 每个节点的内存池 */
-typedef struct {
-    int node_id;
-    numa_size_class_pool_t pools[NUMA_POOL_SIZE_CLASSES];
-} numa_node_pool_t;
-
-/* NUMA上下文 */
+/* NUMA上下文 - 保留用于兼容性和扩展 */
 static struct {
     int numa_available;
     int num_nodes;
     int current_node;
-    numa_node_pool_t *node_pools;  /* 每个节点的内存池数组 */
     int allocation_strategy;
     int *node_distance_order;
 } numa_ctx = {0};
@@ -103,45 +72,25 @@ static __thread int tls_current_node = -1;
 /* Initialize NUMA support */
 void numa_init(void)
 {
-    if (numa_available() == -1) {
+    /* 初始化内存池模块 */
+    if (numa_pool_init() != 0) {
         numa_ctx.numa_available = 0;
         return;
     }
-
-    numa_ctx.numa_available = 1;
-    numa_ctx.num_nodes = numa_max_node() + 1;
     
-    /* 获取当前节点 */
-    int cpu = sched_getcpu();
-    if (cpu >= 0) {
-        numa_ctx.current_node = numa_node_of_cpu(cpu);
-    } else {
-        numa_ctx.current_node = 0;
+    numa_ctx.numa_available = numa_pool_available();
+    if (!numa_ctx.numa_available) {
+        return;
     }
+
+    numa_ctx.num_nodes = numa_pool_num_nodes();
+    numa_ctx.current_node = numa_pool_get_node();
     tls_current_node = numa_ctx.current_node;
-    
     numa_ctx.allocation_strategy = NUMA_STRATEGY_LOCAL_FIRST;
-
-    /* 初始化每个节点的内存池 */
-    numa_ctx.node_pools = calloc(numa_ctx.num_nodes, sizeof(numa_node_pool_t));
-    if (!numa_ctx.node_pools) {
-        numa_ctx.numa_available = 0;
-        return;
-    }
-    
-    for (int i = 0; i < numa_ctx.num_nodes; i++) {
-        numa_ctx.node_pools[i].node_id = i;
-        for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
-            numa_ctx.node_pools[i].pools[j].obj_size = numa_size_classes[j];
-            numa_ctx.node_pools[i].pools[j].chunks = NULL;
-            pthread_mutex_init(&numa_ctx.node_pools[i].pools[j].lock, NULL);
-        }
-    }
 
     /* 初始化节点距离顺序 */
     numa_ctx.node_distance_order = malloc(numa_ctx.num_nodes * sizeof(int));
     if (!numa_ctx.node_distance_order) {
-        free(numa_ctx.node_pools);
         numa_ctx.numa_available = 0;
         return;
     }
@@ -167,30 +116,8 @@ void numa_init(void)
 /* Cleanup NUMA resources */
 void numa_cleanup(void)
 {
-    if (!numa_ctx.numa_available)
-        return;
-        
-    /* 清理内存池 */
-    if (numa_ctx.node_pools) {
-        for (int i = 0; i < numa_ctx.num_nodes; i++) {
-            for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
-                numa_size_class_pool_t *pool = &numa_ctx.node_pools[i].pools[j];
-                numa_pool_chunk_t *chunk = pool->chunks;
-                while (chunk) {
-                    numa_pool_chunk_t *next = chunk->next;
-                    if (chunk->memory) {
-                        numa_free(chunk->memory, chunk->size);
-                    }
-                    free(chunk);
-                    chunk = next;
-                }
-                pthread_mutex_destroy(&pool->lock);
-            }
-        }
-        free(numa_ctx.node_pools);
-        numa_ctx.node_pools = NULL;
-    }
-
+    numa_pool_cleanup();
+    
     if (numa_ctx.node_distance_order) {
         free(numa_ctx.node_distance_order);
         numa_ctx.node_distance_order = NULL;
@@ -300,73 +227,22 @@ static inline void *numa_to_user_ptr(void *raw_ptr)
     return (char *)raw_ptr + PREFIX_SIZE;
 }
 
-/* NUMA-aware memory allocation with size tracking */
+/* NUMA-aware memory allocation with size tracking - using memory pool */
 static void *numa_alloc_with_size(size_t size)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
 
-    void *raw_ptr;
     size_t total_size = size + PREFIX_SIZE;
-    int from_pool = 0;
-
-    /* 检查是否可以使用内存池（小对象优化） */
-    if (total_size <= NUMA_POOL_MAX_ALLOC && numa_ctx.node_pools) {
-        /* 查找合适的大小级别 */
-        int pool_idx = -1;
-        for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
-            if (total_size <= numa_size_classes[i]) {
-                pool_idx = i;
-                break;
-            }
-        }
-        
-        if (pool_idx >= 0) {
-            numa_node_pool_t *node_pool = &numa_ctx.node_pools[numa_ctx.current_node];
-            numa_size_class_pool_t *pool = &node_pool->pools[pool_idx];
-            
-            pthread_mutex_lock(&pool->lock);
-            
-            /* 尝试从现有chunk分配 */
-            numa_pool_chunk_t *chunk = pool->chunks;
-            while (chunk) {
-                size_t aligned_size = (total_size + 15) & ~15;  /* 16字节对齐 */
-                if (chunk->offset + aligned_size <= chunk->size) {
-                    raw_ptr = (char *)chunk->memory + chunk->offset;
-                    chunk->offset += aligned_size;
-                    pthread_mutex_unlock(&pool->lock);
-                    from_pool = 1;
-                    goto alloc_success;
-                }
-                chunk = chunk->next;
-            }
-            
-            /* 需要分配新chunk */
-            numa_pool_chunk_t *new_chunk = malloc(sizeof(numa_pool_chunk_t));
-            if (new_chunk) {
-                new_chunk->size = NUMA_POOL_CHUNK_SIZE;
-                new_chunk->memory = numa_alloc_onnode(new_chunk->size, numa_ctx.current_node);
-                if (new_chunk->memory) {
-                    new_chunk->offset = (total_size + 15) & ~15;
-                    new_chunk->next = pool->chunks;
-                    pool->chunks = new_chunk;
-                    raw_ptr = new_chunk->memory;
-                    pthread_mutex_unlock(&pool->lock);
-                    from_pool = 1;
-                    goto alloc_success;
-                }
-                free(new_chunk);
-            }
-            pthread_mutex_unlock(&pool->lock);
-        }
-    }
-
-    /* 回退到直接NUMA分配 */
-    raw_ptr = numa_alloc_onnode(total_size, numa_ctx.current_node);
+    size_t alloc_size;
+    
+    /* 使用内存池分配 */
+    void *raw_ptr = numa_pool_alloc(total_size, numa_ctx.current_node, &alloc_size);
     if (!raw_ptr)
         return NULL;
-    from_pool = 0;
+    
+    /* 判断是否来自内存池（根据大小判断） */
+    int from_pool = (total_size <= NUMA_POOL_MAX_ALLOC) ? 1 : 0;
 
-alloc_success:
     numa_init_prefix(raw_ptr, size, from_pool);
     update_zmalloc_stat_alloc(total_size);
     return numa_to_user_ptr(raw_ptr);
@@ -383,12 +259,9 @@ static void numa_free_with_size(void *user_ptr)
 
     update_zmalloc_stat_free(total_size);
 
-    /* Only free direct allocations; pool memory is freed in bulk */
-    if (!prefix->from_pool)
-    {
-        void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
-        numa_free(raw_ptr, total_size);
-    }
+    /* 使用内存池释放 */
+    void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
+    numa_pool_free(raw_ptr, total_size, prefix->from_pool);
 }
 
 /* NUMA-aware zmalloc */
@@ -458,14 +331,16 @@ void numa_zfree(void *ptr)
 /* Set current NUMA node for allocation */
 void numa_set_current_node(int node)
 {
-    if (node >= 0 && node < numa_ctx.num_nodes)
+    if (node >= 0 && node < numa_ctx.num_nodes) {
         numa_ctx.current_node = node;
+        numa_pool_set_node(node);
+    }
 }
 
 /* Get current NUMA node */
 int numa_get_current_node(void)
 {
-    return numa_ctx.current_node;
+    return numa_pool_get_node();
 }
 
 /* NUMA allocation on specific node (for key migration) */
@@ -473,11 +348,10 @@ static void *numa_alloc_on_specific_node(size_t size, int node)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
 
-    void *raw_ptr;
     size_t total_size = size + PREFIX_SIZE;
-
+    
     /* Always use direct allocation for specific node requests */
-    raw_ptr = numa_alloc_onnode(total_size, node);
+    void *raw_ptr = numa_alloc_onnode(total_size, node);
     if (!raw_ptr)
         return NULL;
 

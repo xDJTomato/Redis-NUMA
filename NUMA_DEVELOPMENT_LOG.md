@@ -2,8 +2,22 @@
 
 ## 更新记录
 
-**最新版本**: v2.0 (2026-02-07)  
-**上次更新**: v1.0 (2025-02)
+**最新版本**: v2.2 (2026-02-13)  
+**上次更新**: v2.1 (2026-02-13)
+
+### v2.2 更新内容 (2026-02-13)
+- ✅ **实现NUMA内存迁移模块**：新增`numa_migrate.h`和`numa_migrate.c`
+- ✅ **基础迁移功能**：支持将内存对象从Node A迁移到Node B
+- ✅ **迁移统计功能**：记录迁移次数、字节数、耗时
+- ✅ **测试验证**：创建独立测试程序验证迁移功能
+- ✅ **接口扩展**：在zmalloc.h中添加`numa_zmalloc_onnode`声明
+
+### v2.1 更新内容 (2026-02-13)
+- ✅ **内存池模块化重构**：将内存池实现从zmalloc.c分离为独立模块
+- ✅ **创建numa_pool模块**：新增`numa_pool.h`和`numa_pool.c`
+- ✅ **保持接口不变**：zmalloc.c通过模块接口调用内存池功能
+- ✅ **解决递归死锁风险**：模块内部完全避免printf等可能触发内存分配的调用
+- ✅ **便于后续扩展**：为libNUMA节点粒度分配器支持预留接口
 
 ### v2.0 更新内容 (2026-02-07)
 - ✅ **完成完整性能压测**：166K req/s (SET/GET)
@@ -24,9 +38,10 @@
 本文档详细记录Redis NUMA内存分配器的完整实现过程，包括：
 1. **PREFIX机制演进**：从标准Redis到NUMA版本的指针策略对比
 2. **内存池设计**：批量分配+按需切分的核心原理与源码实现
-3. **性能优化**：从25K到166K req/s的6倍性能提升过程
-4. **技术陷阱**：模块化失败的根因分析与解决方案
-5. **完整测试**：功能验证、性能压测与NUMA验证
+3. **模块化架构**：内存池从zmalloc.c分离为独立模块的设计
+4. **性能优化**：从25K到166K req/s的6倍性能提升过程
+5. **技术陷阱**：模块化失败的根因分析与解决方案
+6. **完整测试**：功能验证、性能压测与NUMA验证
 
 **关键成果**：
 - 🎯 性能提升：**6.6倍** (166K vs 25K req/s)
@@ -499,22 +514,204 @@ numastat -p $(pgrep redis-server)
 
 | 文件 | 修改内容 |
 |------|----------|
-| `src/zmalloc.c` | NUMA分配器实现，内存池，PREFIX机制 |
-| `src/zmalloc.h` | 头文件声明 |
-| `src/Makefile` | 强制`MALLOC=libc`，链接libnuma |
+| `src/numa_pool.h` | 内存池模块头文件，定义接口和数据结构 |
+| `src/numa_pool.c` | 内存池模块实现，64KB chunk + 8级大小分类 |
+| `src/numa_migrate.h` | 迁移模块头文件，定义迁移接口和统计结构 |
+| `src/numa_migrate.c` | 迁移模块实现，支持Node A到Node B的内存迁移 |
+| `src/zmalloc.c` | NUMA分配器实现，调用内存池模块，PREFIX机制 |
+| `src/zmalloc.h` | 头文件声明，添加numa_zmalloc_onnode声明 |
+| `src/Makefile` | 强制`MALLOC=libc`，链接libnuma，添加numa_pool.o和numa_migrate.o |
+| `test_migrate.c` | 迁移功能测试程序 |
 
 ---
 
-**文档版本**: 2.0  
+**文档版本**: 2.2  
 **创建日期**: 2025年2月  
-**最后更新**: 2026年2月7日  
+**最后更新**: 2026年2月13日  
 **作者**: Redis NUMA开发团队
 
 ---
 
-## 9. 源码级实现详解
+## 9. 模块化架构详解（v2.1新增）
 
-### 9.1 数据结构完整定义
+### 9.1 为什么需要模块化？
+
+**背景**：libNUMA当前没有提供节点粒度的内存分配器接口，但未来版本可能会添加。为了便于后续扩展，我们将内存池实现从zmalloc.c分离为独立模块。
+
+**模块化优势**：
+1. **职责分离**：zmalloc.c专注于NUMA分配器接口，numa_pool.c专注于内存池管理
+2. **易于扩展**：后续添加节点粒度功能只需修改numa_pool模块
+3. **避免递归死锁**：模块内部完全避免printf等可能触发内存分配的调用
+4. **代码复用**：内存池逻辑可被其他组件独立使用
+
+### 9.2 模块接口设计
+
+#### numa_pool.h - 公共接口
+
+```c
+/* 内存池配置常量 */
+#define NUMA_POOL_SIZE_CLASSES 8
+#define NUMA_POOL_CHUNK_SIZE (64 * 1024)
+#define NUMA_POOL_MAX_ALLOC 512
+
+/* 初始化与清理 */
+int numa_pool_init(void);
+void numa_pool_cleanup(void);
+
+/* 内存分配与释放 */
+void *numa_pool_alloc(size_t size, int node, size_t *total_size);
+void numa_pool_free(void *ptr, size_t total_size, int from_pool);
+
+/* 节点管理 */
+void numa_pool_set_node(int node);
+int numa_pool_get_node(void);
+int numa_pool_num_nodes(void);
+int numa_pool_available(void);
+
+/* 统计信息 */
+typedef struct {
+    size_t total_allocated;
+    size_t total_from_pool;
+    size_t total_direct;
+    size_t chunks_allocated;
+    size_t pool_hits;
+    size_t pool_misses;
+} numa_pool_stats_t;
+
+void numa_pool_get_stats(int node, numa_pool_stats_t *stats);
+void numa_pool_reset_stats(void);
+```
+
+### 9.3 模块内部实现
+
+#### numa_pool.c - 核心数据结构
+
+```c
+/* 内存块：从NUMA节点批量分配 */
+typedef struct numa_pool_chunk {
+    void *memory;                  /* NUMA-allocated memory */
+    size_t size;                   /* Chunk size */
+    size_t offset;                 /* Current allocation offset */
+    struct numa_pool_chunk *next;  /* Next chunk in list */
+} numa_pool_chunk_t;
+
+/* 大小级别池 */
+typedef struct {
+    size_t obj_size;               /* Object size for this class */
+    numa_pool_chunk_t *chunks;     /* Chunk list */
+    pthread_mutex_t lock;          /* Thread safety */
+    size_t chunks_count;           /* Statistics */
+} numa_size_class_pool_t;
+
+/* 每个节点的内存池 */
+typedef struct numa_node_pool {
+    int node_id;
+    numa_size_class_pool_t pools[NUMA_POOL_SIZE_CLASSES];
+    numa_pool_stats_t stats;
+} numa_node_pool_t;
+```
+
+### 9.4 zmalloc.c与模块的交互
+
+#### 初始化流程
+
+```c
+void numa_init(void)
+{
+    /* 调用内存池模块初始化 */
+    if (numa_pool_init() != 0) {
+        numa_ctx.numa_available = 0;
+        return;
+    }
+    
+    numa_ctx.numa_available = numa_pool_available();
+    numa_ctx.num_nodes = numa_pool_num_nodes();
+    numa_ctx.current_node = numa_pool_get_node();
+    /* ... */
+}
+```
+
+#### 分配流程
+
+```c
+static void *numa_alloc_with_size(size_t size)
+{
+    size_t total_size = size + PREFIX_SIZE;
+    size_t alloc_size;
+    
+    /* 使用内存池分配 */
+    void *raw_ptr = numa_pool_alloc(total_size, numa_ctx.current_node, &alloc_size);
+    if (!raw_ptr)
+        return NULL;
+    
+    /* 判断是否来自内存池 */
+    int from_pool = (total_size <= NUMA_POOL_MAX_ALLOC) ? 1 : 0;
+
+    numa_init_prefix(raw_ptr, size, from_pool);
+    update_zmalloc_stat_alloc(total_size);
+    return numa_to_user_ptr(raw_ptr);
+}
+```
+
+#### 释放流程
+
+```c
+static void numa_free_with_size(void *user_ptr)
+{
+    if (user_ptr == NULL)
+        return;
+
+    numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
+    size_t total_size = prefix->size + PREFIX_SIZE;
+
+    update_zmalloc_stat_free(total_size);
+
+    /* 使用内存池释放 */
+    void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
+    numa_pool_free(raw_ptr, total_size, prefix->from_pool);
+}
+```
+
+### 9.5 关键设计决策
+
+#### 为什么模块内部不能使用printf？
+
+**问题**：printf内部会调用malloc，如果内存池模块在分配路径中使用printf，会形成递归：
+```
+numa_pool_alloc() → printf() → malloc() → zmalloc() → numa_pool_alloc() → 死锁
+```
+
+**解决方案**：
+1. 模块内部完全禁止printf
+2. 使用libc的malloc/free管理内部元数据（chunk headers等）
+3. 仅使用numa_alloc_onnode/numa_free管理实际内存块
+
+#### 模块间的依赖关系
+
+```
+┌─────────────────────────────────────┐
+│           zmalloc.c                 │
+│  (NUMA分配器接口，PREFIX管理)        │
+└──────────────┬──────────────────────┘
+               │ #include "numa_pool.h"
+               ▼
+┌─────────────────────────────────────┐
+│         numa_pool.c/h               │
+│  (内存池实现，64KB chunk管理)        │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│         libnuma.so                  │
+│  (numa_alloc_onnode, numa_free)     │
+└─────────────────────────────────────┘
+```
+
+---
+
+## 10. 源码级实现详解
+
+### 10.1 数据结构完整定义
 
 #### PREFIX结构体（zmalloc.c）
 
@@ -538,13 +735,5 @@ typedef struct {
 详细内容请参考完整版本...
 
 ---
-
-## 10. 技术陷阱与解决方案
-
-### 10.1 模块化失败：printf递归死锁
-
-尝试将NUMA内存池重构为独立模块时，服务器启动卡死。根因是`pool_alloc()`函数中使用`printf`进行调试输出，而`printf`内部会调用`malloc`，触发`zmalloc`，再次进入`pool_alloc`获取同一把锁，导致死锁。
-
-**解决方案**：回滚到zmalloc.c内直接实现，避免在内存池核心路径使用任何可能分配内存的库函数。
 
 ---
