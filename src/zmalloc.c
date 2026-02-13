@@ -86,7 +86,8 @@ void numa_init(void)
     numa_ctx.num_nodes = numa_pool_num_nodes();
     numa_ctx.current_node = numa_pool_get_node();
     tls_current_node = numa_ctx.current_node;
-    numa_ctx.allocation_strategy = NUMA_STRATEGY_LOCAL_FIRST;
+    /* 改为交错分配策略，实现跨节点负载均衡 */
+    numa_ctx.allocation_strategy = NUMA_STRATEGY_INTERLEAVE;
 
     /* 初始化节点距离顺序 */
     numa_ctx.node_distance_order = malloc(numa_ctx.num_nodes * sizeof(int));
@@ -235,8 +236,13 @@ static void *numa_alloc_with_size(size_t size)
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
     
-    /* 使用内存池分配 */
-    void *raw_ptr = numa_pool_alloc(total_size, numa_ctx.current_node, &alloc_size);
+    /* 轮询选择NUMA节点实现负载均衡 */
+    static __thread int round_robin_index = 0;
+    int target_node = round_robin_index % numa_ctx.num_nodes;
+    round_robin_index++;
+    
+    /* 使用内存池分配到选定节点 */
+    void *raw_ptr = numa_pool_alloc(total_size, target_node, &alloc_size);
     if (!raw_ptr)
         return NULL;
     

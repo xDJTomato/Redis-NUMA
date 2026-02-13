@@ -4,6 +4,7 @@
  */
 
 #include "numa_strategy_slots.h"
+#include "numa_composite_lru.h"
 #include "zmalloc.h"
 #include <string.h>
 #include <sys/time.h>
@@ -189,6 +190,11 @@ int numa_strategy_register_noop(void) {
     return numa_strategy_register_factory(&noop_strategy_factory);
 }
 
+/* 注册1号策略（转发到composite_lru模块） */
+int numa_strategy_register_composite_lru(void) {
+    return numa_composite_lru_register();
+}
+
 /* ========== 策略管理器实现 ========== */
 
 /* 初始化策略管理器 */
@@ -212,8 +218,21 @@ int numa_strategy_init(void) {
         return NUMA_STRATEGY_ERR;
     }
     
+    /* 注册内置的1号策略（Composite LRU） */
+    if (numa_strategy_register_composite_lru() != NUMA_STRATEGY_OK) {
+        STRATEGY_LOG(LL_WARNING, "[NUMA Strategy] Failed to register composite-lru strategy");
+        /* 1号策略注册失败不影响框架初始化 */
+    } else {
+        /* 自动创建并插入1号策略到slot 1 */
+        if (numa_strategy_slot_insert(1, "composite-lru") != NUMA_STRATEGY_OK) {
+            STRATEGY_LOG(LL_WARNING, "[NUMA Strategy] Failed to insert composite-lru to slot 1");
+        } else {
+            STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Composite LRU strategy inserted to slot 1");
+        }
+    }
+    
     strategy_manager.initialized = 1;
-    STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Strategy slot framework initialized (slot 0 ready)");
+    STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Strategy slot framework initialized (slots 0,1 ready)");
     
     return NUMA_STRATEGY_OK;
 }

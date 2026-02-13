@@ -142,6 +142,39 @@ numa_strategy_register_factory(&my_strategy_factory);
 - 📦 类型适配器（STRING/HASH/LIST/SET/ZSET）
 - 📊 完整元数据管理
 
+### 5. 可配置NUMA策略 (v2.5)
+
+**模块**: `src/numa_configurable_strategy.h`, `src/numa_config_command.c`
+
+**功能**：
+- ⚙️ 6种分配策略（本地优先、交错、轮询、加权、压力感知、CXL优化）
+- 🎛️ 动态配置管理（运行时调整策略参数）
+- 📡 Redis命令接口（NUMACONFIG命令）
+- 📈 实时统计和监控
+- ⚖️ 自动负载均衡
+
+**使用示例**：
+```bash
+# 查看当前配置
+redis-cli NUMACONFIG GET
+
+# 设置分配策略
+redis-cli NUMACONFIG SET strategy round_robin
+
+# 配置节点权重
+redis-cli NUMACONFIG SET weight 0 80
+redis-cli NUMACONFIG SET weight 1 120
+
+# 启用CXL优化
+redis-cli NUMACONFIG SET cxl_optimization on
+
+# 查看统计信息
+redis-cli NUMACONFIG STATS
+
+# 手动触发重新平衡
+redis-cli NUMACONFIG REBALANCE
+```
+
 **热度追踪**：
 ```c
 // 在Key访问时自动记录热度
@@ -607,11 +640,16 @@ perf mem report
 ```conf
 # redis.conf
 
-# NUMA优化配置（TODO: 添加配置项）
-# numa-enabled yes
-# numa-default-node 0
-# numa-migration-threshold 5
-# numa-heat-decay-interval 10000
+# NUMA优化配置
+numa-enabled yes
+numa-default-strategy interleaved
+numa-balance-threshold 30
+numa-auto-rebalance yes
+numa-cxl-optimization disabled
+
+# 节点权重配置
+numa-node-weight 0 100
+numa-node-weight 1 100
 ```
 
 ### 环境变量
@@ -687,6 +725,7 @@ export NUMA_DEBUG=1
 - [x] 策略插槽框架 (v2.3)
 - [x] Key级别迁移框架 (v2.4)
 - [x] STRING类型迁移
+- [x] 可配置NUMA策略 (v2.5)
 
 ### 进行中 🚧
 

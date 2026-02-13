@@ -2,9 +2,9 @@
 
 ## 模块概述
 
-**状态**: ✅ **已实现** - 插槽框架和0号兜底策略已完成
+**状态**: ✅ **已实现** - 插槽框架、0号兜底策略和1号默认策略已完成
 
-**文件**: [src/numa_strategy_slots.h](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_strategy_slots.h), [src/numa_strategy_slots.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_strategy_slots.c)
+**文件**: [src/numa_strategy_slots.h](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_strategy_slots.h), [src/numa_strategy_slots.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_strategy_slots.c), [src/numa_composite_lru.h](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_composite_lru.h), [src/numa_composite_lru.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_composite_lru.c)
 
 **功能**: 提供插槽化策略管理框架，支持动态加载、配置和组合多种NUMA负载策略。
 
@@ -12,7 +12,7 @@
 - 策略模块化：每个策略独立实现，通过统一接口接入
 - 插槽机制：策略按插槽编号组织，支持动态插拔
 - 组合使用：多个策略可同时生效，按优先级执行
-- 已实现：0号no-op兜底策略，用于验证框架可用性
+- 已实现：0号no-op兜底策略和1号composite-lru默认策略
 
 ---
 
@@ -26,7 +26,7 @@
 │  numa_strategy_manager                                      │
 ├─────────────────────────────────────────────────────────────┤
 │  插槽0: [No-op兜底策略]   ← ✅ 已实现，默认启用             │
-│  插槽1: [复合LRU策略]     ← ⚠️ 规划中，将来作为默认策略  │
+│  插槽1: [复合LRU策略]     ← ✅ 已实现，作为默认策略        │
 │  插槽2: [用户策略A]       ← 可选                              │
 │  插槽3: [用户策略B]       ← 可选                              │
 │  插槽4: [用户策略C]       ← 可选                              │
@@ -37,7 +37,7 @@
 
 **插槽编号说明**：
 - **插槽0**：对外暴露的no-op兜底策略，默认启用，用于验证框架可用性
-- **插槽1**：保留给复合LRU默认策略（尚未实现）
+- **插槽1**：复合LRU默认策略，已实现，提供稳定性优先的热度管理
 - **插槽2+**：用户可自定义策略插槽
 
 ### 策略接口定义
@@ -166,9 +166,9 @@ static int noop_strategy_execute(numa_strategy_t *strategy) {
 
 ---
 
-## 1号默认策略：复合LRU策略（规划中）
+## 1号默认策略：复合LRU策略（已实现）
 
-⚠️ **当前状态**：未实现，仅为规划文档。
+✅ **当前状态**：已实现并自动加载到插槽1。
 
 复合LRU策略是系统内置的默认策略，详细实现请参见独立文档 [07-numa-composite-lru.md](./07-numa-composite-lru.md)。
 
@@ -186,6 +186,14 @@ static int noop_strategy_execute(numa_strategy_t *strategy) {
 #define COMPOSITE_LRU_DEFAULT_STABILITY_COUNT    3         /* 连续3次 */
 #define COMPOSITE_LRU_DEFAULT_MIGRATE_THRESHOLD  5         /* 热度阈值 */
 #define COMPOSITE_LRU_DEFAULT_OVERLOAD_THRESHOLD 0.8       /* 80%负载 */
+```
+
+### 启动日志示例
+
+```
+[Composite LRU] Strategy initialized (slot 1 default)
+[NUMA Strategy] Inserted strategy 'composite-lru' to slot 1
+[NUMA Strategy] Strategy slot framework initialized (slots 0,1 ready)
 ```
 
 ---
@@ -349,65 +357,249 @@ static void numa_strategy_auto_tune(void) {
 
 ---
 
-## 策略开发规范
+## 策略工厂通俗解释
 
-### 策略工厂模板
+### 什么是策略工厂？
+
+**简单理解**：策略工厂就像一个"策略制造机"，告诉框架"如何生产"一个策略。框架通过这个工厂来创建、销毁策略实例。
+
+**类比**：就像汽车工厂，不是直接把汽车给用户，而是告诉用户"来我这里可以买到汽车"。框架也是通过工厂来"订购"策略。
+
+### 工厂的核心组成
 
 ```c
-/* 策略工厂定义模板 */
+/* 策略工厂 = 策略的"生产说明书" */
 typedef struct {
-    const char *name;
-    const char *description;
-    numa_strategy_type_t type;
-    numa_strategy_priority_t default_priority;
-    uint64_t default_interval_us;
+    const char *name;                    /* 策略名字（如"composite-lru"） */
+    const char *description;             /* 策略简介 */
+    numa_strategy_type_t type;           /* 策略类型（定期执行/事件驱动） */
+    numa_strategy_priority_t default_priority;  /* 优先级（高/中/低） */
+    uint64_t default_interval_us;        /* 默认执行间隔（微秒） */
     
-    numa_strategy_t* (*create)(void);
-    void (*destroy)(numa_strategy_t *strategy);
+    /* 两个关键函数：创建和销毁 */
+    numa_strategy_t* (*create)(void);    /* 制造策略 */
+    void (*destroy)(numa_strategy_t *strategy);  /* 销毁策略 */
 } numa_strategy_factory_t;
+```
 
-/* 策略实现模板 */
-static int my_strategy_execute(numa_strategy_t *strategy) {
-    my_strategy_data_t *data = strategy->private_data;
-    
-    /* 实现策略逻辑 */
-    // ...
-    
-    return NUMA_OK;
-}
+### 为什么要用工厂模式？
 
-static numa_strategy_t* my_strategy_create(void) {
-    numa_strategy_t *strategy = zcalloc(sizeof(numa_strategy_t));
-    my_strategy_data_t *data = zcalloc(sizeof(my_strategy_data_t));
+**问题**：如果直接创建策略，框架需要知道每个策略的具体细节（需要多少内存、如何初始化等）。
+
+**解决**：工厂模式让框架只关心"接口"，不关心"实现"。就像你去餐厅点菜，只需要说"我要一份炒饭"，不需要知道厨师怎么做。
+
+```
+┌─────────────────────────────────────────┐
+│           策略插槽框架                   │
+│  "我要一个composite-lru策略"            │
+└──────────────┬──────────────────────────┘
+               │ 调用 create()
+               ▼
+┌─────────────────────────────────────────┐
+│      composite-lru 策略工厂             │
+│  1. 分配内存                            │
+│  2. 设置参数（10秒衰减、热度阈值5等）    │
+│  3. 创建热度表                          │
+│  4. 返回策略实例                        │
+└─────────────────────────────────────────┘
+```
+
+### 完整实现示例
+
+以1号策略（复合LRU）为例，看看工厂如何工作：
+
+**第一步：定义策略的"身体"（数据结构）**
+
+```c
+/* 策略实例 = 策略的"身体" */
+struct numa_strategy_s {
+    int slot_id;                    /* 住在哪个插槽（如1号） */
+    const char *name;               /* 名字 */
+    const char *description;        /* 简介 */
     
-    /* 初始化数据 */
-    // ...
+    numa_strategy_type_t type;      /* 类型：定期执行 */
+    numa_strategy_priority_t priority;  /* 优先级：高 */
+    int enabled;                    /* 是否启用 */
+    uint64_t execute_interval_us;   /* 多久执行一次（1秒） */
+    
+    const numa_strategy_vtable_t *vtable;  /* 策略的"技能表" */
+    void *private_data;             /* 策略的"私有物品" */
+};
+
+/* 1号策略的私有数据 */
+typedef struct {
+    uint32_t decay_threshold;       /* 热度衰减时间（10秒） */
+    uint8_t  stability_count;       /* 稳定计数器（3次） */
+    dict    *key_heat_map;          /* 每个key的热度表 */
+    list    *pending_migrations;    /* 待迁移队列 */
+    uint64_t heat_updates;          /* 统计：热度更新次数 */
+} composite_lru_data_t;
+```
+
+**第二步：定义策略的"技能"（虚函数表）**
+
+```c
+/* 虚函数表 = 策略的"技能清单" */
+static const numa_strategy_vtable_t composite_lru_vtable = {
+    .init = composite_lru_init,           /* 初始化技能 */
+    .execute = composite_lru_execute,     /* 执行技能 */
+    .cleanup = composite_lru_cleanup,     /* 清理技能 */
+    .get_name = composite_lru_get_name,   /* 报名字 */
+    .get_description = composite_lru_get_description,  /* 报简介 */
+    .set_config = composite_lru_set_config,  /* 改配置 */
+    .get_config = composite_lru_get_config   /* 查配置 */
+};
+```
+
+**第三步：实现"制造"函数（create）**
+
+```c
+/* 制造一个1号策略实例 */
+static numa_strategy_t* composite_lru_create(void) {
+    /* 1. 分配策略主体内存 */
+    numa_strategy_t *strategy = zmalloc(sizeof(*strategy));
+    if (!strategy) return NULL;
+    
+    memset(strategy, 0, sizeof(*strategy));
+    
+    /* 2. 填写基本信息 */
+    strategy->slot_id = 1;  /* 默认住1号插槽 */
+    strategy->name = "composite-lru";
+    strategy->description = "Stability-first composite LRU strategy";
+    strategy->type = STRATEGY_TYPE_PERIODIC;  /* 定期执行 */
+    strategy->priority = STRATEGY_PRIORITY_HIGH;  /* 高优先级 */
+    strategy->enabled = 1;  /* 默认启用 */
+    strategy->execute_interval_us = 1000000;  /* 1秒执行一次 */
+    strategy->vtable = &composite_lru_vtable;  /* 绑定技能表 */
+    
+    /* 3. 创建私有数据（策略的"个人物品"） */
+    composite_lru_data_t *data = zmalloc(sizeof(*data));
+    if (!data) {
+        zfree(strategy);
+        return NULL;
+    }
+    
+    /* 4. 初始化私有数据 */
+    data->decay_threshold = 10000000;  /* 10秒 */
+    data->stability_count = 3;         /* 3次 */
+    data->migrate_hotness_threshold = 5;  /* 热度>=5触发迁移 */
+    data->key_heat_map = dictCreate(&heat_map_dict_type, NULL);
+    data->pending_migrations = listCreate();
     
     strategy->private_data = data;
-    strategy->vtable = &my_strategy_vtable;
-    strategy->type = STRATEGY_TYPE_PERIODIC;
-    strategy->priority = STRATEGY_PRIORITY_NORMAL;
-    strategy->execute_interval_us = 5000000;  /* 5秒 */
     
     return strategy;
 }
+```
 
-/* 注册策略 */
-static numa_strategy_factory_t my_strategy_factory = {
-    .name = "my_strategy",
-    .description = "自定义策略描述",
-    .type = STRATEGY_TYPE_PERIODIC,
-    .default_priority = STRATEGY_PRIORITY_NORMAL,
-    .default_interval_us = 5000000,
-    .create = my_strategy_create,
-    .destroy = numa_strategy_destroy
-};
+**第四步：实现"销毁"函数（destroy）**
 
-/* 在模块初始化时注册 */
-int my_strategy_module_init(void) {
-    return numa_strategy_register_factory(&my_strategy_factory);
+```c
+/* 销毁一个1号策略实例 */
+static void composite_lru_destroy(numa_strategy_t *strategy) {
+    if (!strategy) return;
+    
+    /* 1. 调用清理函数（如果有） */
+    if (strategy->vtable && strategy->vtable->cleanup) {
+        strategy->vtable->cleanup(strategy);
+    }
+    
+    /* 2. 释放私有数据 */
+    if (strategy->private_data) {
+        composite_lru_data_t *data = strategy->private_data;
+        
+        /* 释放热度表 */
+        if (data->key_heat_map) {
+            dictRelease(data->key_heat_map);
+        }
+        
+        /* 释放待迁移队列 */
+        if (data->pending_migrations) {
+            listRelease(data->pending_migrations);
+        }
+        
+        zfree(data);
+    }
+    
+    /* 3. 释放策略主体 */
+    zfree(strategy);
 }
 ```
+
+**第五步：组装工厂并注册**
+
+```c
+/* 定义工厂 */
+static numa_strategy_factory_t composite_lru_factory = {
+    .name = "composite-lru",
+    .description = "Stability-first composite LRU strategy",
+    .type = STRATEGY_TYPE_PERIODIC,
+    .default_priority = STRATEGY_PRIORITY_HIGH,
+    .default_interval_us = 1000000,  /* 1秒 */
+    .create = composite_lru_create,
+    .destroy = composite_lru_destroy
+};
+
+/* 注册工厂到框架 */
+int numa_composite_lru_register(void) {
+    return numa_strategy_register_factory(&composite_lru_factory);
+}
+```
+
+### 框架如何使用工厂？
+
+```
+┌─────────────────────────────────────────────────────┐
+│  框架初始化流程                                       │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│  1. 注册工厂                                         │
+│     numa_strategy_register_factory(&factory)        │
+│                                                     │
+│     框架记住："composite-lru" → create/destroy     │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│  2. 创建策略实例                                     │
+│     numa_strategy_slot_insert(1, "composite-lru")  │
+│                                                     │
+│     框架调用：factory->create()                     │
+│     得到一个完整的策略实例                          │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│  3. 执行策略                                         │
+│     numa_strategy_run_slot(1)                       │
+│                                                     │
+│     框架调用：strategy->vtable->execute(strategy)   │
+│     策略执行自己的逻辑                              │
+└─────────────────────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────┐
+│  4. 销毁策略                                         │
+│     numa_strategy_slot_remove(1)                    │
+│                                                     │
+│     框架调用：factory->destroy(strategy)            │
+│     清理所有资源                                    │
+└─────────────────────────────────────────────────────┘
+```
+
+### 关键要点总结
+
+| 概念 | 通俗理解 | 代码对应 |
+|-----|---------|---------|
+| 工厂 | 策略的"生产说明书" | `numa_strategy_factory_t` |
+| create | "制造"策略的函数 | `composite_lru_create()` |
+| destroy | "销毁"策略的函数 | `composite_lru_destroy()` |
+| 策略实例 | 策略的"身体" | `numa_strategy_t` |
+| 私有数据 | 策略的"个人物品" | `private_data` |
+| 虚函数表 | 策略的"技能清单" | `vtable` |
+| 注册 | 把"说明书"交给框架 | `numa_strategy_register_factory()` |
 
 ---
 
@@ -454,3 +646,79 @@ NUMA.METRICS.RESET              # 重置统计数据
 4. **可配置**：丰富的运行时配置选项
 5. **可观测**：完善的监控和统计机制
 6. **高性能**：优先级调度，避免策略冲突
+
+---
+
+## 开发日志
+
+### v1.1 1号策略集成 (2026-02-14)
+
+#### 实现目标
+将1号策略（复合LRU）集成到策略插槽框架中，实现自动注册和加载。
+
+#### 修改文件
+
+| 文件 | 变更 |
+|-----|------|
+| `src/numa_strategy_slots.h` | +1行：添加`numa_strategy_register_composite_lru()`声明 |
+| `src/numa_strategy_slots.c` | +20行：包含头文件、注册工厂、插入slot 1 |
+| `src/Makefile` | +1处：添加`numa_composite_lru.o` |
+
+#### 集成流程
+
+```c
+/* 在 numa_strategy_init() 中添加 */
+/* 注册内置的1号策略（Composite LRU） */
+if (numa_strategy_register_composite_lru() != NUMA_STRATEGY_OK) {
+    STRATEGY_LOG(LL_WARNING, "Failed to register composite-lru");
+} else {
+    /* 自动创建并插入1号策略到slot 1 */
+    if (numa_strategy_slot_insert(1, "composite-lru") != NUMA_STRATEGY_OK) {
+        STRATEGY_LOG(LL_WARNING, "Failed to insert composite-lru to slot 1");
+    }
+}
+```
+
+#### 启动验证
+
+```
+[Composite LRU] Strategy initialized (slot 1 default)
+[NUMA Strategy] Inserted strategy 'composite-lru' to slot 1
+[NUMA Strategy] Composite LRU strategy inserted to slot 1
+[NUMA Strategy] Strategy slot framework initialized (slots 0,1 ready)
+```
+
+---
+
+### v1.0 策略插槽框架实现 (2026-02-XX)
+
+#### 实现目标
+实现NUMA策略插槽框架，提供策略的注册、管理和调度功能。
+
+#### 核心功能
+1. **策略工厂机制**：支持动态注册策略类型
+2. **插槽管理**：16个插槽，支持动态插拔
+3. **执行调度**：按优先级执行，支持间隔控制
+4. **0号兜底策略**：no-op策略验证框架可用性
+
+#### 文件结构
+- `src/numa_strategy_slots.h` - 头文件，定义接口和数据结构
+- `src/numa_strategy_slots.c` - 实现文件，框架核心逻辑
+
+#### 关键接口
+```c
+/* 工厂注册 */
+int numa_strategy_register_factory(const numa_strategy_factory_t *factory);
+
+/* 插槽操作 */
+int numa_strategy_slot_insert(int slot_id, const char *strategy_name);
+int numa_strategy_slot_remove(int slot_id);
+int numa_strategy_slot_enable(int slot_id);
+int numa_strategy_slot_disable(int slot_id);
+
+/* 执行调度 */
+void numa_strategy_run_all(void);
+int numa_strategy_run_slot(int slot_id);
+```
+
+---

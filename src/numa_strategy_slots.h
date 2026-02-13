@@ -122,5 +122,6 @@ int numa_strategy_run_slot(int slot_id);            /* 执行指定插槽策略 
 
 /* 内置策略注册函数 */
 int numa_strategy_register_noop(void);               /* 注册0号兜底策略 */
+int numa_strategy_register_composite_lru(void);      /* 注册1号默认策略 */
 
 #endif /* NUMA_STRATEGY_SLOTS_H */
