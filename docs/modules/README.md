@@ -57,10 +57,16 @@
 
 ## 文档导航
 
+### 核心模块文档
 - [01-numa-pool.md](./01-numa-pool.md) - NUMA内存池模块详解
 - [02-numa-migrate.md](./02-numa-migrate.md) - NUMA迁移模块详解
 - [03-zmalloc-numa.md](./03-zmalloc-numa.md) - zmalloc NUMA适配详解
 - [04-call-chain.md](./04-call-chain.md) - 业务调用链分析
+
+### Key级别迁移与策略框架
+- [05-numa-key-migrate.md](./05-numa-key-migrate.md) - Key级别迁移核心模块
+- [06-numa-strategy-slots.md](./06-numa-strategy-slots.md) - 策略插槽框架
+- [07-numa-composite-lru.md](./07-numa-composite-lru.md) - 复合LRU策略实现
 
 ## 版本历史
 

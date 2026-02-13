@@ -75,6 +75,10 @@ typedef long long ustime_t; /* microsecond time type. */
 #include "rax.h"     /* Radix tree */
 #include "connection.h" /* Connection abstraction */
 
+#ifdef HAVE_NUMA
+#include "numa_strategy_slots.h" /* NUMA strategy slot framework */
+#endif
+
 #define REDISMODULE_CORE 1
 #include "redismodule.h"    /* Redis modules API defines. */
 
@@ -2775,5 +2779,11 @@ int tlsConfigure(redisTLSContextConfig *ctx_config);
     printf("-- MARK %s:%d --\n", __FILE__, __LINE__)
 
 int iAmMaster(void);
+
+/* NUMA modules */
+#ifdef HAVE_NUMA
+#include "numa_strategy_slots.h"
+#include "numa_key_migrate.h"
+#endif
 
 #endif

@@ -2244,6 +2244,13 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         migrateCloseTimedoutSockets();
     }
 
+#ifdef HAVE_NUMA
+    /* Run NUMA strategy slot framework */
+    run_with_period(1000) {
+        numa_strategy_run_all();
+    }
+#endif
+
     /* Stop the I/O threads if we don't have enough pending work. */
     stopThreadedIOIfNeeded();
 
@@ -6456,6 +6463,19 @@ int main(int argc, char **argv) {
 
     readOOMScoreAdj();
     initServer();
+    
+#ifdef HAVE_NUMA
+    /* 初始化NUMA策略插槽框架（必须在 initServer() 之后） */
+    printf("DEBUG: 调用numa_strategy_init()\n");
+    numa_strategy_init();
+    printf("DEBUG: numa_strategy_init()完成\n");
+    
+    /* 初始化NUMA Key迁移模块 */
+    if (numa_key_migrate_init() != NUMA_KEY_MIGRATE_OK) {
+        serverLog(LL_WARNING, "Failed to initialize NUMA key migration module");
+    }
+#endif
+    
     if (background || server.pidfile) createPidFile();
     if (server.set_proc_title) redisSetProcTitle(NULL);
     redisAsciiArt();
