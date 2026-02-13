@@ -128,4 +128,9 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node);
 int migrate_set_type(robj *key_obj, robj *val_obj, int target_node);
 int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node);
 
+/* ========== Redis Command Interface ========== */
+
+/* NUMAMIGRATE command handler */
+void numamigrateCommand(client *c);
+
 #endif /* NUMA_KEY_MIGRATE_H */

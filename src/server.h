@@ -2599,6 +2599,7 @@ void persistCommand(client *c);
 void replicaofCommand(client *c);
 void roleCommand(client *c);
 void debugCommand(client *c);
+void numamigrateCommand(client *c);
 void msetCommand(client *c);
 void msetnxCommand(client *c);
 void zaddCommand(client *c);
