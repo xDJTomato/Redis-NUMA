@@ -135,6 +135,25 @@ double numa_config_get_node_utilization(int node_id);
 int numa_config_needs_rebalance(void);
 ```
 
+### Redis命令接口API
+```c
+// NUMACONFIG命令处理函数
+void numaconfigCommand(client *c);
+
+// 响应构建函数（使用现代API）
+void addReplyArrayLen(client *c, long length);  // 替代addReplyMultiBulkLen
+void addReplyBulkCString(client *c, const char *str);
+void addReplyLongLong(client *c, long long ll);
+```
+
+## API变更历史
+
+### v1.1 (2026-02-14)
+- **现代化API更新**：将所有`addReplyMultiBulkLen`调用替换为`addReplyArrayLen`
+- **原因**：`addReplyArrayLen`是Redis推荐的现代API，提供更好的类型安全和性能
+- **影响范围**：NUMACONFIG命令的所有响应构建部分
+- **兼容性**：完全向后兼容，不影响外部接口
+
 ## 实现架构
 
 ### 核心组件
@@ -268,11 +287,16 @@ NUMACONFIG MONITOR
 
 ## 版本历史
 
-### v1.0 (当前版本)
-- 基础可配置策略框架
-- 6种分配策略实现
-- 配置文件和命令行接口
-- 基本监控统计功能
+### v1.1 (2026-02-14)
+- ✅ API现代化：使用`addReplyArrayLen`替代`addReplyMultiBulkLen`
+- ✅ 性能优化：改进响应构建效率
+- ✅ 代码质量：提升类型安全性
+
+### v1.0 (2026-02-14)
+- ✅ 基础可配置策略框架
+- ✅ 6种分配策略实现
+- ✅ 配置文件和命令行接口
+- ✅ 基本监控统计功能
 
 ### 规划功能
 - 更智能的自适应策略

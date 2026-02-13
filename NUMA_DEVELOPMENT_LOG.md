@@ -14,6 +14,7 @@
 - ✅ **自动负载均衡**：基于配置阈值的自动重新平衡机制
 - ✅ **完整测试覆盖**：创建`test_numa_config.sh`进行全面功能测试
 - ✅ **详细文档**：编写`docs/modules/08-numa-configurable-strategy.md`模块文档
+- ✅ **API现代化**：将`addReplyMultiBulkLen`更新为`addReplyArrayLen`以使用现代Redis API
 
 ### v2.4 更新内容 (2026-02-13)
 - ✅ **实现NUMA Key级别迁移模块**：新增`numa_key_migrate.h`和`numa_key_migrate.c`

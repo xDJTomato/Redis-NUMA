@@ -726,6 +726,7 @@ export NUMA_DEBUG=1
 - [x] Key级别迁移框架 (v2.4)
 - [x] STRING类型迁移
 - [x] 可配置NUMA策略 (v2.5)
+- [x] API现代化更新 (使用addReplyArrayLen替代addReplyMultiBulkLen)
 
 ### 进行中 🚧
 
