@@ -147,6 +147,39 @@ get_redis_pid() {
     pgrep -f "redis-server.*${REDIS_PORT}" | head -1
 }
 
+# 启动Redis服务器
+start_redis_server() {
+    log_info "检测到Redis未运行，正在启动..."
+    
+    # 清理旧的持久化文件
+    rm -f "${REDIS_DIR}/dump.rdb" "${REDIS_DIR}/appendonly.aof" 2>/dev/null
+    
+    # 启动Redis（禁用持久化，减少IO干扰）
+    "$REDIS_SERVER" \
+        --daemonize yes \
+        --loglevel warning \
+        --save "" \
+        --appendonly no \
+        --port "$REDIS_PORT" \
+        --bind "$REDIS_HOST" 2>&1 | grep -v "DEBUG:" || true
+    
+    # 等待Redis启动
+    local retry=0
+    local max_retry=10
+    while [ $retry -lt $max_retry ]; do
+        if check_redis; then
+            log_info "Redis启动成功 (端口: $REDIS_PORT)"
+            sleep 1  # 额外等待确保完全就绪
+            return 0
+        fi
+        retry=$((retry + 1))
+        sleep 1
+    done
+    
+    log_error "Redis启动失败，超时"
+    return 1
+}
+
 # 检查诊断工具是否可用
 check_diag_tool() {
     local tool="$1"
@@ -294,12 +327,60 @@ analyze_memory_fragmentation() {
     
     mkdir -p "$DIAG_DIR"
     
-    # Redis碎片率
-    local frag_ratio=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" INFO memory 2>/dev/null | \
-        grep "mem_fragmentation_ratio:" | cut -d: -f2 | tr -d '\r\n')
+    # 获取Redis内存统计
+    local memory_info=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" INFO memory 2>/dev/null)
     
-    log_info "内存碎片率: $frag_ratio"
-    echo "Fragmentation_Ratio: $frag_ratio" >> "${DIAG_DIR}/fragmentation.txt"
+    # Redis内置碎片率
+    local redis_frag_ratio=$(echo "$memory_info" | grep "mem_fragmentation_ratio:" | cut -d: -f2 | tr -d '\r\n')
+    
+    # 获取used_memory和used_memory_rss（字节）
+    local used_memory=$(echo "$memory_info" | grep "^used_memory:" | cut -d: -f2 | tr -d '\r\n')
+    local used_memory_rss=$(echo "$memory_info" | grep "^used_memory_rss:" | cut -d: -f2 | tr -d '\r\n')
+    
+    # 转换为MB（避免整数溢出）
+    local used_mb=0
+    local rss_mb=0
+    local custom_frag_ratio="N/A"
+    local mem_efficiency="N/A"
+    
+    if [ -n "$used_memory" ] && [ "$used_memory" -gt 0 ]; then
+        used_mb=$((used_memory / 1024 / 1024))
+        rss_mb=$((used_memory_rss / 1024 / 1024))
+        
+        # 使用bc计算精确碎片率（支持高内存环境）
+        if [ "$used_mb" -gt 0 ]; then
+            custom_frag_ratio=$(echo "scale=2; $rss_mb / $used_mb" | bc)
+            mem_efficiency=$(echo "scale=1; $used_mb * 100 / $rss_mb" | bc)
+        fi
+    fi
+    
+    # 输出结果
+    log_info "Redis内置碎片率: $redis_frag_ratio"
+    log_info "自定义碎片率: $custom_frag_ratio (RSS: ${rss_mb}MB / Used: ${used_mb}MB)"
+    log_info "内存效率: ${mem_efficiency}%"
+    
+    # 保存到文件
+    {
+        echo "Redis_Fragmentation_Ratio: $redis_frag_ratio"
+        echo "Custom_Fragmentation_Ratio: $custom_frag_ratio"
+        echo "Used_Memory_MB: $used_mb"
+        echo "RSS_Memory_MB: $rss_mb"
+        echo "Memory_Efficiency: ${mem_efficiency}%"
+    } > "${DIAG_DIR}/fragmentation.txt"
+    
+    # 判断碎片率状态
+    if [ "$custom_frag_ratio" != "N/A" ]; then
+        local is_good=$(echo "$custom_frag_ratio <= 1.5" | bc -l)
+        local is_excellent=$(echo "$custom_frag_ratio <= 1.1" | bc -l)
+        
+        if [ "$is_excellent" -eq 1 ]; then
+            log_info "✅ 碎片率优秀: $custom_frag_ratio <= 1.1 (P2目标达成)"
+        elif [ "$is_good" -eq 1 ]; then
+            log_info "✅ 碎片率良好: $custom_frag_ratio <= 1.5 (P1目标达成)"
+        else
+            log_info "⚠️  碎片率偏高: $custom_frag_ratio > 1.5"
+        fi
+    fi
     
     # 详细的内存块分布（如果有的话）
     if [ -f "/proc/$pid/smaps" ]; then
@@ -1015,9 +1096,12 @@ main() {
     
     # 检查Redis
     if ! check_redis; then
-        log_error "Redis未运行，请先启动Redis服务器"
-        log_info "启动命令: $REDIS_SERVER --loglevel verbose"
-        exit 1
+        log_warn "Redis未运行，尝试自动启动..."
+        if ! start_redis_server; then
+            log_error "Redis启动失败，请手动启动Redis服务器"
+            log_info "手动启动命令: $REDIS_SERVER --loglevel verbose"
+            exit 1
+        fi
     fi
     log_info "Redis连接正常"
     
@@ -1117,10 +1201,15 @@ quick_test() {
     mkdir -p "$DIAG_DIR"
     echo "快速测试 $(date)" > "$REPORT_FILE"
     
+    # 检查Redis，如未运行则自动启动
     if ! check_redis; then
-        log_error "Redis未运行"
-        exit 1
+        log_warn "Redis未运行，尝试自动启动..."
+        if ! start_redis_server; then
+            log_error "Redis启动失败，请手动启动Redis服务器"
+            exit 1
+        fi
     fi
+    log_info "Redis连接正常"
     
     flush_db
     sleep 2
