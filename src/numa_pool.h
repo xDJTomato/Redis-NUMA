@@ -22,12 +22,19 @@
 #define NUMA_STRATEGY_INTERLEAVE  1
 
 /* Memory pool configuration */
-#define NUMA_POOL_SIZE_CLASSES 8
-#define NUMA_POOL_CHUNK_SIZE (64 * 1024)  /* 64KB per chunk */
+#define NUMA_POOL_SIZE_CLASSES 16
 #define NUMA_POOL_MAX_ALLOC 512            /* Maximum allocation from pool */
+
+/* Dynamic chunk size thresholds */
+#define CHUNK_SIZE_SMALL    (16 * 1024)    /* 16KB for small objects (<= 256B) */
+#define CHUNK_SIZE_MEDIUM   (64 * 1024)    /* 64KB for medium objects (<= 1KB) */
+#define CHUNK_SIZE_LARGE    (256 * 1024)   /* 256KB for large objects (<= 4KB) */
 
 /* Size classes for memory pool */
 extern const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES];
+
+/* Get optimal chunk size for object size */
+size_t get_chunk_size_for_object(size_t obj_size);
 
 /* Opaque pool handle */
 typedef struct numa_pool numa_pool_t;

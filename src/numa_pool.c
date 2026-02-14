@@ -16,10 +16,26 @@
 #include <sched.h>
 #include <unistd.h>
 
-/* Size classes for memory pool */
+/* Size classes for memory pool - expanded to 16 levels */
 const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES] = {
-    16, 32, 64, 128, 256, 512, 1024, 2048
+    16, 32, 48, 64,          /* Fine-grained small objects */
+    96, 128, 192, 256,       /* Medium-small objects */
+    384, 512, 768, 1024,     /* Medium objects */
+    1536, 2048, 3072, 4096   /* Large objects */
 };
+
+/* Get optimal chunk size based on object size */
+size_t get_chunk_size_for_object(size_t obj_size) {
+    if (obj_size <= 256) {
+        return CHUNK_SIZE_SMALL;    /* 16KB for small objects */
+    } else if (obj_size <= 1024) {
+        return CHUNK_SIZE_MEDIUM;   /* 64KB for medium objects */
+    } else if (obj_size <= 4096) {
+        return CHUNK_SIZE_LARGE;    /* 256KB for large objects */
+    } else {
+        return 0;  /* Direct allocation for very large objects */
+    }
+}
 
 /* Memory pool chunk structure */
 typedef struct numa_pool_chunk {
@@ -157,11 +173,19 @@ void numa_pool_cleanup(void)
     pthread_mutex_unlock(&pool_ctx.init_lock);
 }
 
-/* Internal: Allocate a new chunk for a pool */
-static numa_pool_chunk_t *alloc_new_chunk(int node, size_t chunk_size)
+/* Internal: Allocate a new chunk for a pool with dynamic sizing */
+static numa_pool_chunk_t *alloc_new_chunk(int node, size_t obj_size)
 {
     numa_pool_chunk_t *chunk = malloc(sizeof(numa_pool_chunk_t));
     if (!chunk) {
+        return NULL;
+    }
+    
+    /* Get optimal chunk size based on object size */
+    size_t chunk_size = get_chunk_size_for_object(obj_size);
+    if (chunk_size == 0) {
+        /* Object too large for pooling, should use direct allocation */
+        free(chunk);
         return NULL;
     }
     
@@ -226,7 +250,7 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size)
             
             /* Allocate new chunk if needed */
             if (!result) {
-                numa_pool_chunk_t *new_chunk = alloc_new_chunk(node, NUMA_POOL_CHUNK_SIZE);
+                numa_pool_chunk_t *new_chunk = alloc_new_chunk(node, alloc_size);
                 if (new_chunk) {
                     new_chunk->offset = aligned_size;
                     new_chunk->next = pool->chunks;
