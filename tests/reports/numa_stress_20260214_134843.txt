@@ -1,0 +1,168 @@
+快速测试 Sat Feb 14 13:48:43 CST 2026
+[INFO] 13:48:43 执行FLUSHALL...
+[INFO] 13:48:45 快速填充1.5GB数据...
+
+========== 内存填充阶段 (目标: 1536MB, 渐进式填充避免OOM) ==========
+[INFO] 13:48:45 当前内存: 49MB, 目标: 1536MB
+[INFO] 13:48:45 需要填充: 1487MB
+[WARN] 13:48:45 采用保守填充策略避免OOM: 批次=50000, value=2048B
+[INFO] 13:48:45 计划填充: 761344 个 2048B 的key
+[INFO] 13:48:45 启动内存监控 (PID=532369, 间隔=2秒)
+[INFO] 13:48:45 内存监控已启动 (监控PID=532567)
+[INFO] 13:48:45 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:45 已填充: 50000/761344 keys (6%)
+[INFO] 13:48:46 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:47 已填充: 100000/761344 keys (13%)
+[INFO] 13:48:47 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:48 已填充: 150000/761344 keys (19%)
+[INFO] 13:48:49 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:50 已填充: 200000/761344 keys (26%)
+[INFO] 13:48:51 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:52 已填充: 250000/761344 keys (32%)
+[INFO] 13:48:52 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:53 已填充: 300000/761344 keys (39%)
+[INFO] 13:48:54 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:55 已填充: 350000/761344 keys (45%)
+[INFO] 13:48:56 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:57 已填充: 400000/761344 keys (52%)
+[INFO] 13:48:58 填充批次: 50000 keys (range: 500000)
+[INFO] 13:48:59 已填充: 450000/761344 keys (59%)
+[INFO] 13:48:59 填充批次: 50000 keys (range: 500000)
+[INFO] 13:49:00 已填充: 500000/761344 keys (65%)
+[INFO] 13:49:01 填充批次: 50000 keys (range: 500000)
+[INFO] 13:49:02 已填充: 550000/761344 keys (72%)
+[INFO] 13:49:02 填充批次: 50000 keys (range: 500000)
+[INFO] 13:49:04 已填充: 600000/761344 keys (78%)
+[INFO] 13:49:04 填充批次: 50000 keys (range: 500000)
+[INFO] 13:49:05 已填充: 650000/761344 keys (85%)
+[INFO] 13:49:06 填充批次: 50000 keys (range: 500000)
+[WARN] 13:49:06 内存已接近目标(1508MB/1536MB),停止填充
+[INFO] 13:49:09 填充完成: 1508MB / 1536MB (98%), Keys: 363542, 耗时: 21s
+
+========== 内存池统计信息 ==========
+[INFO] 13:49:09 Redis内存详情:
+used_memory:796300040
+used_memory_human:759.41M
+used_memory_rss:1582256128
+used_memory_rss_human:1.47G
+used_memory_peak:797289031
+used_memory_peak_human:760.35M
+used_memory_peak_perc:99.88%
+used_memory_overhead:19721595
+used_memory_startup:985611
+used_memory_dataset:776578445
+used_memory_dataset_perc:97.64%
+allocator_allocated:796249520
+allocator_active:1582224384
+allocator_resident:1582224384
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:1.99
+allocator_frag_bytes:785974864
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:1.99
+mem_fragmentation_bytes:786006608
+mem_allocator:libc
+[INFO] 13:49:09 进程内存映射统计:
+Private_Dirty: 1543688 kB
+Private_Clean: 1152 kB
+Rss: 1546448 kB
+Shared_Dirty: 0 kB
+Shared_Clean: 1608 kB
+Pss: 1544850 kB
+Size: 1579320 kB
+[INFO] 13:49:09 NUMA内存分布:
+
+Per-node process memory usage (in MBs) for PID 532369 (redis-server)
+                           Node 0           Total
+                  --------------- ---------------
+Huge                         0.00            0.00
+Heap                        15.34           15.34
+Stack                        0.02            0.02
+Private                   1494.84         1494.84
+----------------  --------------- ---------------
+Total                     1510.20         1510.20
+
+========== 内存碎片分析 ==========
+[INFO] 13:49:09 内存碎片率: 1.99
+[INFO] 13:49:09 分析内存块分布...
+[INFO] 13:49:09 大内存块(>64MB)数量: 1
+[INFO] 13:49:09 运行基础性能测试...
+[INFO] 13:49:09 运行性能测试套件: quick_test (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","25960.54","6.111","0.080","6.175","6.711","7.215","8.943"
+"GET","581395.31","0.252","0.064","0.247","0.335","0.391","1.079"
+"INCR","26752.28","5.925","0.960","5.935","6.159","6.295","6.831"
+"LPUSH","121359.23","1.285","0.072","1.231","2.287","2.615","4.143"
+"RPUSH","115740.73","1.350","0.096","1.295","2.279","2.687","2.911"
+"LPOP","84175.09","1.863","0.256","1.791","2.767","4.727","6.551"
+"RPOP","85470.09","1.835","0.128","1.823","2.671","2.983","3.207"
+"SADD","26096.03","6.076","0.144","6.063","6.791","7.279","8.303"
+"HSET","24342.75","6.523","0.216","6.511","6.807","7.319","27.951"
+"SPOP","28785.26","5.332","0.152","0.279","0.399","212.095","234.367"
+"ZADD","68870.52","2.290","0.056","1.095","1.919","2.183","271.615"
+"ZPOPMIN","73746.31","2.136","0.072","1.943","3.103","4.343","8.799"
+[INFO] 13:49:22 收集内存池统计...
+
+========== 内存池统计信息 ==========
+[INFO] 13:49:22 Redis内存详情:
+used_memory:772652301
+used_memory_human:736.86M
+used_memory_rss:1544884224
+used_memory_rss_human:1.44G
+used_memory_peak:797289031
+used_memory_peak_human:760.35M
+used_memory_peak_perc:96.91%
+used_memory_overhead:22917595
+used_memory_startup:985611
+used_memory_dataset:749734706
+used_memory_dataset_perc:97.16%
+allocator_allocated:774710956
+allocator_active:1544852480
+allocator_resident:1544852480
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:1.99
+allocator_frag_bytes:770141524
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:1.99
+mem_fragmentation_bytes:770173268
+mem_allocator:libc
+[INFO] 13:49:22 进程内存映射统计:
+Private_Dirty: 1505912 kB
+Private_Clean: 1216 kB
+Rss: 1508736 kB
+Shared_Dirty: 0 kB
+Shared_Clean: 1608 kB
+Pss: 1507138 kB
+Size: 1541520 kB
+[INFO] 13:49:22 NUMA内存分布:
+
+Per-node process memory usage (in MBs) for PID 532369 (redis-server)
+                           Node 0           Total
+                  --------------- ---------------
+Huge                         0.00            0.00
+Heap                        15.34           15.34
+Stack                        0.03            0.03
+Private                   1458.01         1458.01
+----------------  --------------- ---------------
+Total                     1473.37         1473.37
+
+========== 内存碎片分析 ==========
+[INFO] 13:49:22 内存碎片率: 2.00
+[INFO] 13:49:22 分析内存块分布...
+[INFO] 13:49:22 大内存块(>64MB)数量: 0
+[INFO] 13:49:22 快速测试完成
+[INFO] 13:49:22 最终内存: 1472MB
+[INFO] 13:49:22 最终Keys: 443442
+[INFO] 13:49:22 NUMA配置:
+[INFO] 13:49:22 内存监控已停止
+
+========== 生成诊断报告 ==========
+[INFO] 13:49:22 诊断报告已保存: /home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_134843/DIAGNOSIS_SUMMARY.txt

@@ -11,6 +11,7 @@
 #include "numa_pool.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <numa.h>
 #include <sched.h>
@@ -549,4 +550,378 @@ int numa_pool_try_compact(void)
     }
     
     return compacted_count;
+}
+
+/* ============================================================================
+ * P2 Optimization: Slab Allocator Implementation
+ * ============================================================================
+ * Design:
+ * - 4KB slabs for small objects (<=512B)
+ * - Bitmap management for O(1) allocation
+ * - Per-size-class slab pools
+ * - Coexists with existing Pool for large objects (>512B)
+ * ========================================================================= */
+
+/* Slab structure */
+typedef struct numa_slab {
+    void *memory;                    /* Actual memory address (NUMA-allocated) */
+    struct numa_slab *next;          /* Next slab in list */
+    uint32_t bitmap[SLAB_BITMAP_SIZE]; /* 128-bit bitmap for object allocation */
+    uint16_t free_count;             /* Number of free objects */
+    uint16_t objects_per_slab;       /* Total objects per slab */
+} numa_slab_t;
+
+/* Slab class (one per size class) */
+typedef struct {
+    size_t obj_size;                 /* Object size (includes PREFIX) */
+    numa_slab_t *partial_slabs;      /* Partially used slabs */
+    numa_slab_t *full_slabs;         /* Fully used slabs */
+    numa_slab_t *empty_slabs;        /* Empty slabs (cache) */
+    size_t empty_count;              /* Number of cached empty slabs */
+    pthread_mutex_t lock;            /* Thread safety */
+    size_t slabs_count;              /* Total slabs allocated */
+} numa_slab_class_t;
+
+/* Per-node slab pool */
+typedef struct {
+    int node_id;
+    numa_slab_class_t classes[NUMA_POOL_SIZE_CLASSES];
+} numa_slab_node_t;
+
+/* Global slab context */
+static struct {
+    int initialized;
+    int num_nodes;
+    numa_slab_node_t *slab_nodes;
+} slab_ctx = {
+    .initialized = 0,
+    .num_nodes = 0,
+    .slab_nodes = NULL
+};
+
+/* Bitmap operations */
+static inline int bitmap_test(uint32_t *bitmap, int bit) {
+    return (bitmap[bit / 32] & (1U << (bit % 32))) != 0;
+}
+
+static inline void bitmap_set(uint32_t *bitmap, int bit) {
+    bitmap[bit / 32] |= (1U << (bit % 32));
+}
+
+static inline void bitmap_clear(uint32_t *bitmap, int bit) {
+    bitmap[bit / 32] &= ~(1U << (bit % 32));
+}
+
+/* Find first free bit in bitmap (returns -1 if none found) */
+static int bitmap_find_first_free(uint32_t *bitmap, int max_bits) {
+    for (int i = 0; i < max_bits; i++) {
+        if (!bitmap_test(bitmap, i)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Allocate a new slab */
+static numa_slab_t *alloc_new_slab(int node, size_t obj_size) {
+    /* Allocate slab structure */
+    numa_slab_t *slab = (numa_slab_t *)malloc(sizeof(numa_slab_t));
+    if (!slab) return NULL;
+    
+    /* Allocate 4KB slab memory on specified NUMA node */
+    slab->memory = numa_alloc_onnode(SLAB_SIZE, node);
+    if (!slab->memory) {
+        free(slab);
+        return NULL;
+    }
+    
+    /* Initialize slab */
+    memset(slab->bitmap, 0, sizeof(slab->bitmap));
+    slab->objects_per_slab = SLAB_SIZE / obj_size;
+    slab->free_count = slab->objects_per_slab;
+    slab->next = NULL;
+    
+    return slab;
+}
+
+/* Free a slab */
+static void free_slab(numa_slab_t *slab) {
+    if (slab->memory) {
+        numa_free(slab->memory, SLAB_SIZE);
+    }
+    free(slab);
+}
+
+/* Initialize slab allocator */
+int numa_slab_init(void) {
+    if (slab_ctx.initialized) {
+        return 0;
+    }
+    
+    /* Check NUMA availability */
+    if (numa_available() < 0) {
+        slab_ctx.num_nodes = 1;
+    } else {
+        slab_ctx.num_nodes = numa_max_node() + 1;
+    }
+    
+    /* Allocate node structures */
+    slab_ctx.slab_nodes = (numa_slab_node_t *)calloc(
+        slab_ctx.num_nodes, sizeof(numa_slab_node_t));
+    if (!slab_ctx.slab_nodes) {
+        return -1;
+    }
+    
+    /* Initialize each node's slab classes */
+    for (int i = 0; i < slab_ctx.num_nodes; i++) {
+        slab_ctx.slab_nodes[i].node_id = i;
+        
+        for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
+            numa_slab_class_t *class = &slab_ctx.slab_nodes[i].classes[j];
+            
+            /* Only initialize for small objects (<=512B) */
+            size_t obj_size = numa_pool_size_classes[j];
+            if (obj_size > SLAB_MAX_OBJECT_SIZE) {
+                continue;
+            }
+            
+            class->obj_size = obj_size + 16;  /* Include PREFIX */
+            class->partial_slabs = NULL;
+            class->full_slabs = NULL;
+            class->empty_slabs = NULL;
+            class->empty_count = 0;
+            class->slabs_count = 0;
+            pthread_mutex_init(&class->lock, NULL);
+        }
+    }
+    
+    slab_ctx.initialized = 1;
+    return 0;
+}
+
+/* Cleanup slab allocator */
+void numa_slab_cleanup(void) {
+    if (!slab_ctx.initialized) {
+        return;
+    }
+    
+    for (int i = 0; i < slab_ctx.num_nodes; i++) {
+        for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
+            numa_slab_class_t *class = &slab_ctx.slab_nodes[i].classes[j];
+            
+            if (class->obj_size == 0) continue;
+            
+            /* Free all slabs in all lists */
+            numa_slab_t *slab;
+            
+            slab = class->partial_slabs;
+            while (slab) {
+                numa_slab_t *next = slab->next;
+                free_slab(slab);
+                slab = next;
+            }
+            
+            slab = class->full_slabs;
+            while (slab) {
+                numa_slab_t *next = slab->next;
+                free_slab(slab);
+                slab = next;
+            }
+            
+            slab = class->empty_slabs;
+            while (slab) {
+                numa_slab_t *next = slab->next;
+                free_slab(slab);
+                slab = next;
+            }
+            
+            pthread_mutex_destroy(&class->lock);
+        }
+    }
+    
+    free(slab_ctx.slab_nodes);
+    slab_ctx.slab_nodes = NULL;
+    slab_ctx.initialized = 0;
+}
+
+/* Allocate from slab */
+void *numa_slab_alloc(size_t size, int node, size_t *total_size) {
+    if (!slab_ctx.initialized) {
+        return NULL;
+    }
+    
+    /* Find appropriate size class */
+    int class_idx = -1;
+    for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
+        if (size <= numa_pool_size_classes[i]) {
+            class_idx = i;
+            break;
+        }
+    }
+    
+    if (class_idx < 0 || numa_pool_size_classes[class_idx] > SLAB_MAX_OBJECT_SIZE) {
+        return NULL;  /* Too large for slab */
+    }
+    
+    /* Validate node */
+    if (node < 0 || node >= slab_ctx.num_nodes) {
+        node = 0;
+    }
+    
+    numa_slab_class_t *class = &slab_ctx.slab_nodes[node].classes[class_idx];
+    size_t aligned_size = (size + 15) & ~15;  /* 16-byte align */
+    *total_size = aligned_size + 16;  /* Include PREFIX */
+    
+    pthread_mutex_lock(&class->lock);
+    
+    numa_slab_t *slab = class->partial_slabs;
+    
+    /* If no partial slab, try to get one from empty cache or allocate new */
+    if (!slab) {
+        if (class->empty_slabs) {
+            /* Reuse empty slab */
+            slab = class->empty_slabs;
+            class->empty_slabs = slab->next;
+            class->empty_count--;
+            slab->next = NULL;
+        } else {
+            /* Allocate new slab */
+            slab = alloc_new_slab(node, class->obj_size);
+            if (!slab) {
+                pthread_mutex_unlock(&class->lock);
+                return NULL;
+            }
+            class->slabs_count++;
+        }
+        
+        /* Add to partial list */
+        class->partial_slabs = slab;
+    }
+    
+    /* Find free object in slab */
+    int free_bit = bitmap_find_first_free(slab->bitmap, slab->objects_per_slab);
+    if (free_bit < 0) {
+        /* This shouldn't happen, but handle it */
+        pthread_mutex_unlock(&class->lock);
+        return NULL;
+    }
+    
+    /* Mark object as allocated */
+    bitmap_set(slab->bitmap, free_bit);
+    slab->free_count--;
+    
+    /* Calculate object address */
+    void *result = (char *)slab->memory + (free_bit * class->obj_size);
+    
+    /* If slab is now full, move to full list */
+    if (slab->free_count == 0) {
+        class->partial_slabs = slab->next;
+        slab->next = class->full_slabs;
+        class->full_slabs = slab;
+    }
+    
+    pthread_mutex_unlock(&class->lock);
+    return result;
+}
+
+/* Free to slab */
+void numa_slab_free(void *ptr, size_t total_size, int node) {
+    if (!slab_ctx.initialized || !ptr) {
+        return;
+    }
+    
+    /* Find appropriate size class */
+    size_t size = total_size - 16;  /* Exclude PREFIX */
+    int class_idx = -1;
+    for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
+        if (size <= numa_pool_size_classes[i]) {
+            class_idx = i;
+            break;
+        }
+    }
+    
+    if (class_idx < 0 || numa_pool_size_classes[class_idx] > SLAB_MAX_OBJECT_SIZE) {
+        return;  /* Not from slab */
+    }
+    
+    /* Validate node */
+    if (node < 0 || node >= slab_ctx.num_nodes) {
+        node = 0;
+    }
+    
+    numa_slab_class_t *class = &slab_ctx.slab_nodes[node].classes[class_idx];
+    
+    pthread_mutex_lock(&class->lock);
+    
+    /* Find which slab this object belongs to */
+    numa_slab_t **list_head = &class->partial_slabs;
+    numa_slab_t *slab = NULL;
+    numa_slab_t **prev_ptr = NULL;
+    
+    /* Search in partial list */
+    prev_ptr = &class->partial_slabs;
+    slab = class->partial_slabs;
+    while (slab) {
+        if (ptr >= slab->memory && ptr < (char *)slab->memory + SLAB_SIZE) {
+            list_head = &class->partial_slabs;
+            break;
+        }
+        prev_ptr = &slab->next;
+        slab = slab->next;
+    }
+    
+    /* Search in full list if not found */
+    if (!slab) {
+        prev_ptr = &class->full_slabs;
+        slab = class->full_slabs;
+        while (slab) {
+            if (ptr >= slab->memory && ptr < (char *)slab->memory + SLAB_SIZE) {
+                list_head = &class->full_slabs;
+                break;
+            }
+            prev_ptr = &slab->next;
+            slab = slab->next;
+        }
+    }
+    
+    if (!slab) {
+        /* Object not found in any slab */
+        pthread_mutex_unlock(&class->lock);
+        return;
+    }
+    
+    /* Calculate object index */
+    size_t offset = (char *)ptr - (char *)slab->memory;
+    int obj_index = offset / class->obj_size;
+    
+    /* Mark object as free */
+    bitmap_clear(slab->bitmap, obj_index);
+    slab->free_count++;
+    
+    /* Move slab between lists if needed */
+    int was_full = (slab->free_count == 1);
+    int is_empty = (slab->free_count == slab->objects_per_slab);
+    
+    if (was_full) {
+        /* Move from full to partial */
+        *prev_ptr = slab->next;
+        slab->next = class->partial_slabs;
+        class->partial_slabs = slab;
+    } else if (is_empty) {
+        /* Move to empty cache or free */
+        *prev_ptr = slab->next;
+        
+        if (class->empty_count < SLAB_EMPTY_CACHE_MAX) {
+            /* Cache empty slab */
+            slab->next = class->empty_slabs;
+            class->empty_slabs = slab;
+            class->empty_count++;
+        } else {
+            /* Free slab immediately */
+            free_slab(slab);
+            class->slabs_count--;
+        }
+    }
+    
+    pthread_mutex_unlock(&class->lock);
 }

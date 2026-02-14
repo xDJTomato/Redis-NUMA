@@ -55,7 +55,7 @@ NUMA (Non-Uniform Memory Access) 是一种多处理器架构，其中每个处�
 
 ## ✨ 核心功能
 
-### 1. NUMA内存池 (v3.1-P1)
+### 1. NUMA内存池 (v3.2-P2)
 
 **模块**: `src/numa_pool.h`, `src/numa_pool.c`
 
@@ -64,13 +64,14 @@ NUMA (Non-Uniform Memory Access) 是一种多处理器架构，其中每个处�
 - 🚀 动态chunk大小（16KB/64KB/256KB）
 - ♻️ Free List管理（pool级别重用）
 - 📦 Compact机制（自动清理低利用率chunk）
+- 🔥 Slab Allocator（4KB slab针对≤512B小对象）
 - 🔒 PREFIX机制保证指针正确性
 - 📊 零额外开销（16字节PREFIX极限）
 
 **性能成果**：
-- ✅ 碎片率：3.61 → 2.36(P0) → **2.00(P1)** （降低45%）
-- ✅ 内存效率：27% → 43%(P0) → **50%(P1)** （提升85%）
-- ✅ SET性能：**301K req/s**, GET性能：**714K req/s**
+- ✅ 碎片率：3.61 → 2.36(P0) → 2.00(P1) → **1.02(P2)** （降低72%）
+- ✅ 内存效率：27% → 43%(P0) → 50%(P1) → **98%(P2)** （提升263%）
+- ✅ SET性能：**96K req/s** (P2)
 
 **设计亮点**：
 ```c
@@ -94,6 +95,18 @@ typedef struct {
 
 // P1优化：Compact机制
 int numa_pool_try_compact(void);  // 清理低利用率chunk(<30%)
+
+// P2优化：Slab Allocator
+typedef struct numa_slab {
+    void *memory;                  /* NUMA分配的内存 */
+    struct numa_slab *next;        /* 下一个slab */
+    uint32_t bitmap[4];            /* 128位bitmap管理 */
+    uint16_t free_count;           /* 空闲对象数 */
+    uint16_t objects_per_slab;     /* 每slab对象数 */
+} numa_slab_t;
+
+void *numa_slab_alloc(size_t size, int node, size_t *total_size);
+void numa_slab_free(void *ptr, size_t total_size, int node);
 ```
 
 **详细文档**：[01-numa-pool.md](docs/modules/01-numa-pool.md)

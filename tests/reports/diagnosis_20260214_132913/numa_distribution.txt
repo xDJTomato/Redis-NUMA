@@ -1,0 +1,10 @@
+
+Per-node process memory usage (in MBs) for PID 515997 (redis-server)
+                           Node 0           Total
+                  --------------- ---------------
+Huge                         0.00            0.00
+Heap                         0.99            0.99
+Stack                        0.02            0.02
+Private                   1559.80         1559.80
+----------------  --------------- ---------------
+Total                     1560.82         1560.82

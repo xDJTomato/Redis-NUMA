@@ -1,0 +1,7 @@
+Private_Dirty: 1921084 kB
+Private_Clean: 1284 kB
+Rss: 1924196 kB
+Shared_Dirty: 0 kB
+Shared_Clean: 1828 kB
+Pss: 1922379 kB
+Size: 1957644 kB

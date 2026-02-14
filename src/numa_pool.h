@@ -23,7 +23,13 @@
 
 /* Memory pool configuration */
 #define NUMA_POOL_SIZE_CLASSES 16
-#define NUMA_POOL_MAX_ALLOC 512            /* Maximum allocation from pool */
+#define NUMA_POOL_MAX_ALLOC 4096           /* Maximum allocation from pool (increased for P2) */
+
+/* P2 Optimization: Slab Allocator configuration */
+#define SLAB_SIZE 4096                     /* 4KB slab size (one page) */
+#define SLAB_MAX_OBJECT_SIZE 512           /* Use slab for objects <= 512B */
+#define SLAB_BITMAP_SIZE 4                 /* 128 bits for up to 128 objects */
+#define SLAB_EMPTY_CACHE_MAX 2             /* Max empty slabs to keep per class */
 
 /* P1 Optimization: Compact thresholds */
 #define COMPACT_THRESHOLD 0.3              /* Trigger compact when utilization < 30% */
@@ -97,5 +103,27 @@ int numa_pool_try_compact(void);
 /* Get chunk utilization ratio for a specific node and size class
  * Returns utilization percentage (0.0 - 1.0) */
 float numa_pool_get_utilization(int node, int size_class_idx);
+
+/* P2 Optimization: Slab Allocator functions */
+/* Initialize slab allocator for all NUMA nodes
+ * Returns 0 on success, -1 on failure */
+int numa_slab_init(void);
+
+/* Cleanup all slabs */
+void numa_slab_cleanup(void);
+
+/* Allocate memory from slab for small objects (<=512B)
+ * Returns pointer with PREFIX metadata, or NULL on failure */
+void *numa_slab_alloc(size_t size, int node, size_t *total_size);
+
+/* Free memory allocated via numa_slab_alloc
+ * Marks object as free in slab bitmap */
+void numa_slab_free(void *ptr, size_t total_size, int node);
+
+/* Check if size should use slab allocator
+ * Returns 1 if size <= SLAB_MAX_OBJECT_SIZE, 0 otherwise */
+static inline int should_use_slab(size_t size) {
+    return size <= SLAB_MAX_OBJECT_SIZE;
+}
 
 #endif /* NUMA_POOL_H */

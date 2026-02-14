@@ -1,0 +1,51 @@
+快速测试 Sat Feb 14 12:56:10 CST 2026
+[INFO] 12:56:10 执行FLUSHALL...
+[INFO] 12:56:12 快速填充1.5GB数据...
+
+========== 内存填充阶段 (目标: 1536MB, 渐进式填充避免OOM) ==========
+[INFO] 12:56:12 当前内存: 1888MB, 目标: 1536MB
+[INFO] 12:56:12 内存已接近目标 (122%)，无需填充
+[INFO] 12:56:12 运行基础性能测试...
+[INFO] 12:56:12 运行性能测试套件: quick_test (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","438596.50","0.347","0.048","0.351","0.527","0.599","0.839"
+"GET","819672.12","0.182","0.064","0.183","0.263","0.295","0.647"
+"INCR","505050.50","0.301","0.048","0.295","0.439","0.487","0.687"
+"LPUSH","166666.66","0.930","0.056","0.943","1.815","2.095","2.519"
+"RPUSH","154798.75","1.004","0.088","1.063","1.967","2.311","2.663"
+"LPOP","147929.00","1.048","0.088","1.047","2.151","2.447","3.103"
+"RPOP","142450.14","1.088","0.080","1.055","2.063","2.415","2.687"
+"SADD","326797.41","0.466","0.104","0.487","0.623","0.767","1.191"
+"HSET","257731.95","0.592","0.088","0.583","0.759","1.487","4.359"
+"SPOP","306748.47","0.495","0.072","0.511","0.671","0.743","1.591"
+"ZADD","192307.70","0.793","0.112","0.815","1.015","1.095","1.847"
+"ZPOPMIN","62656.64","2.513","0.080","2.391","3.903","4.743","6.983"
+[INFO] 12:56:15 收集内存池统计...
+
+========== 内存池统计信息 ==========
+[INFO] 12:56:16 Redis内存详情:
+used_memory:16745214
+used_memory_human:15.97M
+used_memory_rss:2354995200
+used_memory_rss_human:2.19G
+used_memory_peak:695055926
+used_memory_peak_human:662.86M
+used_memory_peak_perc:2.41%
+used_memory_overhead:5933629
+used_memory_startup:985613
+used_memory_dataset:10811585
+used_memory_dataset_perc:68.60%
+allocator_allocated:16694694
+allocator_active:2354963456
+allocator_resident:2354963456
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:141.06
+allocator_frag_bytes:2338268762
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:141.06
+mem_fragmentation_bytes:2338300506
+mem_allocator:libc

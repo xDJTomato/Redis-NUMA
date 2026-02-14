@@ -1,0 +1,82 @@
+快速测试 Sat Feb 14 13:15:49 CST 2026
+[INFO] 13:15:49 执行FLUSHALL...
+[INFO] 13:15:51 快速填充1.5GB数据...
+
+========== 内存填充阶段 (目标: 1536MB, 渐进式填充避免OOM) ==========
+[INFO] 13:15:51 当前内存: 1424MB, 目标: 1536MB
+[INFO] 13:15:51 内存已接近目标 (92%)，无需填充
+[INFO] 13:15:51 运行基础性能测试...
+[INFO] 13:15:51 运行性能测试套件: quick_test (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","609756.06","0.244","0.056","0.239","0.391","0.447","0.711"
+"GET","980392.19","0.149","0.048","0.151","0.207","0.239","0.415"
+"INCR","632911.38","0.238","0.088","0.223","0.367","0.415","1.879"
+"LPUSH","211864.41","0.732","0.056","0.703","1.543","1.911","2.479"
+"RPUSH","199203.20","0.783","0.048","0.711","1.815","2.087","2.559"
+"LPOP","206611.58","0.753","0.072","0.695","1.583","1.903","2.159"
+"RPOP","214592.28","0.724","0.112","0.719","1.303","1.703","1.999"
+"SADD","568181.81","0.266","0.128","0.271","0.359","0.495","1.167"
+"HSET","462962.94","0.329","0.064","0.311","0.455","0.967","3.191"
+"SPOP","526315.81","0.290","0.064","0.303","0.383","0.551","1.175"
+"ZADD","352112.66","0.436","0.088","0.455","0.615","0.687","1.079"
+"ZPOPMIN","99403.58","1.586","0.080","1.455","2.367","3.023","3.839"
+[INFO] 13:15:54 收集内存池统计...
+
+========== 内存池统计信息 ==========
+[INFO] 13:15:54 Redis内存详情:
+used_memory:16750680
+used_memory_human:15.97M
+used_memory_rss:1868406784
+used_memory_rss_human:1.74G
+used_memory_peak:772546974
+used_memory_peak_human:736.76M
+used_memory_peak_perc:2.17%
+used_memory_overhead:5936669
+used_memory_startup:985613
+used_memory_dataset:10814011
+used_memory_dataset_perc:68.59%
+allocator_allocated:18829813
+allocator_active:1868375040
+allocator_resident:1868375040
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:99.22
+allocator_frag_bytes:1849545227
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:99.23
+mem_fragmentation_bytes:1849576971
+mem_allocator:libc
+[INFO] 13:15:54 进程内存映射统计:
+Private_Dirty: 1822208 kB
+Private_Clean: 1296 kB
+Rss: 1825332 kB
+Shared_Dirty: 0 kB
+Shared_Clean: 1828 kB
+Pss: 1823516 kB
+Size: 1858428 kB
+[INFO] 13:15:54 NUMA内存分布:
+
+Per-node process memory usage (in MBs) for PID 501266 (redis-server)
+                           Node 0           Total
+                  --------------- ---------------
+Huge                         0.00            0.00
+Heap                         1.23            1.23
+Stack                        0.03            0.03
+Private                   1781.29         1781.29
+----------------  --------------- ---------------
+Total                     1782.55         1782.55
+
+========== 内存碎片分析 ==========
+[INFO] 13:15:54 内存碎片率: 111.88
+[INFO] 13:15:54 分析内存块分布...
+[INFO] 13:15:54 大内存块(>64MB)数量: 4
+[INFO] 13:15:54 快速测试完成
+[INFO] 13:15:54 最终内存: 1781MB
+[INFO] 13:15:54 最终Keys: 97562
+[INFO] 13:15:54 NUMA配置:
+
+========== 生成诊断报告 ==========
+[INFO] 13:15:54 诊断报告已保存: /home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_131549/DIAGNOSIS_SUMMARY.txt

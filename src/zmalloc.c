@@ -78,6 +78,12 @@ void numa_init(void)
         return;
     }
     
+    /* P2 Optimization: Initialize Slab allocator */
+    if (numa_slab_init() != 0) {
+        numa_ctx.numa_available = 0;
+        return;
+    }
+    
     numa_ctx.numa_available = numa_pool_available();
     if (!numa_ctx.numa_available) {
         return;
@@ -241,8 +247,18 @@ static void *numa_alloc_with_size(size_t size)
     int target_node = round_robin_index % numa_ctx.num_nodes;
     round_robin_index++;
     
-    /* 使用内存池分配到选定节点 */
-    void *raw_ptr = numa_pool_alloc(total_size, target_node, &alloc_size);
+    void *raw_ptr = NULL;
+    
+    /* P2 Optimization: Use Slab for small objects (<=512B) */
+    if (should_use_slab(size)) {
+        raw_ptr = numa_slab_alloc(size, target_node, &alloc_size);
+    }
+    
+    /* Fallback to Pool for larger objects or if Slab fails */
+    if (!raw_ptr) {
+        raw_ptr = numa_pool_alloc(total_size, target_node, &alloc_size);
+    }
+    
     if (!raw_ptr)
         return NULL;
     
@@ -262,12 +278,22 @@ static void numa_free_with_size(void *user_ptr)
 
     numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
     size_t total_size = prefix->size + PREFIX_SIZE;
+    size_t size = prefix->size;
 
     update_zmalloc_stat_free(total_size);
 
-    /* 使用内存池释放 */
     void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
-    numa_pool_free(raw_ptr, total_size, prefix->from_pool);
+    
+    /* P2 Optimization: Free to Slab if small object */
+    if (should_use_slab(size) && prefix->from_pool) {
+        /* Get target node from TLS or default */
+        static __thread int round_robin_index = 0;
+        int target_node = round_robin_index % numa_ctx.num_nodes;
+        numa_slab_free(raw_ptr, total_size, target_node);
+    } else {
+        /* Use Pool free for larger objects */
+        numa_pool_free(raw_ptr, total_size, prefix->from_pool);
+    }
 }
 
 /* NUMA-aware zmalloc */
