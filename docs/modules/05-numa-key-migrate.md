@@ -36,8 +36,10 @@
 
 **依赖关系**:
 - 基础内存迁移：[numa_migrate.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_migrate.c)（已保留）
+- 内存池分配：[numa_pool.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_pool.c)（P0/P1优化完成）
+- Slab分配器：[numa_slab.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_slab.c)（P2优化完成，Slab+Pool双路径）
 - 策略插槽框架：[06-numa-strategy-slots](./06-numa-strategy-slots.md)（已实现）
-- 复合LRU策略：[07-numa-composite-lru](./07-numa-composite-lru.md)（规划中）
+- 复合LRU策略：[07-numa-composite-lru](./07-numa-composite-lru.md)（已实现）
 
 ---
 

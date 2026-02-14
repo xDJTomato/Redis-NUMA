@@ -360,6 +360,11 @@ NUMACONFIG MONITOR
 
 ## 版本历史
 
+### v1.2 (2026-02-14)
+- ✅ P2优化适配：与Slab Allocator协同工作
+- ✅ 内存分配策略：支持Slab+Pool双路径配置
+- ✅ 性能监控：集成P2性能指标收集
+
 ### v1.1 (2026-02-14)
 - ✅ API现代化：使用`addReplyArrayLen`替代`addReplyMultiBulkLen`
 - ✅ 性能优化：改进响应构建效率

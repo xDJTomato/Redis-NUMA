@@ -8,6 +8,11 @@
 
 **功能**: 基于Redis原生LRU机制的复合策略，作为NUMA策略插槽框架的1号默认策略，提供稳定性优先的热度管理和智能迁移触发，可通过NUMACONFIG命令动态调整参数。
 
+**依赖关系**:
+- 策略插槽框架：[numa_strategy_slots.c](./06-numa-strategy-slots.md)（已实现）
+- Key迁移模块：[numa_key_migrate.c](./05-numa-key-migrate.md)（已实现）
+- 内存分配层：[numa_pool.c](./01-numa-pool.md)（P0/P1优化完成）、[numa_slab.c](./03-zmalloc-numa.md)（P2优化完成）
+
 **核心特性**:
 - **稳定性优先**: 避免频繁的热度升降级操作
 - **资源感知**: 结合节点负载和带宽状况做出迁移决策
