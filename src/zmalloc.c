@@ -156,11 +156,20 @@ int numa_get_strategy(void)
 #ifdef HAVE_NUMA
 /* NUMA allocator requires PREFIX_SIZE for size tracking plus allocation flag */
 typedef struct {
-    size_t size;     /* Size of the allocated memory */
-    char from_pool;  /* 1 if from pool, 0 if direct allocation */
-    char node_id;    /* NUMA node ID for correct free routing (P2 fix) */
-    char padding[6]; /* Padding for alignment */
+    size_t size;           /* 8 bytes - Size of the allocated memory */
+    char from_pool;        /* 1 byte - 0=direct, 1=pool, 2=slab */
+    char node_id;          /* 1 byte - NUMA node ID for correct free routing (P2 fix) */
+    /* Heat tracking fields (reused from padding) */
+    uint8_t hotness;       /* 1 byte - Heat level (0-7), 0=cold, 7=hot */
+    uint8_t access_count;  /* 1 byte - Access count (circular counter) */
+    uint16_t last_access;  /* 2 bytes - LRU clock low 16 bits */
+    char reserved[2];      /* 2 bytes - Reserved for future use */
 } numa_alloc_prefix_t;
+
+/* Heat tracking constants */
+#define NUMA_HOTNESS_MAX     7
+#define NUMA_HOTNESS_MIN     0
+#define NUMA_HOTNESS_DEFAULT 1
 
 #define PREFIX_SIZE (sizeof(numa_alloc_prefix_t))
 #define ASSERT_NO_SIZE_OVERFLOW(sz) assert((sz) <= SIZE_MAX - PREFIX_SIZE)
@@ -222,6 +231,10 @@ static inline void numa_init_prefix(void *ptr, size_t size, int from_pool, int n
     prefix->size = size;
     prefix->from_pool = from_pool;
     prefix->node_id = (char)node_id;  /* P2 fix: Record allocation node for correct free */
+    /* Initialize heat tracking fields */
+    prefix->hotness = NUMA_HOTNESS_DEFAULT;  /* Default heat level */
+    prefix->access_count = 0;
+    prefix->last_access = 0;
 }
 
 /* Helper: Get prefix from user pointer */
@@ -426,6 +439,66 @@ void *numa_zcalloc_onnode(size_t size, int node)
     memset(ptr, 0, size);
     return ptr;
 }
+
+/* ========== NUMA Heat Tracking API ========== */
+
+/* Get hotness level from user pointer */
+uint8_t numa_get_hotness(void *ptr)
+{
+    if (!ptr) return NUMA_HOTNESS_MIN;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    return prefix->hotness;
+}
+
+/* Set hotness level for user pointer */
+void numa_set_hotness(void *ptr, uint8_t hotness)
+{
+    if (!ptr) return;
+    if (hotness > NUMA_HOTNESS_MAX) hotness = NUMA_HOTNESS_MAX;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    prefix->hotness = hotness;
+}
+
+/* Get access count from user pointer */
+uint8_t numa_get_access_count(void *ptr)
+{
+    if (!ptr) return 0;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    return prefix->access_count;
+}
+
+/* Increment access count for user pointer */
+void numa_increment_access_count(void *ptr)
+{
+    if (!ptr) return;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    prefix->access_count++;
+}
+
+/* Get last access time from user pointer */
+uint16_t numa_get_last_access(void *ptr)
+{
+    if (!ptr) return 0;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    return prefix->last_access;
+}
+
+/* Set last access time for user pointer */
+void numa_set_last_access(void *ptr, uint16_t lru_clock)
+{
+    if (!ptr) return;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    prefix->last_access = lru_clock;
+}
+
+/* Get NUMA node ID from user pointer */
+int numa_get_node_id(void *ptr)
+{
+    if (!ptr) return -1;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    return (int)prefix->node_id;
+}
+
 #endif /* HAVE_NUMA */
 
 /* Try allocating memory, and return NULL if failed.

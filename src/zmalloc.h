@@ -120,6 +120,7 @@ typedef struct numa_context {
 } numa_context_t;
 
 /* Function declarations for NUMA support */
+#include <stdint.h>  /* For uint8_t, uint16_t in heat tracking API */
 void numa_init(void);
 void numa_cleanup(void);
 int numa_set_strategy(int strategy);
@@ -130,6 +131,20 @@ void *numa_zrealloc(void *ptr, size_t size);
 void numa_zfree(void *ptr);
 void *numa_zmalloc_onnode(size_t size, int node);
 void *numa_zcalloc_onnode(size_t size, int node);
+
+/* NUMA heat tracking API - stored in PREFIX */
+#define NUMA_HOTNESS_MAX     7
+#define NUMA_HOTNESS_MIN     0
+#define NUMA_HOTNESS_DEFAULT 1
+
+/* Get/Set heat information from memory pointer */
+uint8_t numa_get_hotness(void *ptr);
+void numa_set_hotness(void *ptr, uint8_t hotness);
+uint8_t numa_get_access_count(void *ptr);
+void numa_increment_access_count(void *ptr);
+uint16_t numa_get_last_access(void *ptr);
+void numa_set_last_access(void *ptr, uint16_t lru_clock);
+int numa_get_node_id(void *ptr);
 
 #endif /* HAVE_NUMA */
 void *zrealloc(void *ptr, size_t size);

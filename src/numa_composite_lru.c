@@ -111,59 +111,91 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
 
 /* ========== Heat Management ========== */
 
-/* Record key access */
+/* Record key access - using PREFIX heat tracking */
 void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val) {
     if (!strategy || !strategy->private_data || !key) return;
     
     composite_lru_data_t *data = strategy->private_data;
-    composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
-    
     int current_node = get_current_numa_node();
     uint16_t current_time = get_lru_clock();
     
-    if (!info) {
-        /* First access: create heat record */
-        info = zmalloc(sizeof(*info));
-        if (!info) return;
+    /* Use PREFIX heat tracking if val is a valid memory pointer */
+    if (val) {
+        uint8_t current_hotness = numa_get_hotness(val);
+        int mem_node = numa_get_node_id(val);
         
-        info->hotness = 1;
-        info->stability_counter = 0;
-        info->last_access = current_time;
-        info->access_count = 1;
-        info->current_node = current_node;
-        info->preferred_node = -1;
+        /* Node affinity analysis */
+        if (mem_node == current_node) {
+            /* Local access: increase hotness */
+            if (current_hotness < COMPOSITE_LRU_HOTNESS_MAX) {
+                numa_set_hotness(val, current_hotness + 1);
+            }
+        } else {
+            /* Remote access: may trigger migration evaluation */
+            if (current_hotness >= data->migrate_hotness_threshold) {
+                CLRU_LOG(LL_VERBOSE, 
+                    "[Composite LRU] Remote access detected for key, current_node=%d, mem_node=%d, hotness=%d",
+                    current_node, mem_node, current_hotness);
+                
+                /* Add to pending migrations */
+                pending_migration_t *pm = zmalloc(sizeof(*pm));
+                if (pm) {
+                    pm->key = key;
+                    pm->target_node = current_node;
+                    pm->enqueue_time = get_current_time_us();
+                    pm->priority = current_hotness;
+                    listAddNodeTail(data->pending_migrations, pm);
+                }
+            }
+        }
         
-        dictAdd(data->key_heat_map, key, info);
+        /* Update access statistics in PREFIX */
+        numa_increment_access_count(val);
+        numa_set_last_access(val, current_time);
+        
         data->heat_updates++;
-        return;
-    }
-    
-    /* Update access statistics */
-    info->access_count++;
-    info->last_access = current_time;
-    data->heat_updates++;
-    
-    /* Node affinity analysis */
-    if (info->current_node == current_node) {
-        /* Local access: increase hotness with stability */
-        if (info->hotness < COMPOSITE_LRU_HOTNESS_MAX) {
-            info->hotness++;
-        }
-        info->stability_counter = 0;  /* Reset stability counter */
     } else {
-        /* Remote access: may trigger migration evaluation */
-        info->preferred_node = current_node;
+        /* Fallback to legacy dictionary-based tracking */
+        composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
         
-        if (info->hotness >= data->migrate_hotness_threshold) {
-            /* Schedule migration evaluation */
-            /* For now, just record the preferred node */
-            CLRU_LOG(LL_VERBOSE, 
-                "[Composite LRU] Remote access detected for key, current=%d, accessed_from=%d, hotness=%d",
-                info->current_node, current_node, info->hotness);
+        if (!info) {
+            /* First access: create heat record */
+            info = zmalloc(sizeof(*info));
+            if (!info) return;
+            
+            info->hotness = 1;
+            info->stability_counter = 0;
+            info->last_access = current_time;
+            info->access_count = 1;
+            info->current_node = current_node;
+            info->preferred_node = -1;
+            
+            dictAdd(data->key_heat_map, key, info);
+            data->heat_updates++;
+            return;
+        }
+        
+        /* Update access statistics */
+        info->access_count++;
+        info->last_access = current_time;
+        data->heat_updates++;
+        
+        /* Node affinity analysis */
+        if (info->current_node == current_node) {
+            if (info->hotness < COMPOSITE_LRU_HOTNESS_MAX) {
+                info->hotness++;
+            }
+            info->stability_counter = 0;
+        } else {
+            info->preferred_node = current_node;
+            
+            if (info->hotness >= data->migrate_hotness_threshold) {
+                CLRU_LOG(LL_VERBOSE, 
+                    "[Composite LRU] Remote access detected for key (legacy), current=%d, accessed_from=%d, hotness=%d",
+                    info->current_node, current_node, info->hotness);
+            }
         }
     }
-    
-    (void)val;  /* Currently unused */
 }
 
 /* Perform heat decay */
