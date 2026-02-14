@@ -55,29 +55,48 @@ NUMA (Non-Uniform Memory Access) 是一种多处理器架构，其中每个处�
 
 ## ✨ 核心功能
 
-### 1. NUMA内存池 (v2.1)
+### 1. NUMA内存池 (v3.1-P1)
 
 **模块**: `src/numa_pool.h`, `src/numa_pool.c`
 
 **功能**：
-- 🎯 节点粒度内存分配
-- 🚀 批量分配+按需切分
+- 🎯 节点粒度内存分配（16级size class）
+- 🚀 动态chunk大小（16KB/64KB/256KB）
+- ♻️ Free List管理（pool级别重用）
+- 📦 Compact机制（自动清理低利用率chunk）
 - 🔒 PREFIX机制保证指针正确性
-- 📊 零额外开销
+- 📊 零额外开销（16字节PREFIX极限）
+
+**性能成果**：
+- ✅ 碎片率：3.61 → 2.36(P0) → **2.00(P1)** （降低45%）
+- ✅ 内存效率：27% → 43%(P0) → **50%(P1)** （提升85%）
+- ✅ SET性能：**301K req/s**, GET性能：**714K req/s**
 
 **设计亮点**：
 ```c
 // 在指定NUMA节点分配内存
-void* numa_zmalloc_onnode(size_t size, int node);
+void* numa_pool_alloc(size_t size, int node, int size_class_idx);
+
+// P1优化：Free List结构
+typedef struct free_block {
+    void *ptr;                     /* 释放的内存地址 */
+    size_t size;                   /* 块大小 */
+    struct free_block *next;       /* 下一个空闲块 */
+} free_block_t;
 
 // 内存池结构：大块预分配，小块按需切分
-typedef struct numa_pool {
-    void *base;           // 大块起始地址
-    size_t size;          // 池大小
-    size_t used;          // 已使用
-    int node_id;          // NUMA节点ID
-} numa_pool_t;
+typedef struct {
+    size_t obj_size;               /* 对象大小 */
+    numa_pool_chunk_t *chunks;     /* chunk链表 */
+    free_block_t *free_list;       /* P1: 空闲列表 */
+    pthread_mutex_t lock;          /* 线程安全 */
+} numa_size_class_pool_t;
+
+// P1优化：Compact机制
+int numa_pool_try_compact(void);  // 清理低利用率chunk(<30%)
 ```
+
+**详细文档**：[01-numa-pool.md](docs/modules/01-numa-pool.md)
 
 ### 2. NUMA内存迁移 (v2.2)
 
