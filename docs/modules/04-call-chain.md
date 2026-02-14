@@ -46,13 +46,14 @@
 │              │              │              │                     │
 │              ▼              ▼              ▼                     │
 │  ┌─────────────────┐ ┌─────────────┐ ┌─────────────────┐        │
-│  │   numa_pool.c   │ │ numa_migrate│ │  numa_alloc_    │        │
-│  │   (内存池模块)   │ │    .c       │ │   onnode()      │        │
-│  │                 │ │  (迁移模块)  │ │  (直接分配)      │        │
+│  │   numa_pool.c   │ │ numa_slab.c │ │  numa_alloc_    │        │
+│  │   (内存池模块)   │ │ (Slab模块)  │ │   onnode()      │        │
+│  │                 │ │  P2优化      │ │  (直接分配)      │        │
 │  │  numa_pool_     │ │             │ │                 │        │
-│  │   alloc()       │ │ numa_migrate│ │                 │        │
-│  │  numa_pool_     │ │   _memory() │ │                 │        │
-│  │   free()        │ │             │ │                 │        │
+│  │   alloc()       │ │ numa_slab_  │ │                 │        │
+│  │  numa_pool_     │ │   alloc()   │ │                 │        │
+│  │   free()        │ │ numa_slab_  │ │                 │        │
+│  │                 │ │   free()    │ │                 │        │
 │  └────────┬────────┘ └──────┬──────┘ └────────┬────────┘        │
 └───────────┼─────────────────┼─────────────────┼─────────────────┘
             │                 │                 │
@@ -153,14 +154,19 @@
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  6. NUMA内存分配                                              │
+│  6. NUMA内存分配 (P2优化: Slab + Pool双路径)                  │
 │  zmalloc.c: zmalloc(100)                                    │
 │  └──► ztrymalloc_usable(100, NULL)                          │
 │       └──► numa_alloc_with_size(100)                        │
-│           ├──► numa_pool_alloc(116, current_node, ...)      │
-│           │   └──► 从64KB chunk分配256字节                   │
+│           ├──► 【P2优化】numa_slab_alloc(100, node, ...)     │
+│           │   └──► 检查size <= SLAB_MAX_OBJECT_SIZE (128B)  │
+│           │   └──► 从16KB slab分配对象 (O(1) bitmap)        │
+│           │   └──► 返回slab内地址                           │
+│           ├──► 【备选】numa_pool_alloc(116, current_node, ...)│
+│           │   └──► 从256KB chunk分配 (O(1) bump pointer)    │
 │           │   └──► from_pool = 1                            │
-│           ├──► numa_init_prefix(raw_ptr, 100, 1)            │
+│           ├──► numa_init_prefix(raw_ptr, 100, 1, node)      │
+│           │   └──► P2 fix: 记录node_id到PREFIX              │
 │           └──► 返回 user_ptr (raw_ptr + 16)                 │
 └──────────────────────────┬──────────────────────────────────┘
                            │
@@ -251,7 +257,106 @@
 
 ---
 
-## 场景3: 内存迁移流程
+## 场景3: Slab Allocator分配流程 (P2优化)
+
+```
+场景: 分配一个小对象（size <= 128B）
+
+┌─────────────────────────────────────────────────────────────┐
+│  1. 分配请求                                                  │
+│  zmalloc(64)                                                │
+│  └──► numa_alloc_with_size(64)                              │
+│      └──► should_use_slab(64) = true (<=128B)               │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  2. Slab分配 (O(1)复杂度)                                     │
+│  numa_slab_alloc(64, target_node, &alloc_size)              │
+│  └──► 查找size class (64B → class_idx=5)                    │
+│  └──► 获取node的slab class                                   │
+│  └──► 检查partial_slabs链表                                  │
+│       └──► 找到可用slab                                      │
+│  └──► bitmap_find_and_set() [O(1)]                          │
+│       └──► __builtin_ffs(~bitmap_word) - 1                  │
+│       └──► __atomic_compare_exchange_n() 原子设置bit        │
+│  └──► 计算对象地址: slab->memory + SLAB_HEADER_SIZE + offset│
+│  └──► __atomic_sub_fetch(&slab->free_count, 1)             │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  3. 初始化PREFIX (P2 fix)                                     │
+│  numa_init_prefix(raw_ptr, 64, 1, target_node)              │
+│  └──► prefix->size = 64                                     │
+│  └──► prefix->from_pool = 1                                 │
+│  └──► prefix->node_id = target_node (关键修复)              │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  4. 返回用户指针                                              │
+│  返回 raw_ptr + PREFIX_SIZE (16字节)                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Slab分配特点**:
+- **时间复杂度**: O(1) - bitmap查找 + 原子操作
+- **空间效率**: 16KB slab可容纳约240个64B对象
+- **无锁设计**: 使用原子操作，减少锁竞争
+- **NUMA感知**: 每个节点独立slab池
+
+---
+
+## 场景4: Slab释放流程 (P2优化)
+
+```
+场景: 释放一个小对象（通过Slab分配）
+
+┌─────────────────────────────────────────────────────────────┐
+│  1. 释放请求                                                  │
+│  zfree(user_ptr)                                            │
+│  └──► numa_free_with_size(user_ptr)                         │
+│      └──► prefix = numa_get_prefix(user_ptr)                │
+│      └──► should_use_slab(prefix->size) = true              │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────┬──────────────────────────────────┐
+│  2. 获取正确节点 (P2 fix关键)                                 │
+│  node_id = prefix->node_id  [从PREFIX读取，非round-robin]   │
+│  └──► 确保在分配时的同一节点释放                              │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  3. O(1) Slab定位 (P2优化)                                    │
+│  numa_slab_free(raw_ptr, total_size, node_id)               │
+│  └──► ptr_addr = (uintptr_t)raw_ptr                         │
+│  └──► slab_base = ptr_addr & ~(SLAB_SIZE - 1)  [页对齐]     │
+│  └──► header = (numa_slab_header_t *)slab_base              │
+│  └──► 验证 header->magic == SLAB_HEADER_MAGIC               │
+│  └──► slab = header->slab  [O(1)获取slab指针]               │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  4. 释放对象                                                  │
+│  bitmap_clear(slab->bitmap, obj_index)                      │
+│  └──► __atomic_fetch_and() 原子清除bit                      │
+│  └──► __atomic_fetch_add(&slab->free_count, 1)             │
+│  └──► 检查是否需要移动slab链表 (full→partial→empty)         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Slab释放特点**:
+- **O(1)定位**: 通过page对齐计算slab基地址，无需遍历链表
+- **节点一致性**: 使用PREFIX中记录的node_id，避免内存泄漏
+- **原子操作**: bitmap操作使用原子指令，线程安全
+
+---
+
+## 场景5: 内存迁移流程
 
 ```
 场景: 将key "mykey" 从Node 0迁移到Node 1
