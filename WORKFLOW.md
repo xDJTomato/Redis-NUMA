@@ -1,7 +1,7 @@
 # Redis NUMA 项目开发工作流规范
 
-> **版本**: v1.0  
-> **更新时间**: 2026-02-13  
+> **版本**: v1.1  
+> **更新时间**: 2026-02-14  
 > **适用对象**: AI开发助手自我约束规范
 
 ---
@@ -13,6 +13,7 @@
 - [开发Checklist](#开发checklist)
 - [常见问题处理](#常见问题处理)
 - [项目知识库](#项目知识库)
+- [近期经验总结](#近期经验总结)
 
 ---
 
@@ -804,6 +805,190 @@ typedef struct {
 
 ---
 
-**最后更新**: 2026-02-13  
-**版本**: v1.0  
+## 📚 近期经验总结
+
+### v1.1 更新内容 (2026-02-14)
+
+#### 1. NUMA可配置策略模块开发经验
+
+**核心成果**:
+- 成功实现6种NUMA分配策略：LOCAL_FIRST、INTERLEAVE、ROUND_ROBIN、WEIGHTED、PRESSURE_AWARE、CXL_OPTIMIZED
+- 完成NUMACONFIG Redis命令接口开发
+- 实现运行时动态配置管理
+
+**关键技术点**:
+```c
+// 策略选择核心逻辑
+static int select_best_node(size_t size) {
+    switch (g_runtime_state.config.strategy_type) {
+        case NUMA_STRATEGY_CONFIG_LOCAL_FIRST:
+            return 0;  // 固定选择节点0
+        case NUMA_STRATEGY_CONFIG_INTERLEAVE:
+            return rand_r(&seed) % num_nodes;  // 随机选择
+        case NUMA_STRATEGY_CONFIG_WEIGHTED:
+            // 加权概率选择
+            break;
+        // ... 其他策略
+    }
+}
+```
+
+**实现难点与解决方案**:
+1. **API现代化**: 将`addReplyMultiBulkLen`替换为`addReplyArrayLen`
+   - 原因：Redis推荐的现代API，更好的类型安全
+   - 影响：完全向后兼容，无功能变更
+
+2. **命令注册问题**: NUMACONFIG命令未生效
+   - 问题：编译成功但运行时无法识别命令
+   - 解决：检查命令表初始化顺序，确保在`populateCommandTable()`中正确注册
+
+#### 2. Git大文件处理经验
+
+**问题场景**:
+```bash
+remote: error: File src/temp-10114.rdb is 398.49 MB; this exceeds GitHub's file size limit of 100.00 MB
+```
+
+**解决方案**:
+1. **立即移除**:
+   ```bash
+   git rm --cached src/temp-10114.rdb
+   echo "src/temp-*.rdb" >> .gitignore
+   ```
+
+2. **历史重写**（当文件已在历史中时）:
+   ```bash
+   git filter-branch --force --index-filter \
+     'git rm --cached --ignore-unmatch src/temp-10114.rdb' \
+     --prune-empty --tag-name-filter cat -- --all
+   ```
+
+3. **强制推送**:
+   ```bash
+   git push --force origin main
+   ```
+
+**预防措施**:
+- 在`.gitignore`中提前添加常见的大文件模式
+- 定期检查仓库大小：`git count-objects -vH`
+- 使用Git LFS处理大二进制文件
+
+#### 3. 文档体系维护经验
+
+**新增模块文档更新流程**:
+
+1. **模块文档目录更新** (`docs/modules/README.md`):
+   ```markdown
+   ### Key级别迁移与策略框架
+   - [05-numa-key-migrate.md](./05-numa-key-migrate.md) - Key级别迁移核心模块
+   - [06-numa-strategy-slots.md](./06-numa-strategy-slots.md) - 策略插槽框架
+   - [07-numa-composite-lru.md](./07-numa-composite-lru.md) - 复合LRU策略实现
+   + - [08-numa-configurable-strategy.md](./08-numa-configurable-strategy.md) - 可配置NUMA分配策略
+   ```
+
+2. **主README导航更新**:
+   ```markdown
+   2. **[模块文档目录](docs/modules/)**
+      - [05-numa-key-migrate.md](docs/modules/05-numa-key-migrate.md) - Key迁移设计
+      - [06-numa-strategy-slots.md](docs/modules/06-numa-strategy-slots.md) - 策略框架
+      - [07-numa-composite-lru.md](docs/modules/07-numa-composite-lru.md) - 复合LRU策略
+   +   - [08-numa-configurable-strategy.md](docs/modules/08-numa-configurable-strategy.md) - 可配置NUMA分配策略
+   ```
+
+3. **技术文档深化**:
+   - 补充具体算法实现细节
+   - 添加代码示例和性能分析
+   - 完善适用场景说明
+
+#### 4. 版本管理最佳实践
+
+**提交信息规范演进**:
+
+**v1.0格式**:
+```
+feat: 实现可配置NUMA分配策略(v2.5)
+
+新增功能：
+- 6种NUMA内存分配策略
+- 运行时动态配置管理
+```
+
+**v1.1改进**:
+```
+docs: 完善NUMA可配置策略文档并更新导航
+
+变更内容：
+- 更新docs/modules/README.md：添加08模块链接
+- 完善策略算法详解：补充6种策略的具体实现原理
+- 技术细节增强：添加代码示例和性能特点说明
+```
+
+**关键改进点**:
+- 更精确的type标识（feat→docs）
+- 结构化的变更说明
+- 技术细节的量化描述
+
+#### 5. 开发效率提升技巧
+
+**并行任务处理**:
+- 文档更新与代码实现可并行进行
+- 测试验证可在文档完善过程中穿插执行
+- Git操作（add/commit/push）可批量处理
+
+**工具链优化**:
+```bash
+# 一键批量操作
+git add docs/modules/*.md README.md NUMA_DEVELOPMENT_LOG.md
+git commit -m "docs: 批量更新文档"
+git push origin main
+```
+
+**状态同步机制**:
+- 每次实现后立即更新开发日志
+- 文档变更与代码变更保持原子性
+- 定期验证文档与实现的一致性
+
+#### 6. 质量保证措施
+
+**双重验证机制**:
+1. **功能验证**：通过Redis命令测试实际功能
+2. **文档验证**：确保文档描述与代码实现一致
+
+**回归测试**:
+```bash
+# 验证历史功能不受影响
+./test_numa_config.sh  # 新功能测试
+./test_migrate         # 迁移功能验证
+redis-benchmark        # 性能基准测试
+```
+
+**兼容性检查**:
+- 确保新旧模块和谐共存
+- 验证API向后兼容性
+- 测试不同配置组合
+
+#### 7. 经验教训总结
+
+**成功因素**:
+✅ **渐进式开发**：复杂功能分步实现，降低风险
+✅ **文档先行**：实现前充分理解设计文档
+✅ **测试驱动**：每次变更后立即验证
+✅ **版本控制**：细粒度提交，便于追溯
+
+**需要注意的问题**:
+⚠️ **大文件管理**：提前配置.gitignore，避免历史污染
+⚠️ **API兼容性**：现代API替换需验证向后兼容性
+⚠️ **文档同步**：代码变更后及时更新相关文档
+⚠️ **依赖管理**：新增模块要考虑与现有模块的集成
+
+**未来改进方向**:
+- 建立自动化文档生成机制
+- 完善单元测试覆盖率
+- 增加性能监控和告警
+- 优化CI/CD流程
+
+---
+
+**最后更新**: 2026-02-14  
+**版本**: v1.1  
 **维护**: AI开发助手

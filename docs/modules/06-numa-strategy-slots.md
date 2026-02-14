@@ -2,11 +2,11 @@
 
 ## 模块概述
 
-**状态**: ✅ **已实现** - 插槽框架、0号兜底策略和1号默认策略已完成
+**状态**: ✅ **已实现** - 插槽框架、0号兜底策略和1号默认策略已完成，支持NUMACONFIG动态配置策略
 
 **文件**: [src/numa_strategy_slots.h](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_strategy_slots.h), [src/numa_strategy_slots.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_strategy_slots.c), [src/numa_composite_lru.h](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_composite_lru.h), [src/numa_composite_lru.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_composite_lru.c)
 
-**功能**: 提供插槽化策略管理框架，支持动态加载、配置和组合多种NUMA负载策略。
+**功能**: 提供插槽化策略管理框架，支持动态加载、配置和组合多种NUMA负载策略，与NUMACONFIG命令接口深度集成。
 
 **核心思想**:
 - 策略模块化：每个策略独立实现，通过统一接口接入

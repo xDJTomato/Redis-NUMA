@@ -2,7 +2,7 @@
 
 ## 模块概述
 
-**状态**: ✅ **已实现** - 所有Redis核心数据类型迁移已完成
+**状态**: ✅ **已实现** - 所有Redis核心数据类型迁移已完成，与NUMACONFIG可配置策略模块协同工作
 
 **文件**: [src/numa_key_migrate.h](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_key_migrate.h), [src/numa_key_migrate.c](file:///home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/src/numa_key_migrate.c)
 
