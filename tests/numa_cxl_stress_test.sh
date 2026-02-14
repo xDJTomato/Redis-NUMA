@@ -77,6 +77,37 @@ log_section() {
     echo "========== $* ==========" >> "$REPORT_FILE"
 }
 
+#===============================================================================
+# 清理函数
+#===============================================================================
+
+cleanup() {
+    local exit_code=$?
+    echo ""
+    echo -e "${YELLOW}[WARN]${NC} $(date '+%H:%M:%S') 脚本退出，执行清理..."
+    
+    # 停止内存监控
+    if [ -f "${DIAG_DIR}/monitor.pid" ]; then
+        local monitor_pid=$(cat "${DIAG_DIR}/monitor.pid" 2>/dev/null)
+        if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then
+            kill "$monitor_pid" 2>/dev/null || true
+            echo -e "${GREEN}[INFO]${NC} $(date '+%H:%M:%S') 已停止内存监控进程 (PID=$monitor_pid)"
+        fi
+        rm -f "${DIAG_DIR}/monitor.pid"
+    fi
+    
+    # 清理临时文件
+    if [ -n "${DIAG_DIR}" ] && [ -d "${DIAG_DIR}" ]; then
+        rm -f "${DIAG_DIR}"/*.pid 2>/dev/null || true
+    fi
+    
+    echo -e "${GREEN}[INFO]${NC} $(date '+%H:%M:%S') 清理完成，退出码: $exit_code"
+    exit $exit_code
+}
+
+# 注册trap处理器
+trap cleanup EXIT INT TERM
+
 # 获取Redis内存使用(MB)
 get_memory_mb() {
     local rss_kb
@@ -1114,6 +1145,11 @@ quick_test() {
     log_info "最终Keys: $(get_key_count)"
     log_info "NUMA配置:"
     get_numa_config_stats
+    
+    # 停止内存监控
+    if [ "$ENABLE_MEMORY_MONITOR" -eq 1 ]; then
+        stop_memory_monitor
+    fi
     
     # 生成简单诊断报告
     if [ "$ENABLE_PERF" -eq 1 ] || [ "$ENABLE_MEMORY_MONITOR" -eq 1 ]; then
