@@ -69,6 +69,9 @@
 - [07-numa-composite-lru.md](./07-numa-composite-lru.md) - 复合LRU策略实现
 - [08-numa-configurable-strategy.md](./08-numa-configurable-strategy.md) - 可配置NUMA分配策略
 
+### 性能分析与优化
+- [09-memory-fragmentation-analysis.md](./09-memory-fragmentation-analysis.md) - 内存碎片问题深度分析
+
 ## 版本历史
 
 | 版本 | 日期 | 变更内容 |
