@@ -25,6 +25,11 @@
 #define NUMA_POOL_SIZE_CLASSES 16
 #define NUMA_POOL_MAX_ALLOC 512            /* Maximum allocation from pool */
 
+/* P1 Optimization: Compact thresholds */
+#define COMPACT_THRESHOLD 0.3              /* Trigger compact when utilization < 30% */
+#define COMPACT_MIN_FREE_RATIO 0.5         /* Chunk must have >50% free space to compact */
+#define COMPACT_CHECK_INTERVAL 10          /* Check every N serverCron cycles */
+
 /* Dynamic chunk size thresholds */
 #define CHUNK_SIZE_SMALL    (16 * 1024)    /* 16KB for small objects (<= 256B) */
 #define CHUNK_SIZE_MEDIUM   (64 * 1024)    /* 64KB for medium objects (<= 1KB) */
@@ -62,7 +67,8 @@ void numa_pool_cleanup(void);
 void *numa_pool_alloc(size_t size, int node, size_t *total_size);
 
 /* Free memory allocated via numa_pool_alloc
- * Only direct allocations are actually freed; pool memory is retained */
+ * P1 optimization: Records freed blocks in free list for reuse
+ * Only direct allocations are actually freed to system */
 void numa_pool_free(void *ptr, size_t total_size, int from_pool);
 
 /* Set current NUMA node for allocations */
@@ -82,5 +88,14 @@ void numa_pool_get_stats(int node, numa_pool_stats_t *stats);
 
 /* Reset pool statistics */
 void numa_pool_reset_stats(void);
+
+/* P1 Optimization: Compact memory pools */
+/* Try to compact low-utilization chunks across all nodes
+ * Returns number of chunks compacted */
+int numa_pool_try_compact(void);
+
+/* Get chunk utilization ratio for a specific node and size class
+ * Returns utilization percentage (0.0 - 1.0) */
+float numa_pool_get_utilization(int node, int size_class_idx);
 
 #endif /* NUMA_POOL_H */

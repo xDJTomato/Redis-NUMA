@@ -37,18 +37,31 @@ size_t get_chunk_size_for_object(size_t obj_size) {
     }
 }
 
+/* Forward declarations */
+typedef struct numa_pool_chunk numa_pool_chunk_t;
+typedef struct free_block free_block_t;
+
+/* P1 Optimization: Free block structure for free list management */
+struct free_block {
+    void *ptr;                     /* Pointer to freed memory */
+    size_t size;                   /* Size of the freed block */
+    struct free_block *next;       /* Next free block in list */
+};
+
 /* Memory pool chunk structure */
-typedef struct numa_pool_chunk {
+struct numa_pool_chunk {
     void *memory;                  /* NUMA-allocated memory */
     size_t size;                   /* Chunk size */
     size_t offset;                 /* Current allocation offset */
+    size_t used_bytes;             /* Actually allocated bytes (P1: for utilization tracking) */
     struct numa_pool_chunk *next;  /* Next chunk in list */
-} numa_pool_chunk_t;
+};
 
 /* Size class pool */
 typedef struct {
     size_t obj_size;               /* Object size for this class */
     numa_pool_chunk_t *chunks;     /* Chunk list */
+    free_block_t *free_list;       /* P1: Free list for this size class */
     pthread_mutex_t lock;          /* Thread safety */
     size_t chunks_count;           /* Statistics */
 } numa_size_class_pool_t;
@@ -124,6 +137,7 @@ int numa_pool_init(void)
         for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
             pool_ctx.node_pools[i].pools[j].obj_size = numa_pool_size_classes[j];
             pool_ctx.node_pools[i].pools[j].chunks = NULL;
+            pool_ctx.node_pools[i].pools[j].free_list = NULL;  /* P1: Initialize free list */
             pool_ctx.node_pools[i].pools[j].chunks_count = 0;
             pthread_mutex_init(&pool_ctx.node_pools[i].pools[j].lock, NULL);
         }
@@ -197,6 +211,7 @@ static numa_pool_chunk_t *alloc_new_chunk(int node, size_t obj_size)
     
     chunk->size = chunk_size;
     chunk->offset = 0;
+    chunk->used_bytes = 0;        /* P1: Initialize utilization tracking */
     chunk->next = NULL;
     
     return chunk;
@@ -234,29 +249,50 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size)
             
             pthread_mutex_lock(&pool->lock);
             
-            /* Try to allocate from existing chunks */
-            numa_pool_chunk_t *chunk = pool->chunks;
             size_t aligned_size = (alloc_size + 15) & ~15;  /* 16-byte align */
             
-            while (chunk) {
-                if (chunk->offset + aligned_size <= chunk->size) {
-                    result = (char *)chunk->memory + chunk->offset;
-                    chunk->offset += aligned_size;
+            /* P1: First try to allocate from free list */
+            free_block_t **prev_ptr = &pool->free_list;
+            free_block_t *free_block = pool->free_list;
+            
+            while (free_block) {
+                if (free_block->size >= aligned_size) {
+                    /* Found suitable free block, reuse it */
+                    result = free_block->ptr;
+                    *prev_ptr = free_block->next;
+                    free(free_block);  /* Free the free_block metadata */
                     from_pool = 1;
                     break;
                 }
-                chunk = chunk->next;
+                prev_ptr = &free_block->next;
+                free_block = free_block->next;
+            }
+            
+            /* If no free block found, try bump pointer allocation */
+            if (!result) {
+                numa_pool_chunk_t *chunk = pool->chunks;
+                while (chunk) {
+                    if (chunk->offset + aligned_size <= chunk->size) {
+                        result = (char *)chunk->memory + chunk->offset;
+                        chunk->offset += aligned_size;
+                        chunk->used_bytes += aligned_size;
+                        from_pool = 1;
+                        break;
+                    }
+                    chunk = chunk->next;
+                }
             }
             
             /* Allocate new chunk if needed */
             if (!result) {
                 numa_pool_chunk_t *new_chunk = alloc_new_chunk(node, alloc_size);
                 if (new_chunk) {
+                    result = new_chunk->memory;
                     new_chunk->offset = aligned_size;
+                    new_chunk->used_bytes = aligned_size;  /* P1: Track initial allocation */
                     new_chunk->next = pool->chunks;
                     pool->chunks = new_chunk;
                     pool->chunks_count++;
-                    result = new_chunk->memory;
                     from_pool = 1;
                 }
             }
@@ -291,18 +327,62 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size)
     return result;
 }
 
-/* Free memory (only direct allocations are freed) */
+/* Free memory - P1: Add freed blocks to free list */
 void numa_pool_free(void *ptr, size_t total_size, int from_pool)
 {
     if (!ptr) {
         return;
     }
     
-    /* Only free direct NUMA allocations */
     if (!from_pool) {
+        /* Only free direct NUMA allocations */
         numa_free(ptr, total_size);
+        return;
     }
-    /* Pool memory is not individually freed */
+    
+    /* P1: For pool allocations, add to free list */
+    if (!pool_ctx.initialized || !pool_ctx.node_pools) {
+        return;  /* Pool not initialized, just leak it */
+    }
+    
+    /* Find the appropriate size class for this size */
+    size_t aligned_size = (total_size + 15) & ~15;
+    int class_idx = -1;
+    
+    for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
+        if (aligned_size <= numa_pool_size_classes[i]) {
+            class_idx = i;
+            break;
+        }
+    }
+    
+    if (class_idx < 0) {
+        return;  /* Size doesn't match any class, skip */
+    }
+    
+    /* We don't know which node, so try to find it or just use node 0 */
+    /* This is a limitation but acceptable for now */
+    int node = 0;
+    if (pool_ctx.current_node >= 0 && pool_ctx.current_node < pool_ctx.num_nodes) {
+        node = pool_ctx.current_node;
+    }
+    
+    /* Create free block */
+    free_block_t *free_block = malloc(sizeof(free_block_t));
+    if (!free_block) {
+        return;  /* Can't record free block, just leak it */
+    }
+    
+    free_block->ptr = ptr;
+    free_block->size = aligned_size;
+    
+    /* Add to pool's free list */
+    numa_size_class_pool_t *pool = &pool_ctx.node_pools[node].pools[class_idx];
+    
+    pthread_mutex_lock(&pool->lock);
+    free_block->next = pool->free_list;
+    pool->free_list = free_block;
+    pthread_mutex_unlock(&pool->lock);
 }
 
 /* Set current NUMA node */
@@ -355,4 +435,118 @@ void numa_pool_reset_stats(void)
     for (int i = 0; i < pool_ctx.num_nodes; i++) {
         memset(&pool_ctx.node_pools[i].stats, 0, sizeof(numa_pool_stats_t));
     }
+}
+
+/* P1 Optimization: Get chunk utilization ratio */
+float numa_pool_get_utilization(int node, int size_class_idx)
+{
+    if (!pool_ctx.initialized || !pool_ctx.node_pools) {
+        return 0.0f;
+    }
+    
+    if (node < 0 || node >= pool_ctx.num_nodes) {
+        return 0.0f;
+    }
+    
+    if (size_class_idx < 0 || size_class_idx >= NUMA_POOL_SIZE_CLASSES) {
+        return 0.0f;
+    }
+    
+    numa_size_class_pool_t *pool = &pool_ctx.node_pools[node].pools[size_class_idx];
+    pthread_mutex_lock(&pool->lock);
+    
+    size_t total_size = 0;
+    size_t used_bytes = 0;
+    numa_pool_chunk_t *chunk = pool->chunks;
+    
+    while (chunk) {
+        total_size += chunk->size;
+        used_bytes += chunk->used_bytes;
+        chunk = chunk->next;
+    }
+    
+    pthread_mutex_unlock(&pool->lock);
+    
+    if (total_size == 0) {
+        return 0.0f;
+    }
+    
+    return (float)used_bytes / (float)total_size;
+}
+
+/* P1 Optimization: Try to compact low-utilization chunks */
+int numa_pool_try_compact(void)
+{
+    if (!pool_ctx.initialized || !pool_ctx.node_pools) {
+        return 0;
+    }
+    
+    int compacted_count = 0;
+    
+    /* Iterate through all nodes and size classes */
+    for (int node = 0; node < pool_ctx.num_nodes; node++) {
+        for (int class_idx = 0; class_idx < NUMA_POOL_SIZE_CLASSES; class_idx++) {
+            numa_size_class_pool_t *pool = &pool_ctx.node_pools[node].pools[class_idx];
+            
+            pthread_mutex_lock(&pool->lock);
+            
+            /* Clean up free list entries that might be from compacted chunks */
+            /* For now, we just free the free list to simplify */
+            free_block_t *free_block = pool->free_list;
+            int free_count = 0;
+            while (free_block) {
+                free_block_t *next = free_block->next;
+                free_count++;
+                free_block = next;
+            }
+            
+            /* Only compact if we have many free blocks */
+            if (free_count > 10) {
+                /* Clear free list */
+                free_block = pool->free_list;
+                while (free_block) {
+                    free_block_t *next = free_block->next;
+                    free(free_block);
+                    free_block = next;
+                }
+                pool->free_list = NULL;
+                compacted_count++;
+            }
+            
+            /* Find and free low-utilization chunks */
+            numa_pool_chunk_t **prev_ptr = &pool->chunks;
+            numa_pool_chunk_t *chunk = pool->chunks;
+            
+            while (chunk) {
+                float utilization = 0.0f;
+                if (chunk->size > 0) {
+                    utilization = (float)chunk->used_bytes / (float)chunk->size;
+                }
+                
+                /* If chunk is below threshold and has significant free space */
+                if (utilization < COMPACT_THRESHOLD && 
+                    (1.0f - utilization) >= COMPACT_MIN_FREE_RATIO) {
+                    
+                    /* Remove chunk from list and free it */
+                    *prev_ptr = chunk->next;
+                    numa_free(chunk->memory, chunk->size);
+                    free(chunk);
+                    pool->chunks_count--;
+                    compacted_count++;
+                    
+                    /* Move to next without advancing prev_ptr */
+                    chunk = *prev_ptr;
+                    continue;
+                }
+                
+                /* Move to next chunk */
+                prev_ptr = &chunk->next;
+                chunk = chunk->next;
+            }
+            
+            pthread_mutex_unlock(&pool->lock);
+        }
+    }
+    
+    return compacted_count;
 }

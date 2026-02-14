@@ -2112,6 +2112,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     cronUpdateMemoryStats();
 
+    /* P1 Optimization: Periodically compact NUMA memory pool */
+    #ifdef USE_NUMA_POOL
+    run_with_period(COMPACT_CHECK_INTERVAL * 1000) {
+        int compacted = numa_pool_try_compact();
+        if (compacted > 0) {
+            serverLog(LL_VERBOSE, "NUMA pool compacted %d low-utilization chunks", compacted);
+        }
+    }
+    #endif
+
     /* We received a SIGTERM, shutting down here in a safe way, as it is
      * not ok doing so inside the signal handler. */
     if (server.shutdown_asap) {

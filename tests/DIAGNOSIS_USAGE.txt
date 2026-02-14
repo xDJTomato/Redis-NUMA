@@ -1,0 +1,244 @@
+================================================================================
+Redis NUMA 内存池诊断功能使用指南
+================================================================================
+
+一、概述
+--------
+压力测试脚本已升级，新增诊断功能，用于分析Redis NUMA简单内存池设计问题：
+- perf性能分析：识别CPU热点函数
+- 内存监控：实时跟踪内存使用趋势  
+- 内存池统计：分析碎片率和NUMA分布
+- strace追踪：分析系统调用开销
+
+二、配置参数
+------------
+在脚本开头可配置以下参数：
+
+```bash
+# 内存配置 (降低到50%避免OOM)
+TARGET_USAGE_PERCENT=50           # 目标内存使用率
+PARALLEL_CLIENTS=20               # 并发客户端数
+PIPELINE_DEPTH=8                  # 管道深度
+
+# 诊断配置
+ENABLE_PERF=1                     # 启用perf (需要安装perf工具)
+ENABLE_MEMORY_MONITOR=1           # 启用内存监控
+PERF_DURATION=10                  # perf采样时长(秒)
+```
+
+三、前置条件
+------------
+1. 启动Redis服务器 (使用NUMA内存池版本):
+   ```bash
+   cd /path/to/redis-CXL
+   make MALLOC=libc  # NUMA内存池需要libc
+   ./src/redis-server ./redis.conf
+   ```
+
+2. 安装诊断工具 (可选，根据需要):
+   ```bash
+   sudo apt-get install linux-tools-common linux-tools-generic  # perf
+   sudo apt-get install strace                                  # strace
+   sudo apt-get install numactl                                 # numastat
+   ```
+
+四、运行测试
+------------
+1. 快速测试 (推荐首次运行):
+   ```bash
+   cd tests
+   ./numa_cxl_stress_test.sh quick
+   ```
+   - 填充2GB内存
+   - 运行基础性能测试
+   - 收集诊断数据
+
+2. 完整测试:
+   ```bash
+   ./numa_cxl_stress_test.sh full
+   ```
+   - 测试所有6种NUMA策略
+   - 填充5.6GB内存
+   - 完整诊断分析
+
+3. 单策略测试+诊断:
+   ```bash
+   ./numa_cxl_stress_test.sh strategy local_first
+   ```
+
+五、诊断数据输出
+----------------
+所有诊断数据保存在: tests/reports/diagnosis_YYYYMMDD_HHMMSS/
+
+关键文件:
+├── DIAGNOSIS_SUMMARY.txt         # 诊断摘要报告 (重要!)
+├── perf_cpu.data                 # perf原始数据
+├── perf_cpu_report.txt           # perf文本报告
+├── perf_mem.data                 # perf内存分析(需root)
+├── memory_timeline.csv           # 内存使用时间线
+├── redis_memory_info.txt         # Redis内存详情
+├── smaps_summary.txt             # 进程内存映射统计
+├── numa_distribution.txt         # NUMA节点分布
+├── fragmentation.txt             # 内存碎片率
+├── memory_blocks.txt             # 内存块分布
+└── strace_summary.txt            # 系统调用统计
+
+六、分析重点
+------------
+1. 查看诊断摘要:
+   ```bash
+   cat tests/reports/diagnosis_*/DIAGNOSIS_SUMMARY.txt
+   ```
+
+2. 识别CPU热点:
+   ```bash
+   # 查看哪些函数消耗CPU最多
+   head -30 tests/reports/diagnosis_*/perf_cpu_report.txt
+   ```
+   
+   关注点:
+   - numa_alloc_onnode占比 (如果>5%说明池不够大)
+   - pool_alloc占比 (如果>10%说明分配逻辑复杂)
+   - malloc/free占比 (应该很低，否则池未生效)
+
+3. 分析内存增长趋势:
+   ```bash
+   # 查看内存使用曲线
+   cat tests/reports/diagnosis_*/memory_timeline.csv
+   ```
+   
+   关注点:
+   - RSS快速增长后是否稳定
+   - 有无内存泄漏(持续增长)
+   - Keys与内存使用是否成正比
+
+4. 检查内存碎片:
+   ```bash
+   cat tests/reports/diagnosis_*/fragmentation.txt
+   ```
+   
+   判断标准:
+   - <1.3: 良好
+   - 1.3-1.5: 可接受
+   - >1.5: 严重碎片,需优化chunk大小
+
+5. 分析NUMA分布:
+   ```bash
+   cat tests/reports/diagnosis_*/numa_distribution.txt
+   ```
+   
+   关注点:
+   - 各节点内存是否按策略分配
+   - 是否有跨节点访问(Other列)
+
+6. 系统调用开销:
+   ```bash
+   cat tests/reports/diagnosis_*/strace_summary.txt
+   ```
+   
+   关注点:
+   - mbind调用次数(应该很少)
+   - mmap/munmap频率
+
+七、常见问题诊断
+----------------
+问题1: 进程被OOM Killer杀掉
+症状: 测试中途Redis进程消失
+诊断:
+  1. 查看dmesg: dmesg | grep -i "out of memory"
+  2. 降低TARGET_USAGE_PERCENT=30
+  3. 减小batch_size=20000
+
+问题2: 性能不如预期
+症状: SET/GET低于100K req/s
+诊断:
+  1. 查看perf_cpu_report.txt找热点函数
+  2. 如果numa_alloc_onnode多,说明池太小
+  3. 如果pool_alloc占比高,说明分配逻辑慢
+  4. 查看碎片率是否>1.5
+
+问题3: 内存碎片严重
+症状: fragmentation_ratio > 1.5
+诊断:
+  1. 查看memory_blocks.txt分析块大小分布
+  2. 调整内存池chunk大小(当前64KB)
+  3. 调整size_class分级(当前8级)
+
+问题4: NUMA分布不均
+症状: 某个节点内存占用过高
+诊断:
+  1. 检查策略是否正确设置
+  2. 查看perf看是否有大量迁移
+  3. 验证权重配置是否生效
+
+八、内存池设计评估
+------------------
+根据诊断数据,评估简单内存池设计的问题:
+
+1. 池大小是否足够:
+   - 看numa_alloc_onnode调用频率
+   - 如果频繁说明池太小,需扩大
+
+2. chunk大小是否合理:
+   - 看内存块分布
+   - 如果大量小块说明chunk太大浪费
+   - 如果大量越界说明chunk太小
+
+3. size_class分级是否合理:
+   - 看对象大小分布
+   - 是否集中在某几级
+   - 是否需要调整分级策略
+
+4. 碎片管理策略:
+   - 当前不释放池内存(简化设计)
+   - 碎片率是否可接受
+   - 是否需要引入compact机制
+
+5. NUMA亲和性:
+   - 跨节点访问比例
+   - 迁移开销
+   - 负载均衡效果
+
+九、性能基准
+------------
+正常情况下的性能指标:
+
+- SET: 150K-180K req/s
+- GET: 160K-200K req/s
+- 内存碎片率: <1.3
+- numa_alloc_onnode: <1% CPU
+- pool_alloc: <5% CPU
+- NUMA分布: 按策略预期分配
+
+如果偏离这些指标,说明内存池设计存在问题。
+
+十、进一步调试
+--------------
+如果需要更深入分析:
+
+1. 使用gdb调试:
+   ```bash
+   gdb -p $(pgrep redis-server)
+   (gdb) call zmalloc_get_pool_stats()  # 如果实现了统计函数
+   ```
+
+2. 使用valgrind检测内存问题:
+   ```bash
+   valgrind --leak-check=full --track-origins=yes \
+     ./src/redis-server ./redis.conf
+   ```
+
+3. 查看Redis日志:
+   ```bash
+   tail -f /var/log/redis/redis-server.log
+   ```
+
+4. 实时监控:
+   ```bash
+   watch -n 1 'redis-cli INFO memory | grep -E "used_memory|fragmentation"'
+   ```
+
+================================================================================
+联系与反馈
+如有问题或建议,请查看项目README或提交issue。
+================================================================================
