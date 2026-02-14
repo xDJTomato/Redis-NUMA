@@ -1,0 +1,76 @@
+快速测试 Sat Feb 14 14:55:51 CST 2026
+[WARN] 14:55:51 Redis未运行，尝试自动启动...
+[INFO] 14:55:51 检测到Redis未运行，正在启动...
+[INFO] 14:55:52 Redis启动成功 (端口: 6379)
+[INFO] 14:55:53 Redis连接正常
+[INFO] 14:55:54 执行FLUSHALL...
+[INFO] 14:55:56 快速填充1.5GB数据...
+
+========== 内存填充阶段 (目标: 1536MB, 渐进式填充避免OOM) ==========
+[INFO] 14:55:56 当前内存: 3MB, 目标: 1536MB
+[INFO] 14:55:56 需要填充: 1533MB
+[WARN] 14:55:56 采用保守填充策略避免OOM: 批次=50000, value=2048B
+[INFO] 14:55:56 计划填充: 784896 个 2048B 的key
+[INFO] 14:55:56 启动内存监控 (PID=579755, 间隔=2秒)
+[INFO] 14:55:56 内存监控已启动 (监控PID=579850)
+[INFO] 14:55:56 填充批次: 50000 keys (range: 500000)
+[INFO] 14:55:56 已填充: 50000/784896 keys (6%)
+[INFO] 14:55:56 填充批次: 50000 keys (range: 500000)
+[INFO] 14:55:56 已填充: 100000/784896 keys (12%)
+[INFO] 14:55:57 填充批次: 50000 keys (range: 500000)
+[INFO] 14:55:57 已填充: 150000/784896 keys (19%)
+[INFO] 14:55:58 填充批次: 50000 keys (range: 500000)
+[INFO] 14:55:58 已填充: 200000/784896 keys (25%)
+[INFO] 14:55:58 填充批次: 50000 keys (range: 500000)
+[INFO] 14:55:59 已填充: 250000/784896 keys (31%)
+[INFO] 14:55:59 填充批次: 50000 keys (range: 500000)
+[INFO] 14:55:59 已填充: 300000/784896 keys (38%)
+[INFO] 14:56:00 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:00 已填充: 350000/784896 keys (44%)
+[INFO] 14:56:01 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:01 已填充: 400000/784896 keys (50%)
+[INFO] 14:56:01 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:02 已填充: 450000/784896 keys (57%)
+[INFO] 14:56:02 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:03 已填充: 500000/784896 keys (63%)
+[INFO] 14:56:03 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:04 已填充: 550000/784896 keys (70%)
+[INFO] 14:56:04 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:05 已填充: 600000/784896 keys (76%)
+[INFO] 14:56:05 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:06 已填充: 650000/784896 keys (82%)
+[INFO] 14:56:06 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:07 已填充: 700000/784896 keys (89%)
+[INFO] 14:56:07 填充批次: 50000 keys (range: 500000)
+[INFO] 14:56:08 已填充: 750000/784896 keys (95%)
+[INFO] 14:56:08 填充批次: 34896 keys (range: 500000)
+[INFO] 14:56:09 已填充: 784896/784896 keys (100%)
+[INFO] 14:56:12 填充完成: 842MB / 1536MB (54%), Keys: 396105, 耗时: 13s
+
+========== 内存池统计信息 ==========
+[INFO] 14:56:12 Redis内存详情:
+used_memory:867155237
+used_memory_human:826.98M
+used_memory_rss:883286016
+used_memory_rss_human:842.37M
+used_memory_peak:868137770
+used_memory_peak_human:827.92M
+used_memory_peak_perc:99.89%
+used_memory_overhead:21024405
+used_memory_startup:985901
+used_memory_dataset:846130832
+used_memory_dataset_perc:97.69%
+allocator_allocated:867104717
+allocator_active:883254272
+allocator_resident:883254272
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:1.02
+allocator_frag_bytes:16149555
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:1.02
+mem_fragmentation_bytes:16181299
+mem_allocator:libc

@@ -25,10 +25,10 @@
 #define NUMA_POOL_SIZE_CLASSES 16
 #define NUMA_POOL_MAX_ALLOC 4096           /* Maximum allocation from pool (increased for P2) */
 
-/* P2 Optimization: Slab Allocator configuration */
-#define SLAB_SIZE 4096                     /* 4KB slab size (one page) */
-#define SLAB_MAX_OBJECT_SIZE 512           /* Use slab for objects <= 512B */
-#define SLAB_BITMAP_SIZE 4                 /* 128 bits for up to 128 objects */
+/* P2 Optimization: Slab Allocator configuration - Optimized */
+#define SLAB_SIZE (16 * 1024)              /* 16KB slab size (P2 fix: increased from 4KB) */
+#define SLAB_MAX_OBJECT_SIZE 128           /* Use slab for small objects <=128B */
+#define SLAB_BITMAP_SIZE 16                /* 512 bits for up to 512 objects (increased for larger slab) */
 #define SLAB_EMPTY_CACHE_MAX 2             /* Max empty slabs to keep per class */
 
 /* P1 Optimization: Compact thresholds */
@@ -36,10 +36,10 @@
 #define COMPACT_MIN_FREE_RATIO 0.5         /* Chunk must have >50% free space to compact */
 #define COMPACT_CHECK_INTERVAL 10          /* Check every N serverCron cycles */
 
-/* Dynamic chunk size thresholds */
-#define CHUNK_SIZE_SMALL    (16 * 1024)    /* 16KB for small objects (<= 256B) */
-#define CHUNK_SIZE_MEDIUM   (64 * 1024)    /* 64KB for medium objects (<= 1KB) */
-#define CHUNK_SIZE_LARGE    (256 * 1024)   /* 256KB for large objects (<= 4KB) */
+/* Dynamic chunk size thresholds - increased for better performance */
+#define CHUNK_SIZE_SMALL    (256 * 1024)   /* 256KB for small objects (<= 256B) */
+#define CHUNK_SIZE_MEDIUM   (512 * 1024)   /* 512KB for medium objects (<= 1KB) */
+#define CHUNK_SIZE_LARGE    (1024 * 1024)  /* 1MB for large objects (<= 4KB) */
 
 /* Size classes for memory pool */
 extern const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES];
@@ -121,7 +121,7 @@ void *numa_slab_alloc(size_t size, int node, size_t *total_size);
 void numa_slab_free(void *ptr, size_t total_size, int node);
 
 /* Check if size should use slab allocator
- * Returns 1 if size <= SLAB_MAX_OBJECT_SIZE, 0 otherwise */
+ * Returns 1 if size <= SLAB_MAX_OBJECT_SIZE (128B), 0 otherwise */
 static inline int should_use_slab(size_t size) {
     return size <= SLAB_MAX_OBJECT_SIZE;
 }

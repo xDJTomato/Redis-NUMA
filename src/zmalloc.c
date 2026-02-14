@@ -158,7 +158,8 @@ int numa_get_strategy(void)
 typedef struct {
     size_t size;     /* Size of the allocated memory */
     char from_pool;  /* 1 if from pool, 0 if direct allocation */
-    char padding[7]; /* Padding for alignment */
+    char node_id;    /* NUMA node ID for correct free routing (P2 fix) */
+    char padding[6]; /* Padding for alignment */
 } numa_alloc_prefix_t;
 
 #define PREFIX_SIZE (sizeof(numa_alloc_prefix_t))
@@ -215,11 +216,12 @@ static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
 #ifdef HAVE_NUMA
 /* Helper: Initialize prefix metadata for allocated memory */
-static inline void numa_init_prefix(void *ptr, size_t size, int from_pool)
+static inline void numa_init_prefix(void *ptr, size_t size, int from_pool, int node_id)
 {
     numa_alloc_prefix_t *prefix = (numa_alloc_prefix_t *)ptr;
     prefix->size = size;
     prefix->from_pool = from_pool;
+    prefix->node_id = (char)node_id;  /* P2 fix: Record allocation node for correct free */
 }
 
 /* Helper: Get prefix from user pointer */
@@ -242,14 +244,19 @@ static void *numa_alloc_with_size(size_t size)
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
     
-    /* 轮询选择NUMA节点实现负载均衡 */
-    static __thread int round_robin_index = 0;
-    int target_node = round_robin_index % numa_ctx.num_nodes;
-    round_robin_index++;
+    /* Fast path: Skip round-robin for single NUMA node */
+    int target_node;
+    if (numa_ctx.num_nodes == 1) {
+        target_node = 0;
+    } else {
+        static __thread int round_robin_index = 0;
+        target_node = round_robin_index % numa_ctx.num_nodes;
+        round_robin_index++;
+    }
     
     void *raw_ptr = NULL;
     
-    /* P2 Optimization: Use Slab for small objects (<=512B) */
+    /* P2 Optimization: Use Slab for small objects (<=128B) */
     if (should_use_slab(size)) {
         raw_ptr = numa_slab_alloc(size, target_node, &alloc_size);
     }
@@ -265,7 +272,7 @@ static void *numa_alloc_with_size(size_t size)
     /* 判断是否来自内存池（根据大小判断） */
     int from_pool = (total_size <= NUMA_POOL_MAX_ALLOC) ? 1 : 0;
 
-    numa_init_prefix(raw_ptr, size, from_pool);
+    numa_init_prefix(raw_ptr, size, from_pool, target_node);  /* P2 fix: Pass node_id */
     update_zmalloc_stat_alloc(total_size);
     return numa_to_user_ptr(raw_ptr);
 }
@@ -279,6 +286,7 @@ static void numa_free_with_size(void *user_ptr)
     numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
     size_t total_size = prefix->size + PREFIX_SIZE;
     size_t size = prefix->size;
+    int node_id = (int)prefix->node_id;  /* P2 fix: Read correct node from PREFIX */
 
     update_zmalloc_stat_free(total_size);
 
@@ -286,10 +294,8 @@ static void numa_free_with_size(void *user_ptr)
     
     /* P2 Optimization: Free to Slab if small object */
     if (should_use_slab(size) && prefix->from_pool) {
-        /* Get target node from TLS or default */
-        static __thread int round_robin_index = 0;
-        int target_node = round_robin_index % numa_ctx.num_nodes;
-        numa_slab_free(raw_ptr, total_size, target_node);
+        /* P2 fix: Use stored node_id instead of round-robin */
+        numa_slab_free(raw_ptr, total_size, node_id);
     } else {
         /* Use Pool free for larger objects */
         numa_pool_free(raw_ptr, total_size, prefix->from_pool);
@@ -387,7 +393,7 @@ static void *numa_alloc_on_specific_node(size_t size, int node)
     if (!raw_ptr)
         return NULL;
 
-    numa_init_prefix(raw_ptr, size, 0);  /* Mark as direct allocation */
+    numa_init_prefix(raw_ptr, size, 0, node);  /* Mark as direct allocation, record node */
     update_zmalloc_stat_alloc(total_size);
     return numa_to_user_ptr(raw_ptr);
 }

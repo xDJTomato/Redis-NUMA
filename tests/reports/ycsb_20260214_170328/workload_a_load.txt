@@ -1,0 +1,4 @@
+  File "/tmp/ycsb-0.17.0/bin/ycsb", line 228
+    except subprocess.CalledProcessError, err:
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: multiple exception types must be parenthesized

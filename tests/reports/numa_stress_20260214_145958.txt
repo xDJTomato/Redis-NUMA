@@ -1,0 +1,53 @@
+==============================================
+  Redis NUMA CXL 高压测试日志
+  开始时间: 2026年 02月 14日 星期六 14:59:58 CST
+  诊断模式: 已启用
+  - Perf分析: 已启用
+  - 内存监控: 已启用
+  - 诊断目录: /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_145958
+==============================================
+
+========== 环境检查 ==========
+[WARN] 14:59:58 Redis未运行，尝试自动启动...
+[INFO] 14:59:58 检测到Redis未运行，正在启动...
+[INFO] 14:59:58 Redis启动成功 (端口: 6379)
+[INFO] 14:59:59 Redis连接正常
+[INFO] 14:59:59 NUMA节点信息:
+[INFO] 14:59:59 初始内存: 3MB
+[INFO] 14:59:59 初始Keys: 0
+
+========== 基准性能测试 ==========
+[INFO] 14:59:59 执行FLUSHALL...
+[INFO] 14:59:59 运行性能测试套件: baseline (100000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","165016.50","0.942","0.072","0.831","1.935","2.751","11.255"
+"GET","181818.17","0.854","0.080","0.831","1.223","1.535","10.615"
+"INCR","131061.59","1.203","0.080","1.087","1.887","2.807","12.807"
+"LPUSH","32948.93","4.821","0.592","4.679","6.967","14.151","19.519"
+"RPUSH","29197.08","5.432","0.616","5.383","6.287","14.815","15.767"
+"LPOP","34722.22","4.567","0.504","4.399","5.863","14.079","24.719"
+"RPOP","31565.66","5.021","0.824","4.623","8.351","13.727","18.287"
+"SADD","35410.77","4.476","0.424","4.183","6.047","14.527","30.607"
+"HSET","15802.78","10.080","0.784","8.751","17.679","26.479","42.239"
+"SPOP","11220.83","14.227","0.528","13.551","25.167","30.511","44.511"
+"ZADD","17056.12","9.344","0.952","8.815","15.303","18.847","76.799"
+"ZPOPMIN","7216.05","22.039","1.168","22.159","29.055","41.599","132.351"
+
+========== Perf性能分析 (10秒) ==========
+[INFO] 15:00:51 采集CPU性能数据...
+Error:
+Access to performance monitoring and observability operations is limited.
+Consider adjusting /proc/sys/kernel/perf_event_paranoid setting to open
+access to performance monitoring and observability operations for processes
+without CAP_PERFMON, CAP_SYS_PTRACE or CAP_SYS_ADMIN Linux capability.
+More information can be found at 'Perf events and tool security' document:
+https://www.kernel.org/doc/html/latest/admin-guide/perf-security.html
+perf_event_paranoid setting is 4:
+  -1: Allow use of (almost) all events by all users
+      Ignore mlock limit after perf_event_mlock_kb without CAP_IPC_LOCK
+>= 0: Disallow raw and ftrace function tracepoint access
+>= 1: Disallow CPU event access
+>= 2: Disallow kernel profiling
+To make the adjusted perf_event_paranoid setting permanent preserve it
+in /etc/sysctl.conf (e.g. kernel.perf_event_paranoid = <setting>)
+[INFO] 15:00:51 生成perf报告...

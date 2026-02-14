@@ -1,2 +1,0 @@
-Fragmentation_Ratio: 2.10
-Fragmentation_Ratio: 2.30

@@ -1,0 +1,742 @@
+==============================================
+  Redis NUMA CXL 高压测试日志
+  开始时间: 2026年 02月 14日 星期六 15:05:20 CST
+  诊断模式: 已启用
+  - Perf分析: 已启用
+  - 内存监控: 已启用
+  - 诊断目录: /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_150520
+==============================================
+
+========== 环境检查 ==========
+[INFO] 15:05:20 Redis连接正常
+[INFO] 15:05:21 NUMA节点信息:
+[INFO] 15:05:21 初始内存: 397MB
+[INFO] 15:05:21 初始Keys: 190366
+
+========== 基准性能测试 ==========
+[INFO] 15:05:21 执行FLUSHALL...
+[INFO] 15:05:30 运行性能测试套件: baseline (100000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","104602.52","1.496","0.064","1.327","2.439","3.167","75.647"
+"GET","114155.25","1.378","0.104","1.287","2.215","2.487","13.687"
+"INCR","90415.91","1.736","0.232","1.703","2.503","3.479","12.919"
+"LPUSH","22568.27","7.048","0.760","6.903","10.287","15.519","22.239"
+"RPUSH","20601.56","7.724","0.424","7.463","11.703","17.711","23.023"
+"LPOP","27770.06","5.720","0.280","5.575","8.255","16.639","21.903"
+"RPOP","27940.77","5.689","0.592","5.519","8.287","16.175","23.391"
+"SADD","30778.70","5.162","0.560","5.015","7.183","9.775","20.879"
+"HSET","18649.76","8.546","0.848","7.847","14.111","16.991","181.375"
+"SPOP","12626.26","12.645","0.720","12.183","23.167","24.559","36.927"
+"ZADD","17721.07","8.992","0.992","8.511","14.871","18.079","30.047"
+"ZPOPMIN","7209.29","22.073","1.456","21.215","33.471","45.663","177.535"
+
+========== Perf性能分析 (10秒) ==========
+[INFO] 15:06:26 采集CPU性能数据...
+WARNING: Kernel address maps (/proc/{kallsyms,modules}) are restricted,
+check /proc/sys/kernel/kptr_restrict and /proc/sys/kernel/perf_event_paranoid.
+
+Samples in kernel functions may not be resolved if a suitable vmlinux
+file is not found in the buildid cache or in the vmlinux path.
+
+Samples in kernel modules won't be resolved at all.
+
+If some relocation was applied (e.g. kexec) symbols may be misresolved
+even with a suitable vmlinux or kallsyms file.
+
+Couldn't record kernel reference relocation symbol
+Symbol resolution may be skewed if relocation was used (e.g. kexec).
+Check /proc/kallsyms permission or run as root.
+[ perf record: Woken up 1 times to write data ]
+failed to mmap file
+[ perf record: Captured and wrote 0.002 MB /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_150520/perf_cpu.data ]
+[INFO] 15:06:37 生成perf报告...
+[INFO] 15:06:37 Top 20 CPU热点函数:
+# To display the perf.data header info, please use --header/--header-only options.
+#
+[INFO] 15:06:37 Perf数据已保存到: /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_150520
+
+========== 开始策略对比测试 ==========
+[INFO] 15:06:37 准备测试策略: local_first
+[INFO] 15:06:37 执行FLUSHALL...
+[WARN] 15:06:47 FLUSHALL timeout
+
+========== 测试NUMA策略: local_first ==========
+[INFO] 15:06:49 清理现有数据...
+[INFO] 15:06:49 执行FLUSHALL...
+[INFO] 15:06:51 初始状态: 0 keys, 733MB
+[INFO] 15:06:52 当前配置:
+
+========== 内存填充阶段 (目标: 2048MB, 渐进式填充避免OOM) ==========
+[INFO] 15:06:52 当前内存: 733MB, 目标: 2048MB
+[INFO] 15:06:52 需要填充: 1315MB
+[WARN] 15:06:52 采用保守填充策略避免OOM: 批次=50000, value=2048B
+[INFO] 15:06:52 计划填充: 673280 个 2048B 的key
+[INFO] 15:06:52 启动内存监控 (PID=2123, 间隔=2秒)
+[INFO] 15:06:52 内存监控已启动 (监控PID=5495)
+[INFO] 15:06:52 填充批次: 50000 keys (range: 500000)
+[INFO] 15:06:53 已填充: 50000/673280 keys (7%)
+[INFO] 15:06:53 填充批次: 50000 keys (range: 500000)
+[INFO] 15:06:54 已填充: 100000/673280 keys (14%)
+[INFO] 15:06:54 填充批次: 50000 keys (range: 500000)
+[INFO] 15:06:55 已填充: 150000/673280 keys (22%)
+[INFO] 15:06:56 填充批次: 50000 keys (range: 500000)
+[INFO] 15:06:57 已填充: 200000/673280 keys (29%)
+[INFO] 15:06:57 填充批次: 50000 keys (range: 500000)
+[INFO] 15:06:59 已填充: 250000/673280 keys (37%)
+[INFO] 15:06:59 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:01 已填充: 300000/673280 keys (44%)
+[INFO] 15:07:01 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:03 已填充: 350000/673280 keys (51%)
+[INFO] 15:07:03 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:05 已填充: 400000/673280 keys (59%)
+[INFO] 15:07:06 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:08 已填充: 450000/673280 keys (66%)
+[INFO] 15:07:08 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:10 已填充: 500000/673280 keys (74%)
+[INFO] 15:07:11 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:14 已填充: 550000/673280 keys (81%)
+[INFO] 15:07:14 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:17 已填充: 600000/673280 keys (89%)
+[INFO] 15:07:17 填充批次: 50000 keys (range: 500000)
+[INFO] 15:07:20 已填充: 650000/673280 keys (96%)
+[INFO] 15:07:20 填充批次: 23280 keys (range: 500000)
+[INFO] 15:07:22 已填充: 673280/673280 keys (100%)
+[INFO] 15:07:25 填充完成: 1563MB / 2048MB (76%), Keys: 369711, 耗时: 30s
+
+========== 内存池统计信息 ==========
+[INFO] 15:07:25 Redis内存详情:
+used_memory:809737977
+used_memory_human:772.23M
+used_memory_rss:1639366656
+used_memory_rss_human:1.53G
+used_memory_peak:810737974
+used_memory_peak_human:773.18M
+used_memory_peak_perc:99.88%
+used_memory_overhead:19985639
+used_memory_startup:985899
+used_memory_dataset:789752338
+used_memory_dataset_perc:97.65%
+allocator_allocated:809705073
+allocator_active:1639334912
+allocator_resident:1639334912
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:2.02
+allocator_frag_bytes:829629839
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:2.02
+mem_fragmentation_bytes:829661583
+mem_allocator:libc
+[INFO] 15:07:25 进程内存映射统计:
+Private_Dirty: 1598392 kB
+Private_Clean: 808 kB
+Rss: 1601024 kB
+Shared_Dirty: 0 kB
+Shared_Clean: 1824 kB
+Pss: 1599215 kB
+Size: 1635156 kB
+[INFO] 15:07:25 NUMA内存分布:
+
+Per-node process memory usage (in MBs) for PID 2123 (redis-server)
+                           Node 0          Node 1           Total
+                  --------------- --------------- ---------------
+Huge                         0.00            0.00            0.00
+Heap                        10.59            0.00           10.59
+Stack                        0.02            0.00            0.02
+Private                     99.92         1452.96         1552.89
+----------------  --------------- --------------- ---------------
+Total                      110.53         1452.96         1563.50
+
+========== 内存碎片分析 ==========
+[INFO] 15:07:25 Redis内置碎片率: 2.02
+[INFO] 15:07:25 自定义碎片率: 2.02 (RSS: 1563MB / Used: 772MB)
+[INFO] 15:07:25 内存效率: 49.3%
+[INFO] 15:07:25 ⚠️  碎片率偏高: 2.02 > 1.5
+[INFO] 15:07:25 分析内存块分布...
+[INFO] 15:07:26 大内存块(>64MB)数量: 0
+[INFO] 15:07:26 填充耗时: 34s
+[INFO] 15:07:26 运行性能测试套件: local_first (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","27624.31","5.771","0.384","5.159","9.903","13.567","30.511"
+"GET","29994.00","5.308","1.240","4.847","9.279","10.207","20.031"
+"INCR","27203.48","5.864","2.776","5.383","10.335","12.431","21.135"
+"LPUSH","10294.42","15.510","1.760","14.663","27.151","31.119","50.847"
+"RPUSH","9869.72","16.185","2.648","14.607","28.367","35.231","155.263"
+"LPOP","11241.01","14.210","3.712","13.807","24.991","29.887","45.407"
+"RPOP","11276.50","14.163","5.416","13.887","24.847","29.375","42.911"
+"SADD","15028.55","10.617","1.352","9.431","18.079","22.799","45.055"
+"HSET","10366.99","15.404","1.120","13.871","26.591","31.359","44.639"
+"SPOP","7770.01","20.571","2.560","19.263","36.703","39.039","61.855"
+"ZADD","9944.31","16.062","6.272","14.871","28.255","30.863","39.839"
+"ZPOPMIN","4387.89","36.242","2.264","35.103","55.551","87.935","169.215"
+[INFO] 15:08:21 NUMA分配统计:
+[INFO] 15:08:21 系统NUMA统计:
+[INFO] 15:08:21 混合读写测试: 30s (读:写 = 70:30)
+[INFO] 15:08:25 清理测试数据...
+[INFO] 15:08:25 执行FLUSHALL...
+[WARN] 15:08:35 FLUSHALL timeout
+[INFO] 15:09:26 清理后状态: 0 keys, 1739MB
+[INFO] 15:09:29 准备测试策略: interleave
+[INFO] 15:09:29 执行FLUSHALL...
+
+========== 测试NUMA策略: interleave ==========
+[INFO] 15:09:31 清理现有数据...
+[INFO] 15:09:31 执行FLUSHALL...
+[INFO] 15:09:33 初始状态: 0 keys, 1739MB
+[INFO] 15:09:34 当前配置:
+
+========== 内存填充阶段 (目标: 2048MB, 渐进式填充避免OOM) ==========
+[INFO] 15:09:34 当前内存: 1739MB, 目标: 2048MB
+[INFO] 15:09:34 需要填充: 309MB
+[WARN] 15:09:34 采用保守填充策略避免OOM: 批次=50000, value=2048B
+[INFO] 15:09:34 计划填充: 158208 个 2048B 的key
+[INFO] 15:09:34 启动内存监控 (PID=2123, 间隔=2秒)
+[INFO] 15:09:34 内存监控已启动 (监控PID=7646)
+[INFO] 15:09:34 填充批次: 50000 keys (range: 500000)
+[INFO] 15:09:35 已填充: 50000/158208 keys (31%)
+[INFO] 15:09:35 填充批次: 50000 keys (range: 500000)
+[INFO] 15:09:36 已填充: 100000/158208 keys (63%)
+[INFO] 15:09:37 填充批次: 50000 keys (range: 500000)
+[INFO] 15:09:38 已填充: 150000/158208 keys (94%)
+[INFO] 15:09:38 填充批次: 8208 keys (range: 500000)
+[INFO] 15:09:39 已填充: 158208/158208 keys (100%)
+[INFO] 15:09:42 填充完成: 1929MB / 2048MB (94%), Keys: 135612, 耗时: 5s
+
+========== 内存池统计信息 ==========
+[INFO] 15:09:42 Redis内存详情:
+used_memory:298243787
+used_memory_human:284.43M
+used_memory_rss:2022961152
+used_memory_rss_human:1.88G
+used_memory_peak:810737974
+used_memory_peak_human:773.18M
+used_memory_peak_perc:36.79%
+used_memory_overhead:8507531
+used_memory_startup:985899
+used_memory_dataset:289736256
+used_memory_dataset_perc:97.47%
+allocator_allocated:298193267
+allocator_active:2022929408
+allocator_resident:2022929408
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:6.78
+allocator_frag_bytes:1724736141
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:6.78
+mem_fragmentation_bytes:1724767885
+mem_allocator:libc
+[INFO] 15:09:42 进程内存映射统计:
+Private_Dirty: 1973076 kB
+Private_Clean: 808 kB
+Rss: 1975708 kB
+Shared_Dirty: 0 kB
+Shared_Clean: 1824 kB
+Pss: 1973899 kB
+Size: 2009492 kB
+[INFO] 15:09:42 NUMA内存分布:
+
+Per-node process memory usage (in MBs) for PID 2123 (redis-server)
+                           Node 0          Node 1           Total
+                  --------------- --------------- ---------------
+Huge                         0.00            0.00            0.00
+Heap                        24.28            0.00           24.28
+Stack                        0.02            0.00            0.02
+Private                     84.54         1820.57         1905.11
+----------------  --------------- --------------- ---------------
+Total                      108.84         1820.57         1929.41
+
+========== 内存碎片分析 ==========
+[INFO] 15:09:42 Redis内置碎片率: 6.78
+[INFO] 15:09:42 自定义碎片率: 6.79 (RSS: 1929MB / Used: 284MB)
+[INFO] 15:09:42 内存效率: 14.7%
+[INFO] 15:09:42 ⚠️  碎片率偏高: 6.79 > 1.5
+[INFO] 15:09:42 分析内存块分布...
+[INFO] 15:09:43 大内存块(>64MB)数量: 1
+[INFO] 15:09:43 填充耗时: 9s
+[INFO] 15:09:43 运行性能测试套件: interleave (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","63532.40","2.496","0.152","2.343","4.287","4.959","13.903"
+"GET","77519.38","2.050","0.216","1.911","3.567","3.807","12.367"
+"INCR","71736.01","2.214","0.288","2.071","3.751","4.191","13.351"
+"LPUSH","11273.96","14.135","0.744","10.407","34.239","84.223","180.735"
+"RPUSH","15064.78","10.579","0.448","9.311","19.343","28.287","39.839"
+"LPOP","19364.83","8.225","0.856","7.855","12.743","16.255","159.615"
+"RPOP","21385.80","7.440","0.960","7.191","11.943","15.903","22.287"
+"SADD","28280.54","5.614","1.424","5.503","7.983","10.743","19.583"
+"HSET","16041.06","9.928","0.832","9.199","16.655","20.847","27.775"
+"SPOP","10471.20","15.245","0.832","13.991","25.999","31.727","38.687"
+"ZADD","12960.08","12.298","0.736","11.527","21.023","24.303","36.511"
+"ZPOPMIN","7567.73","21.003","0.592","20.751","28.895","41.215","77.311"
+[INFO] 15:10:18 NUMA分配统计:
+[INFO] 15:10:18 系统NUMA统计:
+[INFO] 15:10:18 混合读写测试: 30s (读:写 = 70:30)
+[INFO] 15:10:21 清理测试数据...
+[INFO] 15:10:21 执行FLUSHALL...
+[WARN] 15:10:31 FLUSHALL timeout
+[INFO] 15:10:39 清理后状态: 0 keys, 2111MB
+[INFO] 15:10:42 准备测试策略: round_robin
+[INFO] 15:10:42 执行FLUSHALL...
+
+========== 测试NUMA策略: round_robin ==========
+[INFO] 15:10:44 清理现有数据...
+[INFO] 15:10:44 执行FLUSHALL...
+[INFO] 15:10:46 初始状态: 0 keys, 2111MB
+[INFO] 15:10:47 当前配置:
+
+========== 内存填充阶段 (目标: 2048MB, 渐进式填充避免OOM) ==========
+[INFO] 15:10:47 当前内存: 2111MB, 目标: 2048MB
+[INFO] 15:10:47 内存已接近目标 (103%)，无需填充
+[INFO] 15:10:47 填充耗时: 0s
+[INFO] 15:10:47 运行性能测试套件: round_robin (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","209205.03","0.741","0.064","0.591","1.247","2.079","10.703"
+"GET","213675.22","0.731","0.064","0.743","0.959","1.207","10.223"
+"INCR","159744.41","0.980","0.080","0.943","1.463","1.831","11.023"
+"LPUSH","34411.56","4.608","0.184","4.367","8.239","15.415","19.279"
+"RPUSH","31887.76","4.977","0.608","4.511","9.191","14.663","28.479"
+"LPOP","39651.07","3.995","0.216","3.975","5.119","12.415","13.759"
+"RPOP","36523.01","4.337","0.392","4.271","5.639","13.135","15.399"
+"SADD","48543.69","3.251","1.080","3.191","3.567","4.767","13.263"
+"HSET","30674.85","5.167","0.864","5.095","6.591","8.743","16.135"
+"SPOP","20308.69","7.831","0.600","7.575","11.367","15.967","20.767"
+"ZADD","25562.37","6.209","0.576","5.767","9.343","13.391","31.567"
+"ZPOPMIN","10604.45","14.994","0.512","15.199","19.887","29.791","36.703"
+[INFO] 15:11:05 NUMA分配统计:
+[INFO] 15:11:05 系统NUMA统计:
+[INFO] 15:11:05 混合读写测试: 30s (读:写 = 70:30)
+[INFO] 15:11:07 清理测试数据...
+[INFO] 15:11:07 执行FLUSHALL...
+[INFO] 15:11:14 清理后状态: 0 keys, 2301MB
+[INFO] 15:11:17 准备测试策略: weighted
+[INFO] 15:11:17 执行FLUSHALL...
+
+========== 测试NUMA策略: weighted ==========
+[INFO] 15:11:19 清理现有数据...
+[INFO] 15:11:19 执行FLUSHALL...
+[INFO] 15:11:22 初始状态: 0 keys, 2301MB
+[INFO] 15:11:23 当前配置:
+
+========== 内存填充阶段 (目标: 2048MB, 渐进式填充避免OOM) ==========
+[INFO] 15:11:23 当前内存: 2301MB, 目标: 2048MB
+[INFO] 15:11:23 内存已接近目标 (112%)，无需填充
+[INFO] 15:11:23 填充耗时: 0s
+[INFO] 15:11:23 运行性能测试套件: weighted (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","216450.20","0.716","0.064","0.607","1.263","1.719","10.471"
+"GET","246305.42","0.627","0.056","0.647","0.911","1.047","2.183"
+"INCR","184501.84","0.845","0.064","0.847","1.247","1.719","3.591"
+"LPUSH","34650.04","4.574","0.312","4.319","7.591","9.519","12.495"
+"RPUSH","25201.61","6.292","0.696","6.447","9.071","10.799","12.711"
+"LPOP","30525.03","5.188","0.240","5.119","7.895","10.359","13.175"
+"RPOP","30637.26","5.165","0.256","5.151","8.207","9.623","11.503"
+"SADD","39588.28","3.979","1.032","3.943","5.303","6.455","7.543"
+"HSET","23375.41","6.785","0.320","6.783","10.135","12.623","14.975"
+"SPOP","17391.30","9.141","1.024","9.039","13.407","16.287","24.447"
+"ZADD","24987.51","6.346","0.344","5.919","9.103","15.215","37.887"
+"ZPOPMIN","10561.89","15.046","0.728","15.023","19.599","28.063","65.663"
+[INFO] 15:11:43 NUMA分配统计:
+[INFO] 15:11:43 系统NUMA统计:
+[INFO] 15:11:43 混合读写测试: 30s (读:写 = 70:30)
+[INFO] 15:11:45 清理测试数据...
+[INFO] 15:11:45 执行FLUSHALL...
+[INFO] 15:11:52 清理后状态: 0 keys, 2491MB
+[INFO] 15:11:55 准备测试策略: pressure_aware
+[INFO] 15:11:55 执行FLUSHALL...
+
+========== 测试NUMA策略: pressure_aware ==========
+[INFO] 15:11:57 清理现有数据...
+[INFO] 15:11:57 执行FLUSHALL...
+[INFO] 15:11:59 初始状态: 0 keys, 2491MB
+[INFO] 15:12:00 当前配置:
+
+========== 内存填充阶段 (目标: 2048MB, 渐进式填充避免OOM) ==========
+[INFO] 15:12:00 当前内存: 2491MB, 目标: 2048MB
+[INFO] 15:12:00 内存已接近目标 (121%)，无需填充
+[INFO] 15:12:00 填充耗时: 0s
+[INFO] 15:12:00 运行性能测试套件: pressure_aware (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","248756.22","0.621","0.120","0.575","1.127","1.607","2.095"
+"GET","256410.27","0.607","0.056","0.615","0.895","1.071","2.015"
+"INCR","196078.44","0.798","0.072","0.807","1.167","1.551","2.927"
+"LPUSH","46082.95","3.432","0.304","3.543","4.303","5.455","7.415"
+"RPUSH","41981.53","3.777","0.192","3.751","5.255","8.191","17.087"
+"LPOP","54171.18","2.914","0.184","2.991","3.847","4.967","6.367"
+"RPOP","53763.44","2.943","0.344","2.999","4.135","5.487","8.335"
+"SADD","69832.40","2.263","0.536","2.255","3.215","3.983","4.999"
+"HSET","42735.04","3.706","0.344","3.631","4.879","6.751","12.383"
+"SPOP","28719.13","5.530","0.648","5.359","6.487","10.375","28.095"
+"ZADD","34940.60","4.538","0.720","4.559","5.087","6.335","9.583"
+"ZPOPMIN","11441.65","13.871","0.528","12.583","23.551","29.631","66.751"
+[INFO] 15:12:14 NUMA分配统计:
+[INFO] 15:12:14 系统NUMA统计:
+[INFO] 15:12:14 混合读写测试: 30s (读:写 = 70:30)
+[INFO] 15:12:16 清理测试数据...
+[INFO] 15:12:16 执行FLUSHALL...
+[INFO] 15:12:22 清理后状态: 0 keys, 2682MB
+[INFO] 15:12:25 准备测试策略: cxl_optimized
+[INFO] 15:12:25 执行FLUSHALL...
+
+========== 测试NUMA策略: cxl_optimized ==========
+[INFO] 15:12:27 清理现有数据...
+[INFO] 15:12:27 执行FLUSHALL...
+[INFO] 15:12:29 初始状态: 0 keys, 2682MB
+[INFO] 15:12:30 当前配置:
+
+========== 内存填充阶段 (目标: 2048MB, 渐进式填充避免OOM) ==========
+[INFO] 15:12:30 当前内存: 2682MB, 目标: 2048MB
+[INFO] 15:12:30 内存已接近目标 (130%)，无需填充
+[INFO] 15:12:30 填充耗时: 0s
+[INFO] 15:12:30 运行性能测试套件: cxl_optimized (50000 请求)
+"test","rps","avg_latency_ms","min_latency_ms","p50_latency_ms","p95_latency_ms","p99_latency_ms","max_latency_ms"
+"SET","239234.44","0.645","0.104","0.559","1.047","1.599","10.167"
+"GET","201612.91","0.771","0.072","0.607","0.791","0.975","57.855"
+"INCR","188679.25","0.828","0.064","0.799","1.175","1.527","10.375"
+"LPUSH","43668.12","3.638","0.424","3.415","5.751","13.127","16.303"
+"RPUSH","40322.58","3.929","0.664","3.727","5.783","13.943","16.495"
+"LPOP","51759.83","3.059","0.160","3.015","4.239","13.143","17.503"
+"RPOP","51493.30","3.072","0.128","2.991","4.119","13.279","14.263"
+"SADD","69348.12","2.268","0.264","2.215","2.679","3.647","13.599"
+"HSET","43140.64","3.668","0.328","3.487","4.279","7.247","17.327"
+"SPOP","24962.56","6.370","1.416","5.559","13.479","22.895","38.047"
+"ZADD","33875.34","4.681","0.696","4.583","5.255","9.423","15.223"
+"ZPOPMIN","14684.29","10.816","1.184","10.855","12.575","19.951","26.975"
+[INFO] 15:12:44 NUMA分配统计:
+[INFO] 15:12:44 系统NUMA统计:
+[INFO] 15:12:44 混合读写测试: 30s (读:写 = 70:30)
+[INFO] 15:12:46 清理测试数据...
+[INFO] 15:12:46 执行FLUSHALL...
+[INFO] 15:12:52 清理后状态: 0 keys, 2872MB
+
+========== 测试WEIGHTED策略不同权重配置 ==========
+[INFO] 15:12:55 测试权重配置: 节点0=100, 节点1=100
+[INFO] 15:12:55   清理上一轮测试数据...
+[INFO] 15:12:55 执行FLUSHALL...
+
+========== 内存填充阶段 (目标: 1024MB, 渐进式填充避免OOM) ==========
+[INFO] 15:12:56 当前内存: 2872MB, 目标: 1024MB
+[INFO] 15:12:56 内存已接近目标 (280%)，无需填充
+[INFO] 15:12:56 权重 100:100 结果:
+[INFO] 15:12:56 单类型测试: set (50000 请求, 512B)
+[INFO] 15:12:57 单类型测试: get (50000 请求, 512B)
+[INFO] 15:12:57   清理本轮测试数据...
+[INFO] 15:12:57 执行FLUSHALL...
+[INFO] 15:12:58 测试权重配置: 节点0=200, 节点1=100
+[INFO] 15:12:58   清理上一轮测试数据...
+[INFO] 15:12:58 执行FLUSHALL...
+
+========== 内存填充阶段 (目标: 1024MB, 渐进式填充避免OOM) ==========
+[INFO] 15:12:59 当前内存: 2896MB, 目标: 1024MB
+[INFO] 15:12:59 内存已接近目标 (282%)，无需填充
+[INFO] 15:12:59 权重 200:100 结果:
+[INFO] 15:12:59 单类型测试: set (50000 请求, 512B)
+[INFO] 15:12:59 单类型测试: get (50000 请求, 512B)
+[INFO] 15:12:59   清理本轮测试数据...
+[INFO] 15:12:59 执行FLUSHALL...
+[INFO] 15:13:01 测试权重配置: 节点0=100, 节点1=200
+[INFO] 15:13:01   清理上一轮测试数据...
+[INFO] 15:13:01 执行FLUSHALL...
+
+========== 内存填充阶段 (目标: 1024MB, 渐进式填充避免OOM) ==========
+[INFO] 15:13:02 当前内存: 2921MB, 目标: 1024MB
+[INFO] 15:13:02 内存已接近目标 (285%)，无需填充
+[INFO] 15:13:02 权重 100:200 结果:
+[INFO] 15:13:02 单类型测试: set (50000 请求, 512B)
+[INFO] 15:13:02 单类型测试: get (50000 请求, 512B)
+[INFO] 15:13:02   清理本轮测试数据...
+[INFO] 15:13:02 执行FLUSHALL...
+[INFO] 15:13:03 测试权重配置: 节点0=150, 节点1=50
+[INFO] 15:13:03   清理上一轮测试数据...
+[INFO] 15:13:03 执行FLUSHALL...
+
+========== 内存填充阶段 (目标: 1024MB, 渐进式填充避免OOM) ==========
+[INFO] 15:13:04 当前内存: 2945MB, 目标: 1024MB
+[INFO] 15:13:04 内存已接近目标 (287%)，无需填充
+[INFO] 15:13:04 权重 150:50 结果:
+[INFO] 15:13:04 单类型测试: set (50000 请求, 512B)
+[INFO] 15:13:05 单类型测试: get (50000 请求, 512B)
+[INFO] 15:13:05   清理本轮测试数据...
+[INFO] 15:13:05 执行FLUSHALL...
+[INFO] 15:13:06 加权策略测试完成，最终清理...
+[INFO] 15:13:06 执行FLUSHALL...
+[INFO] 15:13:08 所有策略测试完成，执行最终清理...
+[INFO] 15:13:08 执行FLUSHALL...
+
+========== 超高压测试 (目标: 80%+ 内存使用) ==========
+[INFO] 15:13:10 设置策略: pressure_aware
+[INFO] 15:13:10 执行FLUSHALL...
+[INFO] 15:13:12 === 阶段1: 大规模数据填充 ===
+
+========== 内存填充阶段 (目标: 5632MB, 渐进式填充避免OOM) ==========
+[INFO] 15:13:12 当前内存: 2970MB, 目标: 5632MB
+[INFO] 15:13:12 需要填充: 2662MB
+[WARN] 15:13:12 采用保守填充策略避免OOM: 批次=50000, value=2048B
+[INFO] 15:13:12 计划填充: 1362944 个 2048B 的key
+[INFO] 15:13:12 启动内存监控 (PID=2123, 间隔=2秒)
+[INFO] 15:13:12 内存监控已启动 (监控PID=12287)
+[INFO] 15:13:12 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:13 已填充: 50000/1362944 keys (3%)
+[INFO] 15:13:13 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:14 已填充: 100000/1362944 keys (7%)
+[INFO] 15:13:14 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:15 已填充: 150000/1362944 keys (11%)
+[INFO] 15:13:16 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:17 已填充: 200000/1362944 keys (14%)
+[INFO] 15:13:17 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:18 已填充: 250000/1362944 keys (18%)
+[INFO] 15:13:19 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:20 已填充: 300000/1362944 keys (22%)
+[INFO] 15:13:20 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:22 已填充: 350000/1362944 keys (25%)
+[INFO] 15:13:22 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:24 已填充: 400000/1362944 keys (29%)
+[INFO] 15:13:24 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:26 已填充: 450000/1362944 keys (33%)
+[INFO] 15:13:27 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:29 已填充: 500000/1362944 keys (36%)
+[INFO] 15:13:29 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:33 已填充: 550000/1362944 keys (40%)
+[INFO] 15:13:33 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:37 已填充: 600000/1362944 keys (44%)
+[INFO] 15:13:38 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:42 已填充: 650000/1362944 keys (47%)
+[INFO] 15:13:42 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:45 已填充: 700000/1362944 keys (51%)
+[INFO] 15:13:45 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:49 已填充: 750000/1362944 keys (55%)
+[INFO] 15:13:49 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:52 已填充: 800000/1362944 keys (58%)
+[INFO] 15:13:53 填充批次: 50000 keys (range: 500000)
+[INFO] 15:13:56 已填充: 850000/1362944 keys (62%)
+[INFO] 15:13:57 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:00 已填充: 900000/1362944 keys (66%)
+[INFO] 15:14:00 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:05 已填充: 950000/1362944 keys (69%)
+[INFO] 15:14:06 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:10 已填充: 1000000/1362944 keys (73%)
+[INFO] 15:14:11 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:16 已填充: 1050000/1362944 keys (77%)
+[INFO] 15:14:17 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:21 已填充: 1100000/1362944 keys (80%)
+[INFO] 15:14:22 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:26 已填充: 1150000/1362944 keys (84%)
+[INFO] 15:14:26 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:31 已填充: 1200000/1362944 keys (88%)
+[INFO] 15:14:31 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:36 已填充: 1250000/1362944 keys (91%)
+[INFO] 15:14:36 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:41 已填充: 1300000/1362944 keys (95%)
+[INFO] 15:14:41 填充批次: 50000 keys (range: 500000)
+[INFO] 15:14:46 已填充: 1350000/1362944 keys (99%)
+[INFO] 15:14:47 填充批次: 12944 keys (range: 500000)
+[INFO] 15:14:48 已填充: 1362944/1362944 keys (100%)
+[INFO] 15:14:51 填充完成: 4522MB / 5632MB (80%), Keys: 467104, 耗时: 96s
+
+========== 内存池统计信息 ==========
+[INFO] 15:14:51 Redis内存详情:
+used_memory:1021677624
+used_memory_human:974.35M
+used_memory_rss:4741910528
+used_memory_rss_human:4.42G
+used_memory_peak:1022675335
+used_memory_peak_human:975.30M
+used_memory_peak_perc:99.90%
+used_memory_overhead:23864363
+used_memory_startup:985899
+used_memory_dataset:997813261
+used_memory_dataset_perc:97.76%
+allocator_allocated:1021627104
+allocator_active:4741878784
+allocator_resident:4741878784
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+allocator_frag_ratio:4.64
+allocator_frag_bytes:3720251680
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+mem_fragmentation_ratio:4.64
+mem_fragmentation_bytes:3720283424
+mem_allocator:libc
+[INFO] 15:14:51 进程内存映射统计:
+Private_Dirty: 4628000 kB
+Private_Clean: 808 kB
+Rss: 4630632 kB
+Shared_Dirty: 0 kB
+Shared_Clean: 1824 kB
+Pss: 4628822 kB
+Size: 4664520 kB
+[INFO] 15:14:52 NUMA内存分布:
+
+Per-node process memory usage (in MBs) for PID 2123 (redis-server)
+                           Node 0          Node 1           Total
+                  --------------- --------------- ---------------
+Huge                         0.00            0.00            0.00
+Heap                        51.48            0.00           51.48
+Stack                        0.02            0.00            0.02
+Private                    110.20         4360.39         4470.60
+----------------  --------------- --------------- ---------------
+Total                      161.70         4360.39         4522.10
+
+========== 内存碎片分析 ==========
+[INFO] 15:14:52 Redis内置碎片率: 4.64
+[INFO] 15:14:52 自定义碎片率: 4.64 (RSS: 4522MB / Used: 974MB)
+[INFO] 15:14:52 内存效率: 21.5%
+[INFO] 15:14:52 ⚠️  碎片率偏高: 4.64 > 1.5
+[INFO] 15:14:52 分析内存块分布...
+[INFO] 15:14:52 大内存块(>64MB)数量: 1
+[INFO] 15:14:52 阶段1完成: 4522MB, 467104 keys, 耗时100s
+[INFO] 15:14:52 === 阶段2: 高并发读写压力 (30s) ===
+[INFO] 15:15:46 压力测试中... 内存: 4648MB
+[INFO] 15:15:46 === 阶段3: 热点访问模式 ===
+[INFO] 15:16:31 === 阶段4: 大key混合压力测试 ===
+
+========== 大Key混合压力测试 ==========
+[INFO] 15:16:31 混合大key压力测试 (总目标: 2048MB)
+[INFO] 15:16:31 创建 小key密集访问 (1KB x 50K = 50MB)
+[INFO] 15:16:38 创建 中等key平衡 (4KB x 12.5K = 50MB)
+[INFO] 15:16:40 创建 大key稀疏访问 (16KB x 3.1K = 50MB)
+[INFO] 15:16:41 创建 超大key极稀疏 (64KB x 781 = 50MB)
+[INFO] 15:16:42 创建 巨型key极少 (256KB x 195 = 50MB)
+[INFO] 15:16:42 创建 超巨型key (1MB x 48 = 48MB)
+[INFO] 15:16:43 混合访问所有大key...
+[INFO] 15:16:56 热点大key访问测试...
+[INFO] 15:17:21 大key测试完成: 5045MB, 576671 keys
+[INFO] 15:17:21 === 阶段5: 负载均衡测试 ===
+
+========== 超高压测试结果 ==========
+[INFO] 15:17:26 总耗时: 254s
+[INFO] 15:17:26 最终内存: 5045MB / 5632MB (89%)
+[INFO] 15:17:27 总Key数: 576671
+[INFO] 15:17:27 NUMA分配统计:
+[INFO] 15:17:27 系统NUMA统计:
+[INFO] 15:17:27 内存监控已停止
+
+========== Strace系统调用分析 (5秒) ==========
+[INFO] 15:17:27 跟踪系统调用...
+[INFO] 15:17:27 系统调用统计:
+strace: attach: ptrace(PTRACE_SEIZE, 2123): 不允许的操作
+
+========== 生成完整性能报告 ==========
+==============================================
+  Redis NUMA CXL 高压测试报告
+  生成时间: 2026年 02月 14日 星期六 15:17:27 CST
+==============================================
+
+=== 测试环境 ===
+NUMA节点: 2 (3GB + 8GB = 11GB)
+目标内存使用: 50% (~5632MB)
+并行客户端: 20
+管道深度: 8
+
+=== Redis信息 ===
+# Server
+redis_version:6.2.21
+redis_git_sha1:42aa70eb
+redis_git_dirty:1
+redis_build_id:11cf0aff942b506
+redis_mode:standalone
+os:Linux 6.14.0-37-generic x86_64
+arch_bits:64
+monotonic_clock:POSIX clock_gettime
+multiplexing_api:epoll
+
+=== 内存信息 ===
+# Memory
+used_memory:1174443235
+used_memory_human:1.09G
+used_memory_rss:5290659840
+used_memory_rss_human:4.93G
+used_memory_peak:1258006780
+used_memory_peak_human:1.17G
+used_memory_peak_perc:93.36%
+used_memory_overhead:32441347
+used_memory_startup:985899
+used_memory_dataset:1142001888
+used_memory_dataset_perc:97.32%
+allocator_allocated:1174392715
+allocator_active:5290628096
+allocator_resident:5290628096
+total_system_memory:12566904832
+total_system_memory_human:11.70G
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+number_of_cached_scripts:0
+maxmemory:0
+maxmemory_human:0B
+maxmemory_policy:noeviction
+allocator_frag_ratio:4.50
+allocator_frag_bytes:4116235381
+allocator_rss_ratio:1.00
+allocator_rss_bytes:0
+rss_overhead_ratio:1.00
+rss_overhead_bytes:31744
+mem_fragmentation_ratio:4.51
+mem_fragmentation_bytes:4116267125
+mem_not_counted_for_evict:0
+mem_replication_backlog:0
+mem_clients_slaves:0
+mem_clients_normal:0
+mem_aof_buffer:0
+mem_allocator:libc
+active_defrag_running:0
+lazyfree_pending_objects:0
+lazyfreed_objects:0
+
+=== NUMA配置 ===
+strategy
+pressure_aware
+nodes
+2
+balance_threshold
+30
+auto_rebalance
+yes
+cxl_optimization
+disabled
+
+=== NUMA分配统计 ===
+node
+0
+allocations
+0
+bytes
+0
+node
+1
+allocations
+0
+bytes
+0
+
+=== 系统NUMA统计 ===
+
+Per-node process memory usage (in MBs) for PID 2123 (redis-server)
+                           Node 0          Node 1           Total
+                  --------------- --------------- ---------------
+Huge                         0.00            0.00            0.00
+Heap                        55.77            0.00           55.77
+Stack                        0.02            0.00            0.02
+Private                    279.54         4710.46         4990.00
+----------------  --------------- --------------- ---------------
+Total                      335.34         4710.46         5045.80
+
+[INFO] 15:17:27 报告已保存至: /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/numa_stress_20260214_150520.txt
+
+========== 生成诊断报告 ==========
+[INFO] 15:17:27 诊断报告已保存: /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_150520/DIAGNOSIS_SUMMARY.txt
+
+========== 测试完成 ==========
+[INFO] 15:17:27 报告文件: /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/numa_stress_20260214_150520.txt
+[INFO] 15:17:27 诊断目录: /mnt/hostshare/下载/Redis with CXL/redis-CXL in v6.2.21/tests/reports/diagnosis_20260214_150520
+[INFO] 15:17:27 总内存使用: 5045MB
+[INFO] 15:17:27 总Key数量: 576671

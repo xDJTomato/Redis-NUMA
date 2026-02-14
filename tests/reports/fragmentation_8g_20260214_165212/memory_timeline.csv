@@ -1,0 +1,7 @@
+timestamp,phase,used_mb,rss_mb,fragmentation,used_human,rss_human
+16:52:16,initial,0,3,4.18,1012.22K,3.93M
+16:52:28,fill_50pct,1721,1868,1.09,1.68G,1.82G
+16:52:35,fill_75pct,2366,2569,1.09,2.31G,2.51G
+16:52:42,fill_100pct,3017,3277,1.09,2.95G,3.20G
+16:52:45,mixed_set,3363,3641,1.08,3.28G,3.56G
+16:52:47,mixed_get,3363,3642,1.08,3.28G,3.56G

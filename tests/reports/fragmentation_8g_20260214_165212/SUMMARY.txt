@@ -1,0 +1,36 @@
+8G内存碎片压力测试报告
+======================
+测试时间: Sat Feb 14 16:52:47 CST 2026
+
+测试配置:
+  目标内存: 8GB
+  Value大小: 256B
+  Key范围: 14316557
+
+内存使用曲线:
+timestamp,phase,used_mb,rss_mb,fragmentation,used_human,rss_human
+16:52:16,initial,0,3,4.18,1012.22K,3.93M
+16:52:28,fill_50pct,1721,1868,1.09,1.68G,1.82G
+16:52:35,fill_75pct,2366,2569,1.09,2.31G,2.51G
+16:52:42,fill_100pct,3017,3277,1.09,2.95G,3.20G
+16:52:45,mixed_set,3363,3641,1.08,3.28G,3.56G
+16:52:47,mixed_get,3363,3642,1.08,3.28G,3.56G
+
+Redis INFO memory:
+used_memory:3526783638
+used_memory_human:3.28G
+used_memory_rss:3819003904
+used_memory_rss_human:3.56G
+used_memory_peak:3528247005
+used_memory_peak_human:3.29G
+used_memory_peak_perc:99.96%
+used_memory_overhead:548606172
+used_memory_startup:985980
+used_memory_dataset:2978177466
+used_memory_dataset_perc:84.47%
+used_memory_lua:31744
+used_memory_lua_human:31.00K
+used_memory_scripts:0
+used_memory_scripts_human:0B
+mem_fragmentation_ratio:1.08
+mem_fragmentation_bytes:290757270

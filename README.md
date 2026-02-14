@@ -539,11 +539,14 @@ OK
 
 ### 核心文档
 
-1. **[开发日志](NUMA_DEVELOPMENT_LOG.md)** - 完整开发过程记录
-   - v2.1: NUMA内存池模块
-   - v2.2: 内存迁移模块
-   - v2.3: 策略插槽框架
+1. **[开发日志](docs/NUMA_DEVELOPMENT_LOG.md)** - 完整开发过程记录
+   - v3.2-P2: 性能修复与Slab优化
+   - v3.1-P1: Free List + Compact机制
+   - v3.0: 可配置NUMA分配策略
    - v2.4: Key级别迁移
+   - v2.3: 策略插槽框架
+   - v2.2: 内存迁移模块
+   - v2.1: NUMA内存池模块
 
 2. **[模块文档目录](docs/modules/)**
    - [05-numa-key-migrate.md](docs/modules/05-numa-key-migrate.md) - Key迁移设计
@@ -745,7 +748,7 @@ export NUMA_DEBUG=1
 
 - **项目主页**: https://github.com/xDJTomato/redis-CXL-in-v6.2.21
 - **问题反馈**: [GitHub Issues](https://github.com/xDJTomato/redis-CXL-in-v6.2.21/issues)
-- **开发日志**: [NUMA_DEVELOPMENT_LOG.md](NUMA_DEVELOPMENT_LOG.md)
+- **开发日志**: [docs/NUMA_DEVELOPMENT_LOG.md](docs/NUMA_DEVELOPMENT_LOG.md)
 
 ---
 

@@ -218,7 +218,7 @@ static numa_pool_chunk_t *alloc_new_chunk(int node, size_t obj_size)
     return chunk;
 }
 
-/* Allocate memory from pool */
+/* Allocate memory from pool - Optimized fast path */
 void *numa_pool_alloc(size_t size, int node, size_t *total_size)
 {
     if (!pool_ctx.initialized) {
@@ -235,13 +235,16 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size)
     
     /* Try pool allocation for small sizes */
     if (alloc_size <= NUMA_POOL_MAX_ALLOC && pool_ctx.node_pools) {
-        /* Find appropriate size class */
+        /* Fast size class lookup using binary search style */
         int class_idx = -1;
-        for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
-            if (alloc_size <= numa_pool_size_classes[i]) {
-                class_idx = i;
-                break;
-            }
+        if (alloc_size <= 64) {
+            class_idx = (alloc_size <= 16) ? 0 : (alloc_size <= 32) ? 1 : (alloc_size <= 48) ? 2 : 3;
+        } else if (alloc_size <= 256) {
+            class_idx = (alloc_size <= 96) ? 4 : (alloc_size <= 128) ? 5 : (alloc_size <= 192) ? 6 : 7;
+        } else if (alloc_size <= 1024) {
+            class_idx = (alloc_size <= 384) ? 8 : (alloc_size <= 512) ? 9 : (alloc_size <= 768) ? 10 : 11;
+        } else if (alloc_size <= 4096) {
+            class_idx = (alloc_size <= 1536) ? 12 : (alloc_size <= 2048) ? 13 : (alloc_size <= 3072) ? 14 : 15;
         }
         
         if (class_idx >= 0) {
@@ -252,45 +255,33 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size)
             
             size_t aligned_size = (alloc_size + 15) & ~15;  /* 16-byte align */
             
-            /* P1: First try to allocate from free list */
-            free_block_t **prev_ptr = &pool->free_list;
+            /* Fast path 1: Try free list head (O(1) reuse) */
             free_block_t *free_block = pool->free_list;
-            
-            while (free_block) {
-                if (free_block->size >= aligned_size) {
-                    /* Found suitable free block, reuse it */
-                    result = free_block->ptr;
-                    *prev_ptr = free_block->next;
-                    free(free_block);  /* Free the free_block metadata */
-                    from_pool = 1;
-                    break;
-                }
-                prev_ptr = &free_block->next;
-                free_block = free_block->next;
+            if (free_block && free_block->size >= aligned_size) {
+                result = free_block->ptr;
+                pool->free_list = free_block->next;
+                free(free_block);
+                from_pool = 1;
             }
             
-            /* If no free block found, try bump pointer allocation */
+            /* Fast path 2: Try first chunk directly (hot cache) */
             if (!result) {
                 numa_pool_chunk_t *chunk = pool->chunks;
-                while (chunk) {
-                    if (chunk->offset + aligned_size <= chunk->size) {
-                        result = (char *)chunk->memory + chunk->offset;
-                        chunk->offset += aligned_size;
-                        chunk->used_bytes += aligned_size;
-                        from_pool = 1;
-                        break;
-                    }
-                    chunk = chunk->next;
+                if (chunk && chunk->offset + aligned_size <= chunk->size) {
+                    result = (char *)chunk->memory + chunk->offset;
+                    chunk->offset += aligned_size;
+                    chunk->used_bytes += aligned_size;
+                    from_pool = 1;
                 }
             }
             
-            /* Allocate new chunk if needed */
+            /* Slow path: Allocate new chunk if needed */
             if (!result) {
                 numa_pool_chunk_t *new_chunk = alloc_new_chunk(node, alloc_size);
                 if (new_chunk) {
                     result = new_chunk->memory;
                     new_chunk->offset = aligned_size;
-                    new_chunk->used_bytes = aligned_size;  /* P1: Track initial allocation */
+                    new_chunk->used_bytes = aligned_size;
                     new_chunk->next = pool->chunks;
                     pool->chunks = new_chunk;
                     pool->chunks_count++;
@@ -560,16 +551,38 @@ int numa_pool_try_compact(void)
  * - Bitmap management for O(1) allocation
  * - Per-size-class slab pools
  * - Coexists with existing Pool for large objects (>512B)
+ * - P2 fix: Slab header with back-pointer for O(1) free lookup
  * ========================================================================= */
 
-/* Slab structure */
+/* Slab header stored at the beginning of each slab for O(1) free lookup */
+#define SLAB_HEADER_MAGIC 0x534C4142  /* "SLAB" in ASCII */
+typedef struct numa_slab_header {
+    uint32_t magic;                  /* Magic number for validation */
+    uint32_t class_idx;              /* Size class index */
+    struct numa_slab *slab;          /* Back-pointer to slab structure */
+    void *raw_memory;                /* Original unaligned memory for numa_free */
+} numa_slab_header_t;
+
+#define SLAB_HEADER_SIZE (sizeof(numa_slab_header_t))
+#define SLAB_USABLE_SIZE (SLAB_SIZE - SLAB_HEADER_SIZE)
+
+/* Slab structure - P2 fix: Use atomic counters for lock-free operations */
 typedef struct numa_slab {
     void *memory;                    /* Actual memory address (NUMA-allocated) */
     struct numa_slab *next;          /* Next slab in list */
-    uint32_t bitmap[SLAB_BITMAP_SIZE]; /* 128-bit bitmap for object allocation */
-    uint16_t free_count;             /* Number of free objects */
+    struct numa_slab *prev;          /* Previous slab in list (P2 fix: O(1) removal) */
+    uint32_t bitmap[SLAB_BITMAP_SIZE]; /* 128-bit bitmap for object allocation (atomic access) */
+    _Atomic uint16_t free_count;     /* Number of free objects (atomic) */
     uint16_t objects_per_slab;       /* Total objects per slab */
+    int node_id;                     /* NUMA node ID for this slab */
+    int class_idx;                   /* Size class index */
+    _Atomic int list_type;           /* 0=partial, 1=full, 2=empty (atomic) */
 } numa_slab_t;
+
+/* List type constants */
+#define SLAB_LIST_PARTIAL 0
+#define SLAB_LIST_FULL    1
+#define SLAB_LIST_EMPTY   2
 
 /* Slab class (one per size class) */
 typedef struct {
@@ -599,47 +612,135 @@ static struct {
     .slab_nodes = NULL
 };
 
-/* Bitmap operations */
+/* Bitmap operations - P2 fix: Lock-free using atomic operations */
 static inline int bitmap_test(uint32_t *bitmap, int bit) {
-    return (bitmap[bit / 32] & (1U << (bit % 32))) != 0;
+    uint32_t val = __atomic_load_n(&bitmap[bit / 32], __ATOMIC_ACQUIRE);
+    return (val & (1U << (bit % 32))) != 0;
 }
 
 static inline void bitmap_set(uint32_t *bitmap, int bit) {
-    bitmap[bit / 32] |= (1U << (bit % 32));
+    __atomic_fetch_or(&bitmap[bit / 32], (1U << (bit % 32)), __ATOMIC_ACQ_REL);
 }
 
 static inline void bitmap_clear(uint32_t *bitmap, int bit) {
-    bitmap[bit / 32] &= ~(1U << (bit % 32));
+    __atomic_fetch_and(&bitmap[bit / 32], ~(1U << (bit % 32)), __ATOMIC_ACQ_REL);
 }
 
-/* Find first free bit in bitmap (returns -1 if none found) */
+/* Try to atomically set a bit, returns 1 if successful (bit was 0), 0 if already set */
+static inline int bitmap_try_set(uint32_t *bitmap, int bit) {
+    uint32_t mask = 1U << (bit % 32);
+    uint32_t old = __atomic_fetch_or(&bitmap[bit / 32], mask, __ATOMIC_ACQ_REL);
+    return (old & mask) == 0;  /* Return 1 if we set it, 0 if already set */
+}
+
+/* Find first free bit in bitmap using CPU intrinsic (O(1) per 32-bit word) 
+ * P2 fix: Lock-free version using atomic load */
 static int bitmap_find_first_free(uint32_t *bitmap, int max_bits) {
-    for (int i = 0; i < max_bits; i++) {
-        if (!bitmap_test(bitmap, i)) {
-            return i;
+    int num_words = (max_bits + 31) / 32;
+    for (int i = 0; i < num_words; i++) {
+        /* Atomic load to get current bitmap state */
+        uint32_t word = __atomic_load_n(&bitmap[i], __ATOMIC_ACQUIRE);
+        uint32_t inverted = ~word;
+        if (inverted != 0) {
+            int bit_pos = __builtin_ffs(inverted) - 1;
+            int global_pos = i * 32 + bit_pos;
+            if (global_pos < max_bits) {
+                return global_pos;
+            }
         }
     }
     return -1;
 }
 
-/* Allocate a new slab */
-static numa_slab_t *alloc_new_slab(int node, size_t obj_size) {
+/* Lock-free find and set: Find a free bit and atomically set it
+ * Returns bit index on success, -1 if no free bits */
+static int bitmap_find_and_set(uint32_t *bitmap, int max_bits) {
+    int num_words = (max_bits + 31) / 32;
+    for (int i = 0; i < num_words; i++) {
+        uint32_t word = __atomic_load_n(&bitmap[i], __ATOMIC_ACQUIRE);
+        while (~word != 0) {  /* While there are free bits */
+            uint32_t inverted = ~word;
+            int bit_pos = __builtin_ffs(inverted) - 1;
+            int global_pos = i * 32 + bit_pos;
+            if (global_pos >= max_bits) break;
+            
+            /* Try to atomically set this bit */
+            uint32_t mask = 1U << bit_pos;
+            uint32_t expected = word;
+            uint32_t desired = word | mask;
+            if (__atomic_compare_exchange_n(&bitmap[i], &expected, desired,
+                                           0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                return global_pos;  /* Successfully claimed this bit */
+            }
+            /* CAS failed, reload and retry */
+            word = expected;
+        }
+    }
+    return -1;
+}
+
+/* P2 fix: Helper to remove slab from doubly-linked list - O(1) */
+static inline void slab_list_remove(numa_slab_t **list_head, numa_slab_t *slab) {
+    if (slab->prev) {
+        slab->prev->next = slab->next;
+    } else {
+        /* slab is the head */
+        *list_head = slab->next;
+    }
+    if (slab->next) {
+        slab->next->prev = slab->prev;
+    }
+    slab->prev = NULL;
+    slab->next = NULL;
+}
+
+/* P2 fix: Helper to add slab to head of doubly-linked list - O(1) */
+static inline void slab_list_add_head(numa_slab_t **list_head, numa_slab_t *slab) {
+    slab->prev = NULL;
+    slab->next = *list_head;
+    if (*list_head) {
+        (*list_head)->prev = slab;
+    }
+    *list_head = slab;
+}
+
+/* Allocate a new slab with aligned memory */
+static numa_slab_t *alloc_new_slab(int node, size_t obj_size, int class_idx) {
     /* Allocate slab structure */
     numa_slab_t *slab = (numa_slab_t *)malloc(sizeof(numa_slab_t));
     if (!slab) return NULL;
     
-    /* Allocate 4KB slab memory on specified NUMA node */
-    slab->memory = numa_alloc_onnode(SLAB_SIZE, node);
-    if (!slab->memory) {
+    /* P2 fix: Allocate aligned slab memory for O(1) free lookup
+     * We allocate 2x size and manually align to SLAB_SIZE boundary */
+    void *raw_mem = numa_alloc_onnode(SLAB_SIZE * 2, node);
+    if (!raw_mem) {
         free(slab);
         return NULL;
     }
     
+    /* Align to SLAB_SIZE boundary */
+    uintptr_t raw_addr = (uintptr_t)raw_mem;
+    uintptr_t aligned_addr = (raw_addr + SLAB_SIZE - 1) & ~((uintptr_t)(SLAB_SIZE - 1));
+    slab->memory = (void *)aligned_addr;
+    /* Store raw pointer for freeing later - we'll use a trick: store offset in header */
+    
+    /* P2 fix: Initialize slab header with back-pointer for O(1) free lookup */
+    numa_slab_header_t *header = (numa_slab_header_t *)slab->memory;
+    header->magic = SLAB_HEADER_MAGIC;
+    header->class_idx = class_idx;
+    header->slab = slab;
+    header->raw_memory = raw_mem;  /* Store original for numa_free */
+    
     /* Initialize slab */
     memset(slab->bitmap, 0, sizeof(slab->bitmap));
-    slab->objects_per_slab = SLAB_SIZE / obj_size;
-    slab->free_count = slab->objects_per_slab;
+    /* Calculate objects per slab using usable size (after header) */
+    slab->objects_per_slab = SLAB_USABLE_SIZE / obj_size;
+    __atomic_store_n(&slab->free_count, slab->objects_per_slab, __ATOMIC_RELEASE);
     slab->next = NULL;
+    slab->prev = NULL;  /* P2 fix: Initialize prev pointer */
+    slab->node_id = node;
+    slab->class_idx = class_idx;
+    __atomic_store_n(&slab->list_type, SLAB_LIST_PARTIAL, __ATOMIC_RELEASE);
     
     return slab;
 }
@@ -647,7 +748,9 @@ static numa_slab_t *alloc_new_slab(int node, size_t obj_size) {
 /* Free a slab */
 static void free_slab(numa_slab_t *slab) {
     if (slab->memory) {
-        numa_free(slab->memory, SLAB_SIZE);
+        /* Get raw pointer from header and free 2x size */
+        numa_slab_header_t *header = (numa_slab_header_t *)slab->memory;
+        numa_free(header->raw_memory, SLAB_SIZE * 2);
     }
     free(slab);
 }
@@ -744,7 +847,7 @@ void numa_slab_cleanup(void) {
     slab_ctx.initialized = 0;
 }
 
-/* Allocate from slab */
+/* Allocate from slab - P2 fix: Lock-free fast path */
 void *numa_slab_alloc(size_t size, int node, size_t *total_size) {
     if (!slab_ctx.initialized) {
         return NULL;
@@ -772,156 +875,150 @@ void *numa_slab_alloc(size_t size, int node, size_t *total_size) {
     size_t aligned_size = (size + 15) & ~15;  /* 16-byte align */
     *total_size = aligned_size + 16;  /* Include PREFIX */
     
+    /* Fast path: Try to allocate from existing partial slab without lock */
+    numa_slab_t *slab = __atomic_load_n(&class->partial_slabs, __ATOMIC_ACQUIRE);
+    while (slab) {
+        /* Try lock-free allocation from this slab */
+        int free_bit = bitmap_find_and_set(slab->bitmap, slab->objects_per_slab);
+        if (free_bit >= 0) {
+            /* Successfully claimed a slot */
+            uint16_t new_count = __atomic_sub_fetch(&slab->free_count, 1, __ATOMIC_ACQ_REL);
+            
+            /* Calculate object address (skip header) */
+            void *result = (char *)slab->memory + SLAB_HEADER_SIZE + (free_bit * class->obj_size);
+            
+            /* If slab is now full, move to full list (need lock for list ops) */
+            if (new_count == 0) {
+                pthread_mutex_lock(&class->lock);
+                /* Double-check after acquiring lock */
+                if (__atomic_load_n(&slab->free_count, __ATOMIC_ACQUIRE) == 0 &&
+                    __atomic_load_n(&slab->list_type, __ATOMIC_ACQUIRE) == SLAB_LIST_PARTIAL) {
+                    slab_list_remove(&class->partial_slabs, slab);
+                    slab_list_add_head(&class->full_slabs, slab);
+                    __atomic_store_n(&slab->list_type, SLAB_LIST_FULL, __ATOMIC_RELEASE);
+                }
+                pthread_mutex_unlock(&class->lock);
+            }
+            return result;
+        }
+        /* This slab is full, try next */
+        slab = __atomic_load_n(&slab->next, __ATOMIC_ACQUIRE);
+    }
+    
+    /* Slow path: Need to get a new slab (requires lock) */
     pthread_mutex_lock(&class->lock);
     
-    numa_slab_t *slab = class->partial_slabs;
-    
-    /* If no partial slab, try to get one from empty cache or allocate new */
-    if (!slab) {
-        if (class->empty_slabs) {
-            /* Reuse empty slab */
-            slab = class->empty_slabs;
-            class->empty_slabs = slab->next;
-            class->empty_count--;
-            slab->next = NULL;
-        } else {
-            /* Allocate new slab */
-            slab = alloc_new_slab(node, class->obj_size);
-            if (!slab) {
-                pthread_mutex_unlock(&class->lock);
-                return NULL;
-            }
-            class->slabs_count++;
+    /* Re-check partial_slabs after acquiring lock */
+    slab = class->partial_slabs;
+    if (slab) {
+        int free_bit = bitmap_find_and_set(slab->bitmap, slab->objects_per_slab);
+        if (free_bit >= 0) {
+            __atomic_sub_fetch(&slab->free_count, 1, __ATOMIC_ACQ_REL);
+            void *result = (char *)slab->memory + SLAB_HEADER_SIZE + (free_bit * class->obj_size);
+            pthread_mutex_unlock(&class->lock);
+            return result;
         }
-        
-        /* Add to partial list */
-        class->partial_slabs = slab;
     }
     
-    /* Find free object in slab */
-    int free_bit = bitmap_find_first_free(slab->bitmap, slab->objects_per_slab);
-    if (free_bit < 0) {
-        /* This shouldn't happen, but handle it */
-        pthread_mutex_unlock(&class->lock);
-        return NULL;
+    /* Get from empty cache or allocate new */
+    if (class->empty_slabs) {
+        slab = class->empty_slabs;
+        slab_list_remove(&class->empty_slabs, slab);
+        class->empty_count--;
+    } else {
+        slab = alloc_new_slab(node, class->obj_size, class_idx);
+        if (!slab) {
+            pthread_mutex_unlock(&class->lock);
+            return NULL;
+        }
+        class->slabs_count++;
     }
     
-    /* Mark object as allocated */
-    bitmap_set(slab->bitmap, free_bit);
-    slab->free_count--;
+    /* Add to partial list */
+    slab_list_add_head(&class->partial_slabs, slab);
+    __atomic_store_n(&slab->list_type, SLAB_LIST_PARTIAL, __ATOMIC_RELEASE);
     
-    /* Calculate object address */
-    void *result = (char *)slab->memory + (free_bit * class->obj_size);
-    
-    /* If slab is now full, move to full list */
-    if (slab->free_count == 0) {
-        class->partial_slabs = slab->next;
-        slab->next = class->full_slabs;
-        class->full_slabs = slab;
-    }
+    /* Allocate from the new slab */
+    int free_bit = bitmap_find_and_set(slab->bitmap, slab->objects_per_slab);
+    __atomic_sub_fetch(&slab->free_count, 1, __ATOMIC_ACQ_REL);
+    void *result = (char *)slab->memory + SLAB_HEADER_SIZE + (free_bit * class->obj_size);
     
     pthread_mutex_unlock(&class->lock);
     return result;
 }
 
-/* Free to slab */
+/* Free to slab - P2 fix: Lock-free fast path using atomic operations */
 void numa_slab_free(void *ptr, size_t total_size, int node) {
     if (!slab_ctx.initialized || !ptr) {
         return;
     }
     
-    /* Find appropriate size class */
-    size_t size = total_size - 16;  /* Exclude PREFIX */
-    int class_idx = -1;
-    for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
-        if (size <= numa_pool_size_classes[i]) {
-            class_idx = i;
-            break;
-        }
-    }
+    /* P2 fix: Use page alignment and slab header for O(1) slab lookup */
+    uintptr_t ptr_addr = (uintptr_t)ptr;
+    uintptr_t slab_base = ptr_addr & ~((uintptr_t)(SLAB_SIZE - 1));
+    numa_slab_header_t *header = (numa_slab_header_t *)slab_base;
     
-    if (class_idx < 0 || numa_pool_size_classes[class_idx] > SLAB_MAX_OBJECT_SIZE) {
-        return;  /* Not from slab */
-    }
-    
-    /* Validate node */
-    if (node < 0 || node >= slab_ctx.num_nodes) {
-        node = 0;
-    }
-    
-    numa_slab_class_t *class = &slab_ctx.slab_nodes[node].classes[class_idx];
-    
-    pthread_mutex_lock(&class->lock);
-    
-    /* Find which slab this object belongs to */
-    numa_slab_t **list_head = &class->partial_slabs;
-    numa_slab_t *slab = NULL;
-    numa_slab_t **prev_ptr = NULL;
-    
-    /* Search in partial list */
-    prev_ptr = &class->partial_slabs;
-    slab = class->partial_slabs;
-    while (slab) {
-        if (ptr >= slab->memory && ptr < (char *)slab->memory + SLAB_SIZE) {
-            list_head = &class->partial_slabs;
-            break;
-        }
-        prev_ptr = &slab->next;
-        slab = slab->next;
-    }
-    
-    /* Search in full list if not found */
-    if (!slab) {
-        prev_ptr = &class->full_slabs;
-        slab = class->full_slabs;
-        while (slab) {
-            if (ptr >= slab->memory && ptr < (char *)slab->memory + SLAB_SIZE) {
-                list_head = &class->full_slabs;
-                break;
-            }
-            prev_ptr = &slab->next;
-            slab = slab->next;
-        }
-    }
-    
-    if (!slab) {
-        /* Object not found in any slab */
-        pthread_mutex_unlock(&class->lock);
+    /* Validate magic number */
+    if (header->magic != SLAB_HEADER_MAGIC) {
         return;
     }
     
-    /* Calculate object index */
-    size_t offset = (char *)ptr - (char *)slab->memory;
-    int obj_index = offset / class->obj_size;
-    
-    /* Mark object as free */
-    bitmap_clear(slab->bitmap, obj_index);
-    slab->free_count++;
-    
-    /* Move slab between lists if needed */
-    int was_full = (slab->free_count == 1);
-    int is_empty = (slab->free_count == slab->objects_per_slab);
-    
-    if (was_full) {
-        /* Move from full to partial */
-        *prev_ptr = slab->next;
-        slab->next = class->partial_slabs;
-        class->partial_slabs = slab;
-    } else if (is_empty) {
-        /* Move to empty cache or free */
-        *prev_ptr = slab->next;
-        
-        if (class->empty_count < SLAB_EMPTY_CACHE_MAX) {
-            /* Cache empty slab */
-            slab->next = class->empty_slabs;
-            class->empty_slabs = slab;
-            class->empty_count++;
-        } else {
-            /* Free slab immediately */
-            free_slab(slab);
-            class->slabs_count--;
-        }
+    numa_slab_t *slab = header->slab;
+    if (!slab || slab->memory != (void *)slab_base) {
+        return;
     }
     
-    pthread_mutex_unlock(&class->lock);
+    int class_idx = header->class_idx;
+    int slab_node = slab->node_id;
+    
+    if (slab_node < 0 || slab_node >= slab_ctx.num_nodes) {
+        return;
+    }
+    
+    numa_slab_class_t *class = &slab_ctx.slab_nodes[slab_node].classes[class_idx];
+    
+    /* Calculate object index (account for header) */
+    size_t offset = (char *)ptr - (char *)slab->memory - SLAB_HEADER_SIZE;
+    int obj_index = offset / class->obj_size;
+    
+    if (obj_index < 0 || obj_index >= (int)slab->objects_per_slab) {
+        return;
+    }
+    
+    /* Lock-free: Clear bit and increment free_count atomically */
+    bitmap_clear(slab->bitmap, obj_index);
+    uint16_t old_count = __atomic_fetch_add(&slab->free_count, 1, __ATOMIC_ACQ_REL);
+    uint16_t new_count = old_count + 1;
+    
+    /* Check if we need to move slab between lists (requires lock) */
+    int was_full = (old_count == 0);
+    int is_empty = (new_count == slab->objects_per_slab);
+    
+    if (was_full || is_empty) {
+        pthread_mutex_lock(&class->lock);
+        
+        int current_list = __atomic_load_n(&slab->list_type, __ATOMIC_ACQUIRE);
+        uint16_t current_count = __atomic_load_n(&slab->free_count, __ATOMIC_ACQUIRE);
+        
+        if (was_full && current_list == SLAB_LIST_FULL) {
+            /* Move from full to partial */
+            slab_list_remove(&class->full_slabs, slab);
+            slab_list_add_head(&class->partial_slabs, slab);
+            __atomic_store_n(&slab->list_type, SLAB_LIST_PARTIAL, __ATOMIC_RELEASE);
+        } else if (current_count == slab->objects_per_slab && current_list == SLAB_LIST_PARTIAL) {
+            /* Move from partial to empty/free */
+            slab_list_remove(&class->partial_slabs, slab);
+            
+            if (class->empty_count < SLAB_EMPTY_CACHE_MAX) {
+                slab_list_add_head(&class->empty_slabs, slab);
+                __atomic_store_n(&slab->list_type, SLAB_LIST_EMPTY, __ATOMIC_RELEASE);
+                class->empty_count++;
+            } else {
+                free_slab(slab);
+                class->slabs_count--;
+            }
+        }
+        
+        pthread_mutex_unlock(&class->lock);
+    }
 }
