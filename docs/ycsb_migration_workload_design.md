@@ -308,6 +308,275 @@ redis-cli SET large_key "$(head -c 20000 < /dev/urandom | base64)"  # Direct
 grep "numa_zmalloc" redis_alloc_test.log
 ```
 
+## 使用教程
+
+### 快速开始
+
+#### 1. 环境准备
+
+确保已安装必要的工具：
+
+```bash
+# 检查 Redis 是否已编译
+ls -lh src/redis-server src/redis-cli
+
+# 检查 Java 环境（YCSB 需要）
+java -version
+
+# 下载 YCSB（如果尚未下载）
+cd tests/ycsb
+wget https://github.com/brianfrankcooper/YCSB/releases/download/0.17.0/ycsb-0.17.0.tar.gz
+tar -xzf ycsb-0.17.0.tar.gz
+```
+
+#### 2. 基础测试（推荐新手）
+
+使用简化版测试脚本，快速验证功能：
+
+```bash
+cd tests/ycsb
+
+# 运行基础迁移测试（约 2 分钟）
+./run_migration_test.sh
+```
+
+**预期输出**：
+- Redis 启动成功
+- NUMA 策略配置完成
+- YCSB Load 和 Run 阶段执行
+- 迁移日志分析
+- 测试报告生成
+
+#### 3. 高强度测试（10+ GB 内存压力）
+
+使用优化版脚本进行大规模测试：
+
+```bash
+cd tests/ycsb
+
+# 确保有足够内存（建议 20GB+）
+free -h
+
+# 运行高强度测试（约 5-10 分钟）
+./run_migration_high_pressure_v2.sh
+```
+
+**测试阶段**：
+1. **阶段 1**: 加载小对象 (64B × 200K) - SLAB 分配
+2. **阶段 2**: 加载中对象 (4KB × 400K) - Pool 分配
+3. **阶段 3**: 加载大对象 (32KB × 200K) - Direct 分配
+4. **阶段 4**: 加载超大对象 (128KB × 20K) - Direct 分配
+5. **阶段 5**: 热点访问测试 (100 万次操作)
+
+**预期结果**：
+- 内存使用：~10 GB
+- 键数量：~820K
+- 吞吐量：SET 155K ops/s, GET 121K ops/s
+
+### 自定义测试
+
+#### 修改工作负载参数
+
+编辑 `workloads/workload_numa_migration_full`：
+
+```properties
+# 调整记录数（影响内存使用）
+recordcount=2000000  # 增加到 200 万
+
+# 调整操作数（影响测试时长）
+operationcount=5000000  # 500 万次操作
+
+# 调整线程数（影响并发压力）
+threadcount=100  # 100 线程并发
+
+# 调整热点比例
+hotspotdatafraction=0.1  # 10% 热点数据
+hotspotopnfraction=0.9   # 90% 操作访问热点
+```
+
+#### 创建自定义工作负载
+
+复制模板并修改：
+
+```bash
+cd tests/ycsb/workloads
+
+# 复制模板
+cp workload_numa_migration_full my_custom_workload
+
+# 编辑配置
+vim my_custom_workload
+```
+
+示例配置：
+
+```properties
+# 我的自定义工作负载
+recordcount=1000000
+operationcount=2000000
+
+# 纯读测试
+readproportion=1.0
+updateproportion=0.0
+insertproportion=0.0
+
+# 极端热点（90/10）
+requestdistribution=hotspot
+hotspotdatafraction=0.1
+hotspotopnfraction=0.9
+
+# 小对象测试
+fieldcount=1
+fieldlength=64  # 64B，测试 SLAB 分配
+```
+
+#### 手动运行 YCSB
+
+```bash
+cd tests/ycsb/ycsb-0.17.0
+
+# Load 阶段
+bin/ycsb load redis -s \
+  -P ../workloads/my_custom_workload \
+  -p "redis.host=127.0.0.1" \
+  -p "redis.port=6379"
+
+# Run 阶段
+bin/ycsb run redis -s \
+  -P ../workloads/my_custom_workload \
+  -p "redis.host=127.0.0.1" \
+  -p "redis.port=6379"
+```
+
+### 结果分析
+
+#### 查看测试报告
+
+```bash
+cd tests/ycsb/results
+
+# 查看最新报告
+ls -lt *.txt | head -1 | awk '{print $NF}' | xargs cat
+
+# 查看详细日志
+tail -100 redis_high_pressure.log
+```
+
+#### 分析迁移日志
+
+```bash
+# 策略初始化
+grep "Strategy initialized" results/redis_high_pressure.log
+
+# 远程访问检测
+grep "Remote access detected" results/redis_high_pressure.log | wc -l
+
+# 迁移触发事件
+grep "MIGRATION TRIGGERED" results/redis_high_pressure.log
+
+# 热度衰减周期
+grep "Executing heat decay cycle" results/redis_high_pressure.log | wc -l
+```
+
+#### 查看 Redis 统计
+
+```bash
+# 内存使用
+redis-cli INFO memory | grep -E "used_memory|fragmentation"
+
+# 键空间统计
+redis-cli INFO keyspace
+
+# 命令统计
+redis-cli INFO stats | grep total_commands_processed
+```
+
+### 故障排查
+
+#### Redis 启动失败
+
+```bash
+# 检查端口占用
+sudo lsof -i :6379
+
+# 杀掉占用进程
+sudo fuser -k 6379/tcp
+
+# 查看错误日志
+tail -50 tests/ycsb/results/redis_high_pressure.log
+```
+
+#### YCSB 连接失败
+
+```bash
+# 测试 Redis 连接
+redis-cli -h 127.0.0.1 -p 6379 ping
+
+# 检查 Redis 配置
+redis-cli CONFIG GET protected-mode
+redis-cli CONFIG GET bind
+```
+
+#### 内存不足
+
+```bash
+# 检查可用内存
+free -h
+
+# 减少测试规模
+vim workloads/workload_numa_migration_full
+# 将 recordcount 减半
+
+# 或增加 Redis maxmemory
+redis-cli CONFIG SET maxmemory 8gb
+```
+
+### 性能调优
+
+#### 提高加载速度
+
+```bash
+# 禁用持久化
+redis-cli CONFIG SET save ""
+redis-cli CONFIG SET appendonly no
+
+# 增加 Lua 脚本批处理大小
+# 编辑 run_migration_high_pressure_v2.sh
+# 修改 batch_size=5000 为更大值（如 10000）
+```
+
+#### 减少测试时间
+
+```bash
+# 减少操作数
+vim workloads/workload_numa_migration_full
+operationcount=1000000  # 从 500 万减到 100 万
+
+# 减少记录数
+recordcount=500000  # 从 200 万减到 50 万
+```
+
+### 多节点环境测试
+
+如果有真实的 NUMA 多节点服务器：
+
+```bash
+# 查看 NUMA 拓扑
+numactl --hardware
+
+# 将 Redis 绑定到节点 0
+numactl --cpunodebind=0 --membind=0 ./src/redis-server &
+
+# 将 YCSB 客户端绑定到节点 1
+numactl --cpunodebind=1 --membind=1 \
+  tests/ycsb/ycsb-0.17.0/bin/ycsb run redis \
+  -P tests/ycsb/workloads/workload_numa_migration_full
+```
+
+这样会产生跨节点访问，触发迁移策略。
+
+---
+
 ## 改进建议
 
 ### 短期改进
