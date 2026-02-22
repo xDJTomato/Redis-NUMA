@@ -1,0 +1,50 @@
+# YCSB NUMA 迁移策略全覆盖工作负载
+# 设计目标：触发 Composite LRU 迁移策略，覆盖三种内存分配方案
+# 
+# 内存分配方案划分：
+# - SLAB: ≤ 128B (小对象)
+# - Pool: 129B - 16KB (中等对象)
+# - Direct: > 16KB (大对象)
+
+# 基础配置
+recordcount=100000
+operationcount=1000000
+workload=site.ycsb.workloads.CoreWorkload
+
+# 读写比例 (读多写少，便于观察热点迁移)
+readproportion=0.7
+updateproportion=0.2
+scanproportion=0
+insertproportion=0.1
+
+# 热点配置 - 制造明显的热点访问模式
+# 80% 的操作集中在 20% 的 key 上
+requestdistribution=hotspot
+hotspotdatafraction=0.2
+hotspotopnfraction=0.8
+
+# 关键：混合字段大小以覆盖三种分配方案
+# fieldcount=10 表示每个记录有10个字段
+fieldcount=10
+
+# 字段长度分布（通过不同的字段实现混合大小）
+# field0-field3: 小字段 ~20B -> SLAB分配 (总计80B)
+# field4-field7: 中字段 ~200B -> Pool分配 (总计800B)  
+# field8-field9: 大字段 ~10KB -> Direct分配 (总计20KB)
+fieldlength=20
+
+# 线程配置 (高并发以触发更多迁移)
+threadcount=50
+
+# 插入顺序 (hash分布确保均匀分配到不同节点)
+insertorder=hashed
+
+# Redis 特定配置
+redis.host=127.0.0.1
+redis.port=6379
+redis.timeout=5000
+redis.database=0
+
+# YCSB 字段分布配置
+# 通过自定义字段长度实现混合大小
+fieldlengthdistribution=constant

@@ -133,9 +133,9 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
         } else {
             /* Remote access: may trigger migration evaluation */
             if (current_hotness >= data->migrate_hotness_threshold) {
-                CLRU_LOG(LL_VERBOSE, 
-                    "[Composite LRU] Remote access detected for key, current_node=%d, mem_node=%d, hotness=%d",
-                    current_node, mem_node, current_hotness);
+                serverLog(LL_VERBOSE, 
+                    "[Composite LRU] Remote access detected: val=%p, current_node=%d, mem_node=%d, hotness=%d, threshold=%d",
+                    val, current_node, mem_node, current_hotness, data->migrate_hotness_threshold);
                 
                 /* Add to pending migrations */
                 pending_migration_t *pm = zmalloc(sizeof(*pm));
@@ -190,9 +190,9 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             info->preferred_node = current_node;
             
             if (info->hotness >= data->migrate_hotness_threshold) {
-                CLRU_LOG(LL_VERBOSE, 
-                    "[Composite LRU] Remote access detected for key (legacy), current=%d, accessed_from=%d, hotness=%d",
-                    info->current_node, current_node, info->hotness);
+                serverLog(LL_VERBOSE, 
+                    "[Composite LRU] Remote access detected (legacy): key=%p, current_node=%d, accessed_from=%d, hotness=%d, threshold=%d",
+                    key, info->current_node, current_node, info->hotness, data->migrate_hotness_threshold);
             }
         }
     }
@@ -258,9 +258,9 @@ static void process_pending_migrations(composite_lru_data_t *data) {
         int status = check_resource_status(data, pm->target_node);
         if (status == RESOURCE_AVAILABLE) {
             /* Execute migration - would call numa_migrate_single_key here */
-            CLRU_LOG(LL_VERBOSE, 
-                "[Composite LRU] Processing pending migration to node %d",
-                pm->target_node);
+            serverLog(LL_VERBOSE, 
+                "[Composite LRU] *** MIGRATION TRIGGERED *** key=%p, target_node=%d, priority=%d, pending_time=%lluus",
+                pm->key, pm->target_node, pm->priority, (unsigned long long)(now - pm->enqueue_time));
             
             /* Migration logic would go here */
             data->migrations_triggered++;
@@ -316,7 +316,8 @@ int composite_lru_init(numa_strategy_t *strategy) {
     
     strategy->private_data = data;
     
-    CLRU_LOG(LL_NOTICE, "[Composite LRU] Strategy initialized (slot 1 default)");
+    serverLog(LL_NOTICE, "[Composite LRU] Strategy initialized: migrate_threshold=%d, decay_threshold=%lluus, stability_count=%d",
+        data->migrate_hotness_threshold, data->decay_threshold, data->stability_count);
     return NUMA_STRATEGY_OK;
 }
 
@@ -329,12 +330,17 @@ int composite_lru_execute(numa_strategy_t *strategy) {
     
     /* 1. Perform periodic heat decay */
     if (now - data->last_decay_time > data->decay_threshold) {
+        serverLog(LL_VERBOSE, "[Composite LRU] Executing heat decay cycle");
         composite_lru_decay_heat(data);
         data->last_decay_time = now;
     }
     
     /* 2. Process pending migrations */
-    process_pending_migrations(data);
+    if (listLength(data->pending_migrations) > 0) {
+        serverLog(LL_VERBOSE, "[Composite LRU] Processing %lu pending migrations",
+            (unsigned long)listLength(data->pending_migrations));
+        process_pending_migrations(data);
+    }
     
     /* 3. Check global load balancing */
     check_load_balancing(strategy);
