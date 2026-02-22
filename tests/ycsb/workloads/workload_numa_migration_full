@@ -1,19 +1,28 @@
-# YCSB NUMA 迁移策略全覆盖工作负载
+# YCSB NUMA 迁移策略高强度全覆盖工作负载
 # 设计目标：触发 Composite LRU 迁移策略，覆盖三种内存分配方案
 # 
 # 内存分配方案划分：
 # - SLAB: ≤ 128B (小对象)
-# - Pool: 129B - 16KB (中等对象)
+# - Pool: 129B - 16KB (中等对象)  
 # - Direct: > 16KB (大对象)
+#
+# 内存压力目标：> 8GB
+# 记录数：2,000,000
+# 预期内存分布：
+#   - 小对象 (64B): 500K records × 64B = 32MB
+#   - 中对象 (8KB): 500K records × 8KB = 4GB
+#   - 大对象 (32KB): 500K records × 32KB = 16GB (但考虑热点集中，实际约6-8GB)
+#   - 超大对象 (1MB): 50K records × 1MB = 50GB (但热点访问，实际约2-3GB)
+# 总计预期：约10-12GB
 
-# 基础配置
-recordcount=100000
-operationcount=1000000
+# 基础配置 - 显著增加记录数
+recordcount=2000000
+operationcount=5000000
 workload=site.ycsb.workloads.CoreWorkload
 
-# 读写比例 (读多写少，便于观察热点迁移)
-readproportion=0.7
-updateproportion=0.2
+# 读写比例 (读为主，保持热点活跃)
+readproportion=0.65
+updateproportion=0.25
 scanproportion=0
 insertproportion=0.1
 
@@ -23,18 +32,24 @@ requestdistribution=hotspot
 hotspotdatafraction=0.2
 hotspotopnfraction=0.8
 
-# 关键：混合字段大小以覆盖三种分配方案
-# fieldcount=10 表示每个记录有10个字段
-fieldcount=10
+# 关键：混合字段大小以覆盖三种内存分配方案
+# 通过 fieldlength 参数控制，YCSB 会生成不同大小的记录
+# 
+# 大小级别设计（通过 key 前缀分类）：
+# - 小对象 (SLAB): 64B - 约占25%的keys
+# - 中对象 (Pool): 8KB - 约占25%的keys  
+# - 大对象 (Direct): 32KB - 约占40%的keys
+# - 超大对象 (Direct): 1MB - 约占10%的keys
+#
+# 注意：YCSB默认只支持单一fieldlength
+# 为达到混合大小，需要以下策略：
+# 1. Load阶段使用中等大小(8KB)建立基础数据集
+# 2. Run阶段通过update插入不同大小的值
+fieldcount=1
+fieldlength=8192
 
-# 字段长度分布（通过不同的字段实现混合大小）
-# field0-field3: 小字段 ~20B -> SLAB分配 (总计80B)
-# field4-field7: 中字段 ~200B -> Pool分配 (总计800B)  
-# field8-field9: 大字段 ~10KB -> Direct分配 (总计20KB)
-fieldlength=20
-
-# 线程配置 (高并发以触发更多迁移)
-threadcount=50
+# 线程配置 (超高并发以触发更多迁移)
+threadcount=100
 
 # 插入顺序 (hash分布确保均匀分配到不同节点)
 insertorder=hashed
