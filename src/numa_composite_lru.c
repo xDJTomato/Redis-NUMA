@@ -19,14 +19,13 @@
 /* ========== Logging ========== */
 
 #ifdef NUMA_STRATEGY_STANDALONE
-#define CLRU_LOG(level, fmt, ...) printf("[%s] " fmt "\n", level, ##__VA_ARGS__)
+#define _serverLog(level, fmt, ...) printf("[%s] " fmt "\n", level, ##__VA_ARGS__)
 #else
 extern void _serverLog(int level, const char *fmt, ...);
 #define LL_DEBUG 0
 #define LL_VERBOSE 1
 #define LL_NOTICE 2
 #define LL_WARNING 3
-#define CLRU_LOG(level, fmt, args...) _serverLog(level, fmt, ##args)
 #endif
 
 /* ========== Helper Functions ========== */
@@ -133,7 +132,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
         } else {
             /* Remote access: may trigger migration evaluation */
             if (current_hotness >= data->migrate_hotness_threshold) {
-                serverLog(LL_VERBOSE, 
+                _serverLog(LL_VERBOSE, 
                     "[Composite LRU] Remote access detected: val=%p, current_node=%d, mem_node=%d, hotness=%d, threshold=%d",
                     val, current_node, mem_node, current_hotness, data->migrate_hotness_threshold);
                 
@@ -190,7 +189,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             info->preferred_node = current_node;
             
             if (info->hotness >= data->migrate_hotness_threshold) {
-                serverLog(LL_VERBOSE, 
+                _serverLog(LL_VERBOSE, 
                     "[Composite LRU] Remote access detected (legacy): key=%p, current_node=%d, accessed_from=%d, hotness=%d, threshold=%d",
                     key, info->current_node, current_node, info->hotness, data->migrate_hotness_threshold);
             }
@@ -258,7 +257,7 @@ static void process_pending_migrations(composite_lru_data_t *data) {
         int status = check_resource_status(data, pm->target_node);
         if (status == RESOURCE_AVAILABLE) {
             /* Execute migration - would call numa_migrate_single_key here */
-            serverLog(LL_VERBOSE, 
+            _serverLog(LL_VERBOSE, 
                 "[Composite LRU] *** MIGRATION TRIGGERED *** key=%p, target_node=%d, priority=%d, pending_time=%lluus",
                 pm->key, pm->target_node, pm->priority, (unsigned long long)(now - pm->enqueue_time));
             
@@ -316,7 +315,7 @@ int composite_lru_init(numa_strategy_t *strategy) {
     
     strategy->private_data = data;
     
-    serverLog(LL_NOTICE, "[Composite LRU] Strategy initialized: migrate_threshold=%d, decay_threshold=%lluus, stability_count=%d",
+    _serverLog(LL_NOTICE, "[Composite LRU] Strategy initialized: migrate_threshold=%d, decay_threshold=%lluus, stability_count=%d",
         data->migrate_hotness_threshold, data->decay_threshold, data->stability_count);
     return NUMA_STRATEGY_OK;
 }
@@ -330,14 +329,14 @@ int composite_lru_execute(numa_strategy_t *strategy) {
     
     /* 1. Perform periodic heat decay */
     if (now - data->last_decay_time > data->decay_threshold) {
-        serverLog(LL_VERBOSE, "[Composite LRU] Executing heat decay cycle");
+        _serverLog(LL_VERBOSE, "[Composite LRU] Executing heat decay cycle");
         composite_lru_decay_heat(data);
         data->last_decay_time = now;
     }
     
     /* 2. Process pending migrations */
     if (listLength(data->pending_migrations) > 0) {
-        serverLog(LL_VERBOSE, "[Composite LRU] Processing %lu pending migrations",
+        _serverLog(LL_VERBOSE, "[Composite LRU] Processing %lu pending migrations",
             (unsigned long)listLength(data->pending_migrations));
         process_pending_migrations(data);
     }
@@ -354,7 +353,7 @@ void composite_lru_cleanup(numa_strategy_t *strategy) {
     
     composite_lru_data_t *data = strategy->private_data;
     
-    CLRU_LOG(LL_NOTICE, 
+    _serverLog(LL_NOTICE, 
         "[Composite LRU] Cleanup - heat_updates=%llu, migrations=%llu, decays=%llu",
         (unsigned long long)data->heat_updates,
         (unsigned long long)data->migrations_triggered,
@@ -409,7 +408,7 @@ static int composite_lru_set_config(numa_strategy_t *strategy,
         return NUMA_STRATEGY_EINVAL;
     }
     
-    CLRU_LOG(LL_VERBOSE, "[Composite LRU] Config set: %s = %s", key, value);
+    _serverLog(LL_VERBOSE, "[Composite LRU] Config set: %s = %s", key, value);
     return NUMA_STRATEGY_OK;
 }
 
