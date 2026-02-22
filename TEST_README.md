@@ -1,8 +1,16 @@
 # Composite LRU策略测试脚本使用说明
 
+## 📁 测试文件组织
+
+项目测试文件已模块化整理，详见各目录README：
+
+- **[tests/numa/](tests/numa/README.md)** - NUMA 功能测试（推荐日常使用）
+- **[tests/ycsb/](tests/ycsb/README.md)** - YCSB 压力测试（推荐性能评估）
+- **[tests/legacy/](tests/legacy/README.md)** - 历史测试文件归档
+
 ## 测试脚本说明
 
-本项目提供两个测试脚本，用于验证Composite LRU策略的功能和性能：
+本文档介绍 Composite LRU 策略的两个测试脚本（位于 [tests/numa/](tests/numa/)）：
 
 | 脚本 | 用途 | 适用环境 |
 |-----|------|---------|

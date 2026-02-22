@@ -39,3 +39,7 @@ Makefile.dep
 compile_commands.json
 redis.code-workspace
 src/temp-*.rdb
+
+# Legacy test results
+tests/legacy/results/dump.rdb
+tests/legacy/results/*.rdb
