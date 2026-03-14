@@ -138,7 +138,7 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node);
 
 /* ========== Redis命令接口 ========== */
 
-/* NUMAMIGRATE 命令处理函数 */
-void numamigrateCommand(client *c);
+/* 查询模块是否已初始化（供 numa_command.c 使用）*/
+int numa_key_migrate_is_initialized(void);
 
 #endif /* NUMA_KEY_MIGRATE_H */

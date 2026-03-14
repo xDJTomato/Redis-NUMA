@@ -821,12 +821,8 @@ struct redisCommand redisCommandTable[] = {
      "admin no-script ok-loading ok-stale",
      0,NULL,0,0,0,0,0,0},
 
-    {"numamigrate",numamigrateCommand,-2,
+    {"numa",numaCommand,-2,
      "admin write",
-     0,NULL,0,0,0,0,0,0},
-
-    {"numaconfig",numaconfigCommand,-2,
-     "admin no-script",
      0,NULL,0,0,0,0,0,0},
 
     {"config",configCommand,-2,
