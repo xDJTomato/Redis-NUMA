@@ -41,6 +41,7 @@
 | **Slab分配器** | `numa_pool.h/c`（内置） | 小对象(≤128B)快速分配，16KB slab，原子位图O(1)管理 | 已完成 v3.2-P2 |
 | **NUMA迁移** | `numa_migrate.h/c` | 内存对象跨节点迁移 | 已完成 v2.2 |
 | **zmalloc NUMA适配** | `zmalloc.c/h` | 内存分配器NUMA感知改造，PREFIX机制 | 已完成 v3.2-P2 |
+| **NUMA统一命令入口** | `numa_command.c` | 统一 NUMA Redis 命令路由层，三层域路由（MIGRATE/CONFIG/STRATEGY） | 已完成 v1.0 |
 
 ## 核心设计原则
 
@@ -72,6 +73,7 @@
 - [06-numa-strategy-slots.md](./06-numa-strategy-slots.md) - 策略插槽框架
 - [07-numa-composite-lru.md](./07-numa-composite-lru.md) - 复合LRU策略实现
 - [08-numa-configurable-strategy.md](./08-numa-configurable-strategy.md) - 可配置NUMA分配策略
+- [09-numa-command.md](./09-numa-command.md) - NUMA统一命令入口（NUMA MIGRATE/CONFIG/STRATEGY）
 
 ### 性能分析与优化
 - [09-memory-fragmentation-analysis.md](./09-memory-fragmentation-analysis.md) - 内存碎片问题深度分析
@@ -80,6 +82,7 @@
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| v3.3 | 2026-03-14 | NUMA统一命令入口重构：NUMAMIGRATE/NUMACONFIG 合并为 NUMA 三域路由 |
 | v3.2-P2 | 2026-02-14 | P2性能修复：Slab对齐、bitmap O(1)、node_id追踪 |
 | v3.1-P1 | 2026-02-14 | P1优化：Free List + Compact机制 |
 | v3.0 | 2026-02-14 | P0优化：动态chunk + 16级size class |
