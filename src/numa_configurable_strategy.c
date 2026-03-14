@@ -40,7 +40,7 @@ numa_config_strategy_type_t parse_strategy_name(const char* name) {
             return (numa_config_strategy_type_t)i;
         }
     }
-    return NUMA_STRATEGY_CONFIG_LOCAL_FIRST; /* 默认策略 */
+    return (numa_config_strategy_type_t)-1; /* 未知策略名返回 -1 表示错误 */
 }
 
 /* 初始化运行时状态 */
@@ -249,7 +249,9 @@ int numa_config_load_from_file(const char *config_file) {
         while (end > key && *end == ' ') *end-- = '\0';
         
         if (strcmp(key, "strategy") == 0) {
-            new_config.strategy_type = parse_strategy_name(value);
+            numa_config_strategy_type_t st = parse_strategy_name(value);
+            if ((int)st >= 0) new_config.strategy_type = st;
+            /* 未知策略名则保持原值 */
         } else if (strcmp(key, "balance_threshold") == 0) {
             new_config.balance_threshold = atof(value);
         } else if (strcmp(key, "auto_rebalance") == 0) {
@@ -531,6 +533,7 @@ int numa_config_handle_command(int argc, char **argv) {
     if (strcasecmp(argv[1], "SET") == 0 && argc >= 4) {
         if (strcasecmp(argv[2], "strategy") == 0) {
             numa_config_strategy_type_t strategy = parse_strategy_name(argv[3]);
+            if ((int)strategy < 0) return C_ERR;
             return numa_config_set_strategy(strategy);
         } else if (strcasecmp(argv[2], "cxl_optimization") == 0) {
             int enable = (strcasecmp(argv[3], "on") == 0 || atoi(argv[3]));

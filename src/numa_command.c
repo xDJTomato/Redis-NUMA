@@ -251,7 +251,7 @@ static void numa_cmd_config(client *c) {
             addReplyError(c, "NUMA configuration not available");
             return;
         }
-        addReplyArrayLen(c, 10);
+        addReplyArrayLen(c, 16);
         addReplyBulkCString(c, "strategy");
         addReplyBulkCString(c, get_strategy_name(cfg->strategy_type));
         addReplyBulkCString(c, "nodes");
@@ -291,6 +291,10 @@ static void numa_cmd_config(client *c) {
 
         if (!strcasecmp(param, "strategy")) {
             numa_config_strategy_type_t st = parse_strategy_name(val);
+            if ((int)st < 0) {
+                addReplyErrorFormat(c, "Unknown strategy name: %s", val);
+                return;
+            }
             if (numa_config_set_strategy(st) == C_OK)
                 addReplyStatus(c, "OK");
             else
