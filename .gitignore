@@ -43,3 +43,6 @@ src/temp-*.rdb
 # Legacy test results
 tests/legacy/results/dump.rdb
 tests/legacy/results/*.rdb
+
+# YCSB binary distribution (jar files, do not track)
+tests/ycsb/ycsb-*/

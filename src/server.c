@@ -6492,6 +6492,23 @@ int main(int argc, char **argv) {
     if (numa_key_migrate_init() != NUMA_KEY_MIGRATE_OK) {
         serverLog(LL_WARNING, "Failed to initialize NUMA key migration module");
     }
+
+    /* 如果配置文件中指定了 numa-migrate-config，加载 JSON 配置并应用到默认策略 */
+    if (server.numa_migrate_config_file) {
+        composite_lru_config_t numa_cfg;
+        numa_strategy_t *active = numa_strategy_slot_get(1);
+        if (composite_lru_load_config(server.numa_migrate_config_file, &numa_cfg) == NUMA_STRATEGY_OK) {
+            if (active) {
+                composite_lru_apply_config(active, &numa_cfg);
+            } else {
+                serverLog(LL_WARNING,
+                    "[NUMA] numa-migrate-config loaded but no active strategy on slot 1");
+            }
+        } else {
+            serverLog(LL_WARNING,
+                "[NUMA] Failed to load numa-migrate-config: %s", server.numa_migrate_config_file);
+        }
+    }
 #endif
     
     if (background || server.pidfile) createPidFile();

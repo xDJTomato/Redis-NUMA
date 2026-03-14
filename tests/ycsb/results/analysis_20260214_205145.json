@@ -1,0 +1,101 @@
+[
+  {
+    "name": "ycsb_hotspot",
+    "ycsb": {
+      "throughput": 98619.32938856016,
+      "operations": {
+        "TOTAL_GCS_G1_Young_Generation": {
+          "Count": 2.0
+        },
+        "TOTAL_GCS_G1_Concurrent_GC": {
+          "Count": 0.0
+        },
+        "TOTAL_GCS_G1_Old_Generation": {
+          "Count": 0.0
+        },
+        "TOTAL_GCs": {
+          "Count": 2.0
+        },
+        "READ": {
+          "Operations": 12074.0
+        },
+        "CLEANUP": {
+          "Operations": 20.0
+        },
+        "UPDATE": {
+          "Operations": 10056.0
+        }
+      },
+      "overall": {}
+    },
+    "redis": {}
+  },
+  {
+    "name": "ycsb_test",
+    "ycsb": {
+      "throughput": 95238.09523809524,
+      "operations": {
+        "TOTAL_GCS_G1_Young_Generation": {
+          "Count": 0.0
+        },
+        "TOTAL_GCS_G1_Concurrent_GC": {
+          "Count": 0.0
+        },
+        "TOTAL_GCS_G1_Old_Generation": {
+          "Count": 0.0
+        },
+        "TOTAL_GCs": {
+          "Count": 0.0
+        },
+        "READ": {
+          "Operations": 552.0
+        },
+        "CLEANUP": {
+          "Operations": 10.0
+        },
+        "UPDATE": {
+          "Operations": 2036.0
+        }
+      },
+      "overall": {}
+    },
+    "redis": {}
+  },
+  {
+    "name": "ycsb_mixed",
+    "ycsb": {
+      "throughput": 2641.310089804543,
+      "operations": {
+        "TOTAL_GCS_G1_Young_Generation": {
+          "Count": 65.0
+        },
+        "TOTAL_GCS_G1_Concurrent_GC": {
+          "Count": 2.0
+        },
+        "TOTAL_GCS_G1_Old_Generation": {
+          "Count": 0.0
+        },
+        "TOTAL_GCs": {
+          "Count": 67.0
+        },
+        "READ": {
+          "Operations": 9242.0
+        },
+        "CLEANUP": {
+          "Operations": 20.0
+        },
+        "UPDATE": {
+          "Operations": 9946.0
+        },
+        "INSERT": {
+          "Operations": 2500.0
+        },
+        "SCAN": {
+          "Operations": 2513.0
+        }
+      },
+      "overall": {}
+    },
+    "redis": {}
+  }
+]

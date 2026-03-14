@@ -6,6 +6,8 @@
 #define _GNU_SOURCE
 #include "numa_key_migrate.h"
 #include "numa_migrate.h"
+#include "numa_composite_lru.h"
+#include "numa_strategy_slots.h"
 #include "zmalloc.h"
 #include "sds.h"
 #include "dict.h"
@@ -926,6 +928,9 @@ extern void addReplyStatus(client *c, const char *status);
 extern robj *lookupKeyRead(redisDb *db, robj *key);
 extern robj *createStringObject(const char *ptr, size_t len);
 
+/* 访问 server.numa_migrate_config_file 用于 CONFIG LOAD 子命令 */
+extern struct redisServer server;
+
 /*
  * NUMAMIGRATE 命令实现
  *
@@ -1090,14 +1095,93 @@ void numamigrateCommand(client *c) {
         int cpu_node = (cpu >= 0) ? numa_node_of_cpu(cpu) : 0;
         addReplyLongLong(c, cpu_node);
     }
+    /* NUMAMIGRATE SCAN [COUNT n] */
+    else if (!strcasecmp(subcmd, "SCAN")) {
+        uint32_t batch = 0;  /* 0 表示使用策略默认值 */
+        if (c->argc >= 4 && !strcasecmp(c->argv[2]->ptr, "COUNT")) {
+            long cnt;
+            if (getLongFromObjectOrReply(c, c->argv[3], &cnt, "Invalid COUNT") != C_OK)
+                return;
+            if (cnt <= 0) {
+                addReplyError(c, "COUNT must be positive");
+                return;
+            }
+            batch = (uint32_t)cnt;
+        } else if (c->argc != 2) {
+            addReplyError(c, "Usage: NUMAMIGRATE SCAN [COUNT n]");
+            return;
+        }
+
+        numa_strategy_t *strat = numa_strategy_slot_get(1);
+        if (!strat) {
+            addReplyError(c, "No active strategy on slot 1");
+            return;
+        }
+        /* 若 batch == 0，使用策略配置中的默认批量大小 */
+        if (batch == 0) {
+            composite_lru_data_t *d = strat->private_data;
+            if (d) batch = d->config.scan_batch_size;
+            else batch = 200;
+        }
+
+        uint64_t scanned = 0, migrated = 0;
+        int ret = composite_lru_scan_once(strat, batch, &scanned, &migrated);
+        if (ret != NUMA_STRATEGY_OK) {
+            addReplyError(c, "Scan failed");
+            return;
+        }
+        addReplyArrayLen(c, 4);
+        addReplyBulkCString(c, "scanned");
+        addReplyLongLong(c, (long long)scanned);
+        addReplyBulkCString(c, "migrated");
+        addReplyLongLong(c, (long long)migrated);
+    }
+    /* NUMAMIGRATE CONFIG LOAD [/path] */
+    else if (!strcasecmp(subcmd, "CONFIG")) {
+        if (c->argc < 3 || strcasecmp(c->argv[2]->ptr, "LOAD") != 0) {
+            addReplyError(c, "Usage: NUMAMIGRATE CONFIG LOAD [/path]");
+            return;
+        }
+        const char *path = NULL;
+        if (c->argc >= 4) {
+            path = c->argv[3]->ptr;
+        } else {
+#ifdef HAVE_NUMA
+            path = server.numa_migrate_config_file;
+#endif
+        }
+        if (!path) {
+            addReplyError(c, "No config file path specified and none configured");
+            return;
+        }
+        numa_strategy_t *strat = numa_strategy_slot_get(1);
+        if (!strat) {
+            addReplyError(c, "No active strategy on slot 1");
+            return;
+        }
+        composite_lru_config_t cfg;
+        if (composite_lru_load_config(path, &cfg) != NUMA_STRATEGY_OK) {
+            addReplyErrorFormat(c, "Failed to load config from: %s", path);
+            return;
+        }
+        if (composite_lru_apply_config(strat, &cfg) != NUMA_STRATEGY_OK) {
+            addReplyError(c, "Failed to apply config");
+            return;
+        }
+        addReplyStatus(c, "OK");
+        KEY_MIGRATE_LOG(LL_NOTICE,
+            "[NUMA Key Migrate] Config hot-reloaded from: %s", path);
+    }
     /* NUMAMIGRATE HELP */
     else if (!strcasecmp(subcmd, "HELP")) {
-        addReplyArrayLen(c, 6);
+        addReplyArrayLen(c, 8);
         addReplyBulkCString(c, "NUMAMIGRATE KEY <key> <target_node> - Migrate a key to target NUMA node");
         addReplyBulkCString(c, "NUMAMIGRATE DB <target_node> - Migrate entire database to target NUMA node");
         addReplyBulkCString(c, "NUMAMIGRATE STATS - Show migration statistics");
         addReplyBulkCString(c, "NUMAMIGRATE RESET - Reset migration statistics");
         addReplyBulkCString(c, "NUMAMIGRATE INFO <key> - Get NUMA info for a key");
+        addReplyBulkCString(c, "NUMAMIGRATE SCAN [COUNT n] - Trigger one round of progressive scan");
+        addReplyBulkCString(c, "NUMAMIGRATE CONFIG LOAD [/path] - Hot-reload JSON config");
         addReplyBulkCString(c, "NUMAMIGRATE HELP - Show this help message");
     }
     else {

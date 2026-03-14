@@ -1,0 +1,15 @@
+========================================
+NUMA 高强度迁移策略测试报告
+========================================
+测试时间: Sun Feb 22 20:04:15 CST 2026
+
+used_memory_human:10.20G
+# Keyspace
+db0:keys=919994,expires=0,avg_ttl=0
+
+迁移事件: 远程访问=0
+0, 迁移触发=0
+0
+
+详细日志: /home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/tests/ycsb/results/redis_high_pressure.log
+========================================

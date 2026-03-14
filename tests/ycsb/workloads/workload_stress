@@ -1,0 +1,37 @@
+# workload_stress - YCSB 压力测试工作负载
+#
+# 目标: 评估极限吞吐量，触发 NUMA 内存迁移与 Composite LRU 策略
+# 场景: 高并发、大数据量、热点访问、写密集
+# 参数由 run_ycsb.sh --mode stress 覆盖:
+#   recordcount=1000000  operationcount=1000000  threadcount=32
+
+recordcount=1000000
+operationcount=1000000
+workload=site.ycsb.workloads.CoreWorkload
+
+# 读写比例: 写密集，触发更多内存分配与迁移
+readproportion=0.3
+updateproportion=0.6
+scanproportion=0
+insertproportion=0.1
+
+# 热点访问分布: 80% 操作集中在 20% 的 key
+# 制造明显的冷热差异，触发 Composite LRU 迁移决策
+requestdistribution=hotspot
+hotspotdatafraction=0.2
+hotspotopnfraction=0.8
+
+# 字段配置: 8KB value，覆盖 Pool 分配路径（129B - 16KB）
+# 配合 1M 条记录 ≈ 8GB 总数据量，触发 maxmemory 淘汰
+fieldcount=1
+fieldlength=8192
+fieldlengthdistribution=constant
+
+# 插入顺序: 哈希分布，确保数据均匀分散到各 NUMA 节点
+insertorder=hashed
+
+# Redis 连接（run_ycsb.sh 会通过 -p 参数覆盖）
+redis.host=127.0.0.1
+redis.port=6379
+redis.timeout=10000
+redis.database=0

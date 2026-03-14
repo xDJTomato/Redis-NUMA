@@ -1643,6 +1643,10 @@ struct redisServer {
                                 * failover then any replica can be used. */
     int target_replica_port; /* Failover target port */
     int failover_state; /* Failover state */
+#ifdef HAVE_NUMA
+    /* NUMA composite-LRU 配置文件路径（可选，对应 redis.conf 中的 numa-migrate-config 项）*/
+    char *numa_migrate_config_file;
+#endif
 };
 
 #define MAX_KEYS_BUFFER 256
@@ -2786,6 +2790,7 @@ int iAmMaster(void);
 #ifdef HAVE_NUMA
 #include "numa_strategy_slots.h"
 #include "numa_key_migrate.h"
+#include "numa_composite_lru.h"
 #endif
 
 #endif
