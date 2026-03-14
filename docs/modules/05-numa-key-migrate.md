@@ -9,8 +9,9 @@
 **已实现功能**:
 - ✅ 模块初始化和清理
 - ✅ Key元数据管理（热度、访问计数、节点信息）
-- ✅ LRU集成的热度追踪机制
-- ✅ 热度衰减机制
+- ✅ LRU集成的热度追踪机制（访问感知统一递增）
+- ✅ 惰性阶梯衰减机制（访问时结算，无需后台扫描）
+- ✅ `numa_on_key_delete` TTL/DEL 元数据清理钩子（防止幽灵热度）
 - ✅ STRING类型迁移（RAW/EMBSTR编码）
 - ✅ HASH类型迁移（ziplist/hashtable编码）
 - ✅ LIST类型迁移（quicklist编码，支持LZF压缩）
@@ -24,7 +25,6 @@
 
 **待实现功能**:
 - ⚠️ 模式匹配迁移（按通配符筛选Key）
-- ⚠️ LRU Hook集成（自动热度追踪）
 
 **功能**: 实现Redis Key在NUMA节点间的智能迁移，通过分析访问模式和节点负载，自动优化数据分布以提升内存访问性能。
 
@@ -160,63 +160,75 @@ typedef struct {
 
 ### LRU联动设计
 
-Key迁移模块通过Hook Redis原生LRU更新机制实现热度追踪：
+Key迁移模块通过 Hook Redis 原生 LRU 更新机制实现热度追踪。热度更新采用《访问感知统一递增》策略：
 
 ```c
-/* 在lookupKey等关键访问点插入热度更新 */
-void numa_key_access_hook(robj *key, robj *val) {
+/* 在 lookupKey 等关键访问点插入热度更新 */
+void numa_record_key_access(robj *key, robj *val) {
     key_numa_metadata_t *meta = get_key_metadata(key);
-    if (!meta) {
-        meta = create_key_metadata(key, val);
-    }
-    
-    int current_cpu_node = numa_get_current_node();
-    uint16_t current_timestamp = LRU_CLOCK() & 0xFFFF;
-    
-    /* 更新访问统计 */
+    if (!meta) meta = create_key_metadata(key, val);
+
+    pthread_mutex_lock(&global_ctx.mutex);
+
+    /* Step 1: 保存旧时间戳，然后更新 */
     meta->access_count++;
+    uint16_t old_last_access = meta->last_access_time;
     meta->last_access_time = current_timestamp;
-    
-    /* 节点亲和性分析 */
-    if (meta->current_node == current_cpu_node) {
-        /* 本地访问: 提升热度 */
-        if (meta->hotness_level < HOTNESS_MAX_LEVEL) {
-            meta->hotness_level++;
-        }
-    } else {
-        /* 远程访问: 触发迁移评估 */
-        if (meta->hotness_level >= MIGRATION_HOTNESS_THRESHOLD) {
-            schedule_migration_evaluation(key, meta);
-        }
+
+    /* Step 2: 惰性衰减 - 结算上次访问至今的时间欠债 */
+    uint16_t elapsed = calculate_time_delta(current_timestamp, old_last_access);
+    uint8_t decay = compute_key_lazy_decay_steps(elapsed);
+    if (decay > 0) {
+        meta->hotness_level = (decay >= meta->hotness_level) ? 0
+                                                              : meta->hotness_level - decay;
     }
+
+    /* Step 3: 统一递增 - 本地/远程一律 +1 */
+    if (meta->hotness_level < HOTNESS_MAX_LEVEL)
+        meta->hotness_level++;
+
+    /* Step 4: 远程访问且热度达阈值 → 评估迁移 */
+    int current_cpu_node = numa_get_current_node();
+    if (meta->current_node != current_cpu_node &&
+        meta->hotness_level >= MIGRATION_HOTNESS_THRESHOLD) {
+        /* TODO: 调度迁移评估 */
+    }
+
+    pthread_mutex_unlock(&global_ctx.mutex);
 }
 ```
 
-### 热度衰减策略
+### 惰性阶梯衰减策略
+
+衰减不依赖后台定时扫描，而是在每次 key **被访问时**一次性结算空闲期欠债（惰性计算）。
 
 ```c
-/* 定期执行热度衰减 */
-void numa_perform_heat_decay(void) {
-    dictIterator *iter = dictGetIterator(global_ctx.key_metadata);
-    dictEntry *entry;
-    uint16_t current_time = LRU_CLOCK() & 0xFFFF;
-    
-    while ((entry = dictNext(iter)) != NULL) {
-        key_numa_metadata_t *meta = dictGetVal(entry);
-        uint16_t time_delta = calculate_time_delta(
-            current_time, meta->last_access_time);
-        
-        /* 长时间未访问则降低热度 */
-        if (time_delta > HEAT_DECAY_THRESHOLD) {
-            if (meta->hotness_level > 0) {
-                meta->hotness_level--;
-            }
-            meta->last_access_time = current_time;
-        }
-    }
-    dictReleaseIterator(iter);
+/*
+ * compute_key_lazy_decay_steps - 阶梯衰减查表
+ *
+ *  elapsed < 10s   : decay 0（短暂停顿，完全免疫）
+ *  elapsed < 60s   : decay 1
+ *  elapsed < 5min  : decay 2
+ *  elapsed < 30min : decay 3
+ *  elapsed >= 30min: 全清为 0
+ */
+static uint8_t compute_key_lazy_decay_steps(uint16_t elapsed_secs) {
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP1_SECS) return 0;
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP2_SECS) return 1;
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP3_SECS) return 2;
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP4_SECS) return 3;
+    return HOTNESS_MAX_LEVEL; /* 长期冷数据全清 */
 }
 ```
+
+**阶梯常量**（定义在 `numa_key_migrate.h`）：
+
+| 常量 | 值 | 含义 |
+|------|-----|------|
+| `KEY_LAZY_DECAY_STEP1_SECS` | 10 | < 10s 免疫 |
+| `KEY_LAZY_DECAY_STEP2_SECS` | 60 | < 60s 衰减 1 |
+| `KEY_LAZY_DECAY_STEP3_SECS` | 300 | < 5min 衰减 2 |
+| `KEY_LAZY_DECAY_STEP4_SECS` | 1800 | < 30min 衰减 3；≥ 30min 全清 |
 
 ### 类型适配迁移
 
@@ -301,9 +313,29 @@ void numa_record_key_access(robj *key, robj *val);
 key_numa_metadata_t* numa_get_key_metadata(robj *key);
 int numa_get_key_current_node(robj *key);
 
+/* 元数据清理（删除钩子）*/
+void numa_on_key_delete(robj *key);
+
 /* 统计信息 */
 void numa_get_migration_statistics(numa_key_migrate_stats_t *stats);
 void numa_reset_migration_statistics(void);
+```
+
+#### `numa_on_key_delete` 说明
+
+删除钩子函数，在 key 被删除时清除 NUMA 元数据词典中的条目。不调用则过期/DEL key 会在内部词典中残留幽灵热度元数据，如果地址被新对象复用还会引发错误热度读取。
+
+调用位置：
+
+| 调用点 | 场景 |
+|---------|------|
+| `db.c::dbSyncDelete` | `DEL` 命令、TTL 同步过期删除 |
+| `lazyfree.c::dbAsyncDelete` | `UNLINK` 命令、异步惰性删除 |
+
+```c
+#ifdef HAVE_NUMA
+    numa_on_key_delete(key);   /* 清理元数据，防止幽灵热度 */
+#endif
 ```
 
 ### 类型适配器
@@ -699,6 +731,42 @@ failed_migrations: 0
 
 ---
 
+### v2.7 热度策略重构与 TTL 元数据清理 (2026-03-14)
 
+#### 变更目标
 
+1. **统一热度递增**: 消除本地/远程访问的差异化处理
+2. **惰性阶梯衰减**: 替代周期性后台扫描，降低 CPU 开销
+3. **TTL 元数据清理**: 防止幽灵热度泄漏
 
+#### 新增文件/函数
+
+| 内容 | 说明 |
+|------|------|
+| `compute_key_lazy_decay_steps()` | 阶梯衰减查表，内部函数 |
+| `numa_on_key_delete()` | 删除钩子（公开 API）|
+| `KEY_LAZY_DECAY_STEP[1-4]_SECS` | 阶梯常量（`numa_key_migrate.h`）|
+
+#### 核心变更
+
+**`numa_record_key_access`** 流程重构：
+
+| 步骤 | 变更前 | 变更后 |
+|------|---------|----------|
+| 热度递增条件 | 仅本地访问执行 `++` | 本地/远程均执行 `++` |
+| 衰减方式 | 周期性后台扫描，O(n) | 访问时惰性结算，O(1) |
+| 时间戳更新 | 先覆写再计算差値（bug） | 先保存旧値再计算差値 |
+
+**`numa_on_key_delete`** 新增：在 `dbSyncDelete`（`db.c`）和 `dbAsyncDelete`（`lazyfree.c`）
+通过 `#ifdef HAVE_NUMA` 条件调用，对非 NUMA 构建零影响。
+
+#### 文件变更
+
+| 文件 | 变更 |
+|-----|------|
+| `src/numa_key_migrate.h` | 新增 `KEY_LAZY_DECAY_STEP[1-4]_SECS` 常量；声明 `numa_on_key_delete()` |
+| `src/numa_key_migrate.c` | 重构 `numa_record_key_access`；新增 `compute_key_lazy_decay_steps`、`numa_on_key_delete` |
+| `src/db.c` | `dbSyncDelete` 调用 `numa_on_key_delete` |
+| `src/lazyfree.c` | `dbAsyncDelete` 调用 `numa_on_key_delete` |
+
+---

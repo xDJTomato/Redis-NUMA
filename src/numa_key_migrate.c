@@ -1,6 +1,6 @@
-/* numa_key_migrate.c - NUMA Key-level migration implementation
+/* numa_key_migrate.c - NUMA Key级别迁移实现
  *
- * Implements Redis Key-level migration with LRU-integrated hotness tracking.
+ * 基于LRU集成热度跟踪的Redis Key级别迁移实现。
  */
 
 #define _GNU_SOURCE
@@ -18,7 +18,7 @@
 #include <numa.h>
 #include <sys/time.h>
 
-/* External Redis functions */
+/* 外部Redis函数声明 */
 extern void _serverLog(int level, const char *fmt, ...);
 #define LL_VERBOSE 1
 #define LL_NOTICE 2
@@ -26,84 +26,102 @@ extern void _serverLog(int level, const char *fmt, ...);
 #define LL_DEBUG 0
 #define KEY_MIGRATE_LOG(level, fmt, ...) _serverLog(level, fmt, ##__VA_ARGS__)
 
-/* External zset functions */
+/* 外部zset函数声明 */
 extern zskiplist *zslCreate(void);
 extern void zslFree(zskiplist *zsl);
 extern zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele);
 
-/* Global context */
+/* 全局上下文 */
 static numa_key_migrate_ctx_t global_ctx = {0};
 
-/* ========== Helper Functions ========== */
+/* ========== 辅助函数 ========== */
 
-/* Get current time in microseconds */
+/* 获取当前时间（微秒） */
 static uint64_t get_current_time_us(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
 }
 
-/* Calculate time delta considering LRU clock wraparound */
+/* 计算时间差，处理LRU时钟回绕 */
 static uint16_t calculate_time_delta(uint16_t current, uint16_t last) {
     if (current >= last) {
         return current - last;
     } else {
-        /* Wraparound case */
+        /* 回绕情况 */
         return (0xFFFF - last) + current + 1;
     }
 }
 
-/* Get current NUMA node of calling thread */
+/*
+ * compute_key_lazy_decay_steps - Key元数据阶梯式惰性衰减查表
+ *
+ * 与composite_lru相同的阶梯策略，保证热度语义一致：
+ *  elapsed < 10s   : 衰减0
+ *  elapsed < 60s   : 衰减1
+ *  elapsed < 5min  : 衰减2
+ *  elapsed < 30min : 衰减3
+ *  elapsed >= 30min: 全清除
+ */
+static uint8_t compute_key_lazy_decay_steps(uint16_t elapsed_secs) {
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP1_SECS) return 0;
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP2_SECS) return 1;
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP3_SECS) return 2;
+    if (elapsed_secs < KEY_LAZY_DECAY_STEP4_SECS) return 3;
+    return HOTNESS_MAX_LEVEL; /* 长期空闲key全清除 */
+}
+
+/* 获取当前线程所在NUMA节点 */
 static int get_current_numa_node(void) {
     int cpu = sched_getcpu();
     if (cpu < 0) return 0;
     return numa_node_of_cpu(cpu);
 }
 
-/* ========== Metadata Management ========== */
+/* ========== 元数据管理 ========== */
 
-/* Hash function for robj pointers */
+/* robj指针哈希函数 */
 static uint64_t key_obj_hash(const void *key) {
     return dictGenHashFunction(key, sizeof(void*));
 }
 
-/* Key comparison for robj pointers */
+/* robj指针比较函数 */
 static int key_obj_compare(void *privdata, const void *key1, const void *key2) {
     (void)privdata;
     return key1 == key2 ? 0 : 1;
 }
 
-/* Metadata destructor */
+/* 元数据析构函数 */
 static void metadata_destructor(void *privdata, void *val) {
     (void)privdata;
     zfree(val);
 }
 
-/* Dictionary type for key metadata */
+/* Key元数据字典类型 */
 static dictType keyMetadataDictType = {
-    key_obj_hash,           /* hash function */
-    NULL,                   /* key dup */
-    NULL,                   /* val dup */
-    key_obj_compare,        /* key compare */
-    NULL,                   /* key destructor */
-    metadata_destructor     /* val destructor */
+    key_obj_hash,           /* 哈希函数 */
+    NULL,                   /* key复制 */
+    NULL,                   /* val复制 */
+    key_obj_compare,        /* key比较 */
+    NULL,                   /* key析构 */
+    metadata_destructor     /* val析构 */
 };
 
-/* Create metadata for a key */
+/* 创建 key元数据 */
 static key_numa_metadata_t* create_key_metadata(robj *key, robj *val) {
     key_numa_metadata_t *meta = zmalloc(sizeof(*meta));
     if (!meta) return NULL;
     
-    meta->current_node = 0;  /* Default node 0 */
+    meta->current_node = 0;  /* 默认节点0 */
     meta->hotness_level = HOTNESS_DEFAULT;
     meta->last_access_time = LRU_CLOCK() & 0xFFFF;
-    meta->memory_footprint = 0;  /* Will be updated */
+    meta->memory_footprint = 0;  /* 待更新 */
     meta->access_count = 1;
     
     return meta;
 }
 
-/* Get or create key metadata */
+/* 获取或创建 key元数据 */
 static key_numa_metadata_t* get_or_create_metadata(robj *key, robj *val) {
     pthread_mutex_lock(&global_ctx.mutex);
     
@@ -126,7 +144,7 @@ static key_numa_metadata_t* get_or_create_metadata(robj *key, robj *val) {
     return meta;
 }
 
-/* ========== Module Initialization ========== */
+/* ========== 模块初始化 ========== */
 
 int numa_key_migrate_init(void) {
     if (global_ctx.initialized) {
@@ -138,21 +156,21 @@ int numa_key_migrate_init(void) {
         return NUMA_KEY_MIGRATE_ERR;
     }
     
-    /* Initialize metadata dictionary */
+    /* 初始化元数据字典 */
     global_ctx.key_metadata = dictCreate(&keyMetadataDictType, NULL);
     if (!global_ctx.key_metadata) {
         KEY_MIGRATE_LOG(LL_WARNING, "[NUMA Key Migrate] Failed to create metadata dict");
         return NUMA_KEY_MIGRATE_ENOMEM;
     }
     
-    /* Initialize mutex */
+    /* 初始化互斥锁 */
     if (pthread_mutex_init(&global_ctx.mutex, NULL) != 0) {
         dictRelease(global_ctx.key_metadata);
         KEY_MIGRATE_LOG(LL_WARNING, "[NUMA Key Migrate] Failed to initialize mutex");
         return NUMA_KEY_MIGRATE_ERR;
     }
     
-    /* Initialize statistics */
+    /* 初始化统计信息 */
     memset(&global_ctx.stats, 0, sizeof(global_ctx.stats));
     
     global_ctx.initialized = 1;
@@ -180,7 +198,25 @@ void numa_key_migrate_cleanup(void) {
     KEY_MIGRATE_LOG(LL_NOTICE, "[NUMA Key Migrate] Module cleanup completed");
 }
 
-/* ========== Hotness Tracking ========== */
+/*
+ * numa_on_key_delete - 当key被删除时清理NUMA元数据
+ *
+ * 必须在 dbSyncDelete/dbAsyncDelete 中调用，以删除元数据字典中的过期条目。
+ * 若无此钉子，过期或已DEL的key将残留幽灵条目，平白占用内存，
+ * 且指针地址复用时可能产生错误热度读数。
+ */
+void numa_on_key_delete(robj *key) {
+    if (!global_ctx.initialized || !key) return;
+    pthread_mutex_lock(&global_ctx.mutex);
+    int ret = dictDelete(global_ctx.key_metadata, key);
+    pthread_mutex_unlock(&global_ctx.mutex);
+    if (ret == DICT_OK) {
+        KEY_MIGRATE_LOG(LL_VERBOSE,
+            "[NUMA Key Migrate] Metadata cleaned for deleted key=%p", (void*)key);
+    }
+}
+
+/* ========== 热度跟踪 ========== */
 
 void numa_record_key_access(robj *key, robj *val) {
     if (!global_ctx.initialized || !key || !val) {
@@ -196,22 +232,35 @@ void numa_record_key_access(robj *key, robj *val) {
     uint16_t current_timestamp = LRU_CLOCK() & 0xFFFF;
     
     pthread_mutex_lock(&global_ctx.mutex);
-    
-    /* Update access statistics */
+
+    /* 更新访问统计 - 在覆写前保存旧时间戳 */
     meta->access_count++;
+    uint16_t old_last_access = meta->last_access_time;
     meta->last_access_time = current_timestamp;
-    
-    /* Node affinity analysis */
-    if (meta->current_node == current_cpu_node) {
-        /* Local access: increase hotness */
-        if (meta->hotness_level < HOTNESS_MAX_LEVEL) {
-            meta->hotness_level++;
+
+    /* 阶梯式惰性衰减：结算自上次访问积累的衰减债务 */
+    uint16_t elapsed = calculate_time_delta(current_timestamp, old_last_access);
+    uint8_t decay = compute_key_lazy_decay_steps(elapsed);
+    if (decay > 0) {
+        uint8_t before = meta->hotness_level;
+        meta->hotness_level = (decay >= meta->hotness_level) ? 0 : (meta->hotness_level - decay);
+        if (meta->hotness_level != before) {
+            KEY_MIGRATE_LOG(LL_VERBOSE,
+                "[NUMA Key Migrate] Lazy decay: key=%p, elapsed=%us, decay=%d, hotness %d->%d",
+                (void*)key, (unsigned)elapsed, decay, before, meta->hotness_level);
         }
-    } else {
-        /* Remote access: potential migration candidate */
+    }
+
+    /* 任意访问时热度必定增加（无论本地还是远程） */
+    if (meta->hotness_level < HOTNESS_MAX_LEVEL) {
+        meta->hotness_level++;
+    }
+
+    /* 远程访问：热度达到阈值时记录迁移候选 */
+    if (meta->current_node != current_cpu_node) {
         if (meta->hotness_level >= MIGRATION_HOTNESS_THRESHOLD) {
-            /* TODO: Schedule migration evaluation */
-            KEY_MIGRATE_LOG(LL_DEBUG, 
+            /* TODO: 调度迁移评估 */
+            KEY_MIGRATE_LOG(LL_DEBUG,
                 "[NUMA Key Migrate] Hot key accessed remotely (hotness: %d)",
                 meta->hotness_level);
         }
@@ -235,7 +284,7 @@ void numa_perform_heat_decay(void) {
         key_numa_metadata_t *meta = dictGetVal(entry);
         uint16_t time_delta = calculate_time_delta(current_time, meta->last_access_time);
         
-        /* Decay hotness if not accessed for a while */
+        /* 一段时间未访问时衰减热度 */
         if (time_delta > HEAT_DECAY_THRESHOLD) {
             if (meta->hotness_level > 0) {
                 meta->hotness_level--;
@@ -248,42 +297,42 @@ void numa_perform_heat_decay(void) {
     pthread_mutex_unlock(&global_ctx.mutex);
 }
 
-/* ========== Type-specific Migration Adapters ========== */
+/* ========== 类型特定迁移适配器 ========== */
 
-/* Migrate STRING type */
+/* 迁移 STRING 类型 */
 int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
-    (void)key_obj;  /* Unused parameter */
-    (void)target_node;  /* Not directly used in sds allocation */
+    (void)key_obj;  /* 未使用参数 */
+    (void)target_node;  /* sds分配时不直接使用 */
     
     if (val_obj->encoding != OBJ_ENCODING_RAW && 
         val_obj->encoding != OBJ_ENCODING_EMBSTR) {
-        /* Integer encoding, no need to migrate */
+        /* 整数编码，无需迁移 */
         return NUMA_KEY_MIGRATE_OK;
     }
     
     sds old_str = val_obj->ptr;
     
-    /* Create new sds using standard allocation (handles complex SDS header) */
+    /* 创建新sds（使用标准分配，处理复杂SDS头部结构） */
     sds new_str = sdsnewlen(old_str, sdslen(old_str));
     if (!new_str) {
         return NUMA_KEY_MIGRATE_ENOMEM;
     }
     
-    /* Update pointer */
+    /* 更新指针 */
     val_obj->ptr = new_str;
     
-    /* Free old memory */
+    /* 释放旧内存 */
     sdsfree(old_str);
     
     return NUMA_KEY_MIGRATE_OK;
 }
 
-/* Migrate HASH type */
+/* 迁移 HASH 类型 */
 int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
-    (void)key_obj;  /* Unused parameter */
+    (void)key_obj;  /* 未使用参数 */
     
     if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
-        /* Ziplist encoding: migrate as a single blob */
+        /* Ziplist编码：整体迁移 */
         unsigned char *old_zl = val_obj->ptr;
         size_t zl_len = ziplistBlobLen(old_zl);
         
@@ -301,15 +350,15 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
         return NUMA_KEY_MIGRATE_OK;
         
     } else if (val_obj->encoding == OBJ_ENCODING_HT) {
-        /* Hashtable encoding: migrate dict and all sds field/value pairs
-         * Use standard sds functions due to complex SDS header structure */
+        /* 哈希表编码：迁移dict及所有sds字段/値对
+         * 因SDS头部结构复杂，使用标准sds函数 */
         dict *old_dict = val_obj->ptr;
         dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
         if (!new_dict) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
-        /* Pre-expand to avoid rehashing during migration */
+        /* 预展开以避免迁移中重哈希 */
         if (dictExpand(new_dict, dictSize(old_dict)) != DICT_OK) {
             dictRelease(new_dict);
             return NUMA_KEY_MIGRATE_ENOMEM;
@@ -323,7 +372,7 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
             sds old_field = dictGetKey(entry);
             sds old_value = dictGetVal(entry);
             
-            /* Create new sds using standard allocation */
+            /* 使用标准分配创建新sds */
             sds new_field = sdsnewlen(old_field, sdslen(old_field));
             if (!new_field) {
                 dictReleaseIterator(iter);
@@ -339,7 +388,7 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
             
-            /* Add to new dict (takes ownership of new_field and new_value) */
+            /* 添加到新dict（所有权new_field和new_value） */
             if (dictAdd(new_dict, new_field, new_value) != DICT_OK) {
                 sdsfree(new_field);
                 sdsfree(new_value);
@@ -353,7 +402,7 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
         
         dictReleaseIterator(iter);
         
-        /* Swap dicts and free old */
+        /* 交换dict并释放旧的 */
         val_obj->ptr = new_dict;
         dictRelease(old_dict);
         
@@ -368,10 +417,10 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
     }
 }
 
-/* Migrate LIST type */
+/* 迁移 LIST 类型 */
 int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
-    (void)key_obj;  /* Unused parameter */
-    (void)target_node;  /* Not directly used in zmalloc allocation */
+    (void)key_obj;  /* 未使用参数 */
+    (void)target_node;  /* zmalloc分配时不直接使用 */
     
     if (val_obj->encoding != OBJ_ENCODING_QUICKLIST) {
         KEY_MIGRATE_LOG(LL_WARNING, 
@@ -381,13 +430,13 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
     
     quicklist *old_ql = val_obj->ptr;
     
-    /* Create new quicklist using standard allocation */
+    /* 使用标准分配创建新quicklist */
     quicklist *new_ql = zmalloc(sizeof(quicklist));
     if (!new_ql) {
         return NUMA_KEY_MIGRATE_ENOMEM;
     }
     
-    /* Copy quicklist header */
+    /* 复制quicklist头部 */
     new_ql->head = NULL;
     new_ql->tail = NULL;
     new_ql->count = old_ql->count;
@@ -396,16 +445,16 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
     new_ql->compress = old_ql->compress;
     new_ql->bookmark_count = 0;
     
-    /* Iterate over all quicklist nodes and migrate them */
+    /* 遍历所有quicklist节点并迁移 */
     quicklistNode *old_node = old_ql->head;
     quicklistNode *prev_new_node = NULL;
     size_t migrated_nodes = 0;
     
     while (old_node) {
-        /* Allocate new node using standard zmalloc */
+        /* 使用标准zmalloc分配新节点 */
         quicklistNode *new_node = zmalloc(sizeof(quicklistNode));
         if (!new_node) {
-            /* Cleanup on failure */
+            /* 失败时清理 */
             quicklistNode *cleanup = new_ql->head;
             while (cleanup) {
                 quicklistNode *next = cleanup->next;
@@ -417,7 +466,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
-        /* Copy node metadata */
+        /* 复制节点元数据 */
         new_node->count = old_node->count;
         new_node->sz = old_node->sz;
         new_node->encoding = old_node->encoding;
@@ -428,9 +477,9 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
         new_node->prev = prev_new_node;
         new_node->next = NULL;
         
-        /* Migrate ziplist data */
+        /* 迁移ziplist数据 */
         if (old_node->encoding == QUICKLIST_NODE_ENCODING_LZF) {
-            /* LZF compressed */
+            /* LZF压缩编码 */
             quicklistLZF *old_lzf = (quicklistLZF *)old_node->zl;
             size_t lzf_sz = sizeof(quicklistLZF) + old_lzf->sz;
             new_node->zl = zmalloc(lzf_sz);
@@ -448,7 +497,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
             }
             memcpy(new_node->zl, old_node->zl, lzf_sz);
         } else {
-            /* Raw ziplist */
+            /* 原始ziplist */
             new_node->zl = zmalloc(old_node->sz);
             if (!new_node->zl) {
                 zfree(new_node);
@@ -465,7 +514,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
             memcpy(new_node->zl, old_node->zl, old_node->sz);
         }
         
-        /* Link nodes */
+        /* 链接节点 */
         if (prev_new_node) {
             prev_new_node->next = new_node;
         } else {
@@ -479,7 +528,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
         migrated_nodes++;
     }
     
-    /* Release old quicklist */
+    /* 释放旧quicklist */
     old_node = old_ql->head;
     while (old_node) {
         quicklistNode *next = old_node->next;
@@ -489,7 +538,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
     }
     zfree(old_ql);
     
-    /* Update object pointer */
+    /* 更新对象指针 */
     val_obj->ptr = new_ql;
     
     KEY_MIGRATE_LOG(LL_DEBUG, 
@@ -497,12 +546,12 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
     return NUMA_KEY_MIGRATE_OK;
 }
 
-/* Migrate SET type */
+/* 迁移 SET 类型 */
 int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
-    (void)key_obj;  /* Unused parameter */
+    (void)key_obj;  /* 未使用参数 */
     
     if (val_obj->encoding == OBJ_ENCODING_INTSET) {
-        /* Intset encoding: migrate as a single blob */
+        /* Intset编码：整体迁移 */
         intset *old_is = val_obj->ptr;
         size_t is_len = intsetBlobLen(old_is);
         
@@ -520,16 +569,15 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
         return NUMA_KEY_MIGRATE_OK;
         
     } else if (val_obj->encoding == OBJ_ENCODING_HT) {
-        /* Hashtable encoding: migrate dict and all sds elements
-         * For simplicity, we recreate using standard sds functions
-         * since SDS has complex header structure */
+        /* 哈希表编码：迁移dict及所有sds元素
+         * 因SDS头部结构复杂，使用标准sds函数 */
         dict *old_dict = val_obj->ptr;
         dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
         if (!new_dict) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
-        /* Pre-expand to avoid rehashing */
+        /* 预展开以避免重哈希 */
         if (dictExpand(new_dict, dictSize(old_dict)) != DICT_OK) {
             dictRelease(new_dict);
             return NUMA_KEY_MIGRATE_ENOMEM;
@@ -542,8 +590,8 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
         while ((entry = dictNext(iter)) != NULL) {
             sds old_member = dictGetKey(entry);
             
-            /* Create new sds using standard allocation
-             * Note: For true NUMA migration, would need numa-aware sds allocator */
+            /* 使用标准分配创建新sds
+             * 注：真正NUMA迁移需要NUMA感知的sds分配器 */
             sds new_member = sdsnewlen(old_member, sdslen(old_member));
             if (!new_member) {
                 dictReleaseIterator(iter);
@@ -551,7 +599,7 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
             
-            /* Add to new dict (set has NULL values) */
+            /* 添加到新dict（set的value为NULL） */
             if (dictAdd(new_dict, new_member, NULL) != DICT_OK) {
                 sdsfree(new_member);
                 dictReleaseIterator(iter);
@@ -564,7 +612,7 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
         
         dictReleaseIterator(iter);
         
-        /* Swap dicts and free old */
+        /* 交换dict并释放旧的 */
         val_obj->ptr = new_dict;
         dictRelease(old_dict);
         
@@ -579,13 +627,13 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
     }
 }
 
-/* Migrate ZSET type */
+/* 迁移 ZSET 类型 */
 int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
-    (void)key_obj;  /* Unused parameter */
-    (void)target_node;  /* Not directly used in sds allocation */
+    (void)key_obj;  /* 未使用参数 */
+    (void)target_node;  /* sds分配时不直接使用 */
     
     if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
-        /* Ziplist encoding: migrate as a single blob */
+        /* Ziplist编码：整体迁移 */
         unsigned char *old_zl = val_obj->ptr;
         size_t zl_len = ziplistBlobLen(old_zl);
         
@@ -603,24 +651,24 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
         return NUMA_KEY_MIGRATE_OK;
         
     } else if (val_obj->encoding == OBJ_ENCODING_SKIPLIST) {
-        /* Skiplist encoding: migrate zset struct, dict, and skiplist
-         * Use standard sds functions due to complex SDS header structure */
+        /* 跳表编码：迁移zset结构、dict和跳表
+         * 因SDS头部结构复杂，使用标准sds函数 */
         zset *old_zs = val_obj->ptr;
         
-        /* Allocate new zset structure */
+        /* 分配新zset结构 */
         zset *new_zs = zmalloc(sizeof(zset));
         if (!new_zs) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
-        /* Create new skiplist */
+        /* 创建新跳表 */
         new_zs->zsl = zslCreate();
         if (!new_zs->zsl) {
             zfree(new_zs);
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
-        /* Create new dict */
+        /* 创建新dict */
         new_zs->dict = dictCreate(old_zs->dict->type, old_zs->dict->privdata);
         if (!new_zs->dict) {
             zslFree(new_zs->zsl);
@@ -628,7 +676,7 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
-        /* Pre-expand dict */
+        /* 预展开dict */
         if (dictExpand(new_zs->dict, dictSize(old_zs->dict)) != DICT_OK) {
             dictRelease(new_zs->dict);
             zslFree(new_zs->zsl);
@@ -636,12 +684,12 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
-        /* Iterate over skiplist from tail to head for optimal insertion */
+        /* 从尾到头遍历跳表以获得最佳插入顺序 */
         zskiplistNode *old_node = old_zs->zsl->tail;
         size_t migrated_elements = 0;
         
         while (old_node) {
-            /* Create new element string using standard sds */
+            /* 使用标准sds创建新元素字符串 */
             sds old_ele = old_node->ele;
             sds new_ele = sdsnewlen(old_ele, sdslen(old_ele));
             if (!new_ele) {
@@ -651,22 +699,22 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
             
-            /* Insert into new skiplist */
+            /* 插入新跳表 */
             zskiplistNode *new_sl_node = zslInsert(new_zs->zsl, old_node->score, new_ele);
             
-            /* Add to dict (element -> score pointer) */
+            /* 添加到dict（元素 -> 分数指针） */
             dictAdd(new_zs->dict, new_ele, &new_sl_node->score);
             
             migrated_elements++;
             old_node = old_node->backward;
         }
         
-        /* Release old zset */
+        /* 释放旧zset */
         dictRelease(old_zs->dict);
         zslFree(old_zs->zsl);
         zfree(old_zs);
         
-        /* Update object pointer */
+        /* 更新对象指针 */
         val_obj->ptr = new_zs;
         
         KEY_MIGRATE_LOG(LL_DEBUG, 
@@ -680,7 +728,7 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
     }
 }
 
-/* ========== Migration Execution ========== */
+/* ========== 迁移执行 ========== */
 
 int numa_migrate_single_key(redisDb *db, robj *key, int target_node) {
     if (!global_ctx.initialized || !db || !key) {
@@ -693,7 +741,7 @@ int numa_migrate_single_key(redisDb *db, robj *key, int target_node) {
         return NUMA_KEY_MIGRATE_EINVAL;
     }
     
-    /* Lookup key in database */
+    /* 在数据库中查找键 */
     dictEntry *de = dictFind(db->dict, key->ptr);
     if (!de) {
         return NUMA_KEY_MIGRATE_ENOENT;
@@ -707,7 +755,7 @@ int numa_migrate_single_key(redisDb *db, robj *key, int target_node) {
     uint64_t start_time = get_current_time_us();
     int result = NUMA_KEY_MIGRATE_OK;
     
-    /* Type-specific migration */
+    /* 类型特定迁移 */
     switch (val->type) {
         case OBJ_STRING:
             result = migrate_string_type(key, val, target_node);
@@ -730,14 +778,14 @@ int numa_migrate_single_key(redisDb *db, robj *key, int target_node) {
             result = NUMA_KEY_MIGRATE_ETYPE;
     }
     
-    /* Update statistics */
+    /* 更新统计信息 */
     pthread_mutex_lock(&global_ctx.mutex);
     
     global_ctx.stats.total_migrations++;
     if (result == NUMA_KEY_MIGRATE_OK) {
         global_ctx.stats.successful_migrations++;
         
-        /* Update key metadata (already holding the lock, access dict directly) */
+        /* 更新key元数据（已持锁，直接访问dict） */
         dictEntry *meta_entry = dictFind(global_ctx.key_metadata, key);
         if (meta_entry) {
             key_numa_metadata_t *meta = dictGetVal(meta_entry);
@@ -823,7 +871,7 @@ int numa_migrate_entire_database(redisDb *db, int target_node) {
     return success_count > 0 ? NUMA_KEY_MIGRATE_OK : NUMA_KEY_MIGRATE_ERR;
 }
 
-/* ========== Query Interfaces ========== */
+/* ========== 查询接口 ========== */
 
 key_numa_metadata_t* numa_get_key_metadata(robj *key) {
     if (!global_ctx.initialized || !key) {
@@ -865,9 +913,9 @@ void numa_reset_migration_statistics(void) {
     KEY_MIGRATE_LOG(LL_VERBOSE, "[NUMA Key Migrate] Statistics reset");
 }
 
-/* ========== Redis Command Interface ========== */
+/* ========== Redis命令接口 ========== */
 
-/* External Redis functions for command handling */
+/* Redis命令处理所用外部函数 */
 extern void addReply(client *c, robj *obj);
 extern void addReplyError(client *c, const char *err);
 extern void addReplyErrorFormat(client *c, const char *fmt, ...);
@@ -879,14 +927,14 @@ extern robj *lookupKeyRead(redisDb *db, robj *key);
 extern robj *createStringObject(const char *ptr, size_t len);
 
 /*
- * NUMAMIGRATE command implementation
- * 
- * Usage:
- *   NUMAMIGRATE KEY <key> <target_node>   - Migrate a single key to target NUMA node
- *   NUMAMIGRATE DB <target_node>          - Migrate entire database to target NUMA node
- *   NUMAMIGRATE STATS                     - Show migration statistics
- *   NUMAMIGRATE RESET                     - Reset migration statistics
- *   NUMAMIGRATE INFO <key>                - Get NUMA info for a key
+ * NUMAMIGRATE 命令实现
+ *
+ * 用法：
+ *   NUMAMIGRATE KEY <key> <target_node>   - 将单个key迁移到目标NUMA节点
+ *   NUMAMIGRATE DB <target_node>          - 将整个数据库迁移到目标NUMA节点
+ *   NUMAMIGRATE STATS                     - 显示迁移统计信息
+ *   NUMAMIGRATE RESET                     - 重置迁移统计信息
+ *   NUMAMIGRATE INFO <key>                - 获取key的NUMA信息
  */
 void numamigrateCommand(client *c) {
     if (!global_ctx.initialized) {
@@ -1003,7 +1051,7 @@ void numamigrateCommand(client *c) {
         
         robj *key = c->argv[2];
         
-        /* Check if key exists */
+        /* 检查key是否存在 */
         robj *val = lookupKeyRead(c->db, key);
         if (!val) {
             addReplyError(c, "Key not found");

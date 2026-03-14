@@ -14,10 +14,10 @@
 - 内存分配层：[numa_pool.c](./01-numa-pool.md)（P0/P1优化完成）、[numa_slab.c](./03-zmalloc-numa.md)（P2优化完成）
 
 **核心特性**:
-- **稳定性优先**: 避免频繁的热度升降级操作
-- **资源感知**: 结合节点负载和带宽状况做出迁移决策
-- **渐进式衰减**: 采用稳定计数器机制防止误判
-- **与Key迁移模块深度集成**: 通过标准接口协作
+- **访问感知统一递增**: 无论本地/远程访问，热度一律 +1，消除节点差异化处理
+- **惰性阶梯衰减**: 衰减在下次访问时结算，按空闲时长分档，无需后台扫描
+- **资源感知迁移**: 结合节点负载和带宽状况做出迁移决策
+- **TTL 元数据清理**: 通过 `numa_on_key_delete` 钩子防止过期 key 产生幽灵热度
 
 ---
 
@@ -30,9 +30,9 @@
 │                    复合LRU策略                               │
 ├─────────────────────────────────────────────────────────────┤
 │  热度管理模块                                                 │
-│  ├── 基础LRU更新 (复用Redis原生机制)                        │
+│  ├── 访问感知统一递增 (本地/远程均 +1)                       │
 │  ├── 热度等级控制 (0-7级)                                   │
-│  └── 稳定性衰减 (计数器机制)                                │
+│  └── 惰性阶梯衰减 (访问时按时间差一次结算)                   │
 ├─────────────────────────────────────────────────────────────┤
 │  资源监控模块                                                 │
 │  ├── 节点内存使用率监测                                     │
@@ -40,7 +40,7 @@
 │  └── 迁移压力分析                                           │
 ├─────────────────────────────────────────────────────────────┤
 │  迁移决策模块                                                 │
-│  ├── 热点识别 (基于访问模式)                                │
+│  ├── 热点识别 (基于访问频次而非节点亲和性)                   │
 │  ├── 负载均衡触发                                           │
 │  └── 迁移候选生成                                           │
 └─────────────────────────────────────────────────────────────┘
@@ -88,81 +88,85 @@ typedef struct {
 
 ### 1. 热度更新机制
 
+热度追踪同时支持两条路径，均执行「先惰性衰减，再统一递增」逻辑。
+
+**路径一：PREFIX 路径（主路径，val != NULL）**
+
+热度内嵌在每块 NUMA 内存的 PREFIX 头部，零额外开销：
+
 ```c
-/* Hook到Redis LRU更新点 */
-static void composite_lru_key_touch(numa_strategy_t *strategy, robj *key, robj *val) {
-    composite_lru_data_t *data = strategy->private_data;
-    heat_info_t *info = dictFetchValue(data->key_heat_map, key);
-    
-    if (!info) {
-        /* 首次访问: 创建热度记录 */
-        info = zmalloc(sizeof(*info));
-        info->hotness = 1;
-        info->stability_counter = 0;
-        info->last_access = LRU_CLOCK() & 0xFFFF;
-        info->access_count = 1;
-        info->current_node = numa_get_current_node();
-        dictAdd(data->key_heat_map, key, info);
-        return;
-    }
-    
-    int current_node = numa_get_current_node();
-    info->access_count++;
-    info->last_access = LRU_CLOCK() & 0xFFFF;
-    
-    /* 节点亲和性分析 */
-    if (info->current_node == current_node) {
-        /* 本地访问: 稳定性热度提升 */
-        if (info->hotness < HOTNESS_MAX_LEVEL) {
-            info->hotness++;
+void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val) {
+    uint16_t current_time = get_lru_clock();
+
+    if (val) {
+        uint8_t current_hotness = numa_get_hotness(val);
+        int mem_node = numa_get_node_id(val);
+
+        /* Step 1: 惰性衰减 - 按空闲时长一次结算 */
+        uint16_t last_access = numa_get_last_access(val);
+        uint16_t elapsed = calculate_time_delta(current_time, last_access);
+        uint8_t decay = compute_lazy_decay_steps(elapsed);
+        if (decay > 0) {
+            current_hotness = (decay >= current_hotness) ? 0 : (current_hotness - decay);
+            numa_set_hotness(val, current_hotness);
         }
-        info->stability_counter = 0;  /* 重置稳定计数器 */
-    } else {
-        /* 远程访问: 触发迁移评估 */
-        if (info->hotness >= data->migrate_hotness_threshold) {
-            composite_lru_schedule_migration(strategy, key, info, current_node);
+
+        /* Step 2: 统一递增 - 无论本地/远程一律 +1 */
+        if (current_hotness < COMPOSITE_LRU_HOTNESS_MAX)
+            numa_set_hotness(val, current_hotness + 1);
+
+        /* Step 3: 远程访问且热度达阈值 → 加入迁移队列 */
+        if (mem_node != current_node &&
+            current_hotness >= data->migrate_hotness_threshold) {
+            /* 加入 pending_migrations 队列 */
         }
+
+        numa_increment_access_count(val);
+        numa_set_last_access(val, current_time);
     }
+    /* ... 字典回退路径（val == NULL）类似 */
 }
 ```
 
-### 2. 稳定性衰减算法
+**路径二：字典回退路径（val == NULL）**
+
+当调用方无法提供值指针时，热度存入独立哈希表 `key_heat_map`，逻辑相同，兼容旧接口。
+
+### 2. 惰性阶梯衰减算法
+
+不依赖后台周期扫描，在 key **被下次访问时**一次性结算衰减量，衰减发生在热度递增之前。
 
 ```c
-/* 执行热度衰减 */
-static void composite_lru_decay_heat(composite_lru_data_t *data) {
-    dictIterator *di = dictGetSafeIterator(data->key_heat_map);
-    dictEntry *de;
-    uint16_t current_lru = LRU_CLOCK() & 0xFFFF;
-    
-    while ((de = dictNext(di)) != NULL) {
-        heat_info_t *info = dictGetVal(de);
-        
-        /* 计算时间差(处理LRU时钟回绕) */
-        uint16_t time_diff;
-        if (current_lru >= info->last_access) {
-            time_diff = current_lru - info->last_access;
-        } else {
-            time_diff = (0xFFFF - info->last_access) + current_lru;
-        }
-        
-        /* 稳定性衰减: 连续多次超阈值才降级 */
-        if (time_diff > (data->decay_threshold / 1000)) {  /* 转换为LRU单位 */
-            if (info->stability_counter++ > data->stability_count) {
-                if (info->hotness > 0) {
-                    info->hotness--;
-                    data->decay_operations++;
-                }
-                info->stability_counter = 0;
-            }
-        } else {
-            /* 近期有访问，重置计数器 */
-            info->stability_counter = 0;
-        }
-    }
-    dictReleaseIterator(di);
+/*
+ * compute_lazy_decay_steps - 阶梯衰减查表
+ *
+ * 空闲时长 → 衰减量：
+ *   < 10s  : decay 0  (短暂停顿，完全免疫)
+ *   < 60s  : decay 1
+ *   < 5min : decay 2
+ *   < 30min: decay 3
+ *   >= 30min: 全清为 0
+ */
+static uint8_t compute_lazy_decay_steps(uint16_t elapsed_secs) {
+    if (elapsed_secs < LAZY_DECAY_STEP1_SECS) return 0;
+    if (elapsed_secs < LAZY_DECAY_STEP2_SECS) return 1;
+    if (elapsed_secs < LAZY_DECAY_STEP3_SECS) return 2;
+    if (elapsed_secs < LAZY_DECAY_STEP4_SECS) return 3;
+    return COMPOSITE_LRU_HOTNESS_MAX; /* 长期冷数据全清 */
 }
 ```
+
+**与原稳定性衰减的对比**：
+
+| 维度 | 原稳定性计数器衰减 | 惰性阶梯衰减（当前） |
+|------|-------------------|--------------------|
+| 触发方式 | 后台定时扫描（每秒） | 下次访问时结算 |
+| 扫描开销 | O(n)，n 为 key 数量 | O(1)，零额外扫描 |
+| 短暂离线 | 仍会触发衰减 | < 10s 完全免疫 |
+| 长期冷数据 | 缓慢线性降至 0 | 直接全清 |
+| TTL 过期 key | 可能残留衰减操作 | 无影响（结合 `numa_on_key_delete`） |
+
+后台 `composite_lru_decay_heat` 仍保留作为字典路径的**补充扫描**（针对长时间无任何访问的 key），不影响 PREFIX 路径。
 
 ### 3. 资源感知迁移决策
 
@@ -258,10 +262,16 @@ static int composite_lru_execute(numa_strategy_t *strategy) {
 ```c
 /* 核心参数 */
 #define COMPOSITE_LRU_DEFAULT_DECAY_THRESHOLD    10000000  /* 10秒(微秒) */
-#define COMPOSITE_LRU_DEFAULT_STABILITY_COUNT    3         /* 连续3次超阈值 */
+#define COMPOSITE_LRU_DEFAULT_STABILITY_COUNT    3         /* 连续3次超阈値 */
 #define COMPOSITE_LRU_DEFAULT_MIGRATE_THRESHOLD  5         /* 热度>=5触发迁移 */
 
-/* 资源阈值 */
+/* 惰性阶梯衰减阈値（单位：LRU时钟秒，访问时结算） */
+#define LAZY_DECAY_STEP1_SECS    10    /* < 10s  : decay 0 (短暂停顿，免疫) */
+#define LAZY_DECAY_STEP2_SECS    60    /* < 60s  : decay 1 */
+#define LAZY_DECAY_STEP3_SECS   300    /* < 5min : decay 2 */
+#define LAZY_DECAY_STEP4_SECS  1800    /* < 30min: decay 3; ≥ 30min 全清 */
+
+/* 资源阈値 */
 #define COMPOSITE_LRU_DEFAULT_OVERLOAD_THRESHOLD     0.8   /* 80%内存使用率 */
 #define COMPOSITE_LRU_DEFAULT_BANDWIDTH_THRESHOLD    0.9   /* 90%带宽利用率 */
 #define COMPOSITE_LRU_DEFAULT_PRESSURE_THRESHOLD     0.7   /* 70%迁移压力 */
@@ -532,9 +542,51 @@ LINK redis-server
 
 #### 后续计划
 
-- [ ] 集成LRU Hook，实现自动热度追踪
+- [x] 集成LRU Hook，实现自动热度追踪（v2.0 已完成）
 - [ ] 实现实际的资源监控接口
-- [ ] 与Key迁移模块的深度集成
+- [x] 与Key迁移模块的深度集成（v2.0 已完成：`numa_on_key_delete` 钩子）
 - [ ] 性能调优和参数自适应
+
+---
+
+### v2.0 热度策略重构 (2026-03-14)
+
+#### 变更目标
+
+1. **统一热度递增**: 消除本地/远程访问的热度差异，使热度真实反映访问频次
+2. **惰性阶梯衰减**: 用访问时结算替代后台周期扫描，降低 CPU 开销
+3. **TTL 元数据清理**: 防止过期 key 产生幽灵热度
+
+#### 核心变更
+
+**热度更新逻辑** 从本地/远程分支改为统一流程：衰减 → 递增 → 迁移评估。
+无论访问来自本地节点还是远程节点，`hotness` 均执行 `+1`。
+
+**惰性阶梯衰减** 新增 `compute_lazy_decay_steps()` 查表函数，在每次访问前一次性结算空闲期欠债：
+
+| 空闲时长 | 衰减量 |
+|---------|-------|
+| < 10s  | 0（完全免疫） |
+| < 60s  | 1 |
+| < 5min | 2 |
+| < 30min| 3 |
+| >= 30min | 全清 |
+
+**bug 修复**: 字典路径中原先先覆写 `last_access` 再计算 `elapsed`，导致衰减永不生效。
+本次修复：先保存旧时间戳，计算差值后再更新。
+
+**`numa_on_key_delete(robj *key)`**: 在 `db.c::dbSyncDelete` 和 `lazyfree.c::dbAsyncDelete` 两处
+通过 `#ifdef HAVE_NUMA` 条件调用，清理已删除/过期 key 的元数据，消除幽灵热度。
+
+#### 文件变更
+
+| 文件 | 变更说明 |
+|-----|----------|
+| `src/numa_composite_lru.h` | 新增 `LAZY_DECAY_STEP[1-4]_SECS` 常量 |
+| `src/numa_composite_lru.c` | 新增 `compute_lazy_decay_steps()`；两条路径注入惰性衰减；修复字典路径 elapsed bug |
+| `src/numa_key_migrate.h` | 新增 `KEY_LAZY_DECAY_STEP[1-4]_SECS` 常量；声明 `numa_on_key_delete()` |
+| `src/numa_key_migrate.c` | 新增 `compute_key_lazy_decay_steps()`；`numa_record_key_access` 注入衰减；实现 `numa_on_key_delete()` |
+| `src/db.c` | `dbSyncDelete` 调用 `numa_on_key_delete` |
+| `src/lazyfree.c` | `dbAsyncDelete` 调用 `numa_on_key_delete` |
 
 ---

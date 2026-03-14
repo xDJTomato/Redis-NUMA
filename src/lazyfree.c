@@ -158,6 +158,11 @@ int dbAsyncDelete(redisDb *db, robj *key) {
         /* Tells the module that the key has been unlinked from the database. */
         moduleNotifyKeyUnlink(key,val);
 
+#ifdef HAVE_NUMA
+        /* Purge NUMA hotness metadata to prevent stale entries and ghost hotness */
+        numa_on_key_delete(key);
+#endif
+
         size_t free_effort = lazyfreeGetFreeEffort(key,val);
 
         /* If releasing the object is too much work, do it in the background
