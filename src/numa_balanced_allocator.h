@@ -54,7 +54,7 @@ typedef struct {
     uint64_t last_rebalance;
 } balanced_allocator_t;
 
-/* ========== Public API ========== */
+/* ========== 公共API ========== */
 
 /* 初始化平衡分配器 */
 int numa_balanced_init(const balance_config_t *config);

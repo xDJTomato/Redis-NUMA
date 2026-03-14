@@ -120,7 +120,7 @@ static const char* noop_strategy_get_name(numa_strategy_t *strategy) {
 
 static const char* noop_strategy_get_description(numa_strategy_t *strategy) {
     (void)strategy;
-    return "Slot 0 no-operation fallback strategy for framework verification";
+    return "插槽0默认策略：无操作傅底策略，用于框架验证";
 }
 
 /* 0号策略配置（暂不支持） */
@@ -155,7 +155,7 @@ static numa_strategy_t* noop_strategy_create(void) {
     memset(strategy, 0, sizeof(*strategy));
     strategy->slot_id = 0;
     strategy->name = "noop";
-    strategy->description = "Slot 0 no-operation fallback strategy";
+    strategy->description = "插槽0无操作傅底策略";
     strategy->type = STRATEGY_TYPE_PERIODIC;
     strategy->priority = STRATEGY_PRIORITY_LOW;
     strategy->enabled = 1;  /* 默认启用 */
@@ -177,7 +177,7 @@ static void noop_strategy_destroy(numa_strategy_t *strategy) {
 /* 0号策略工厂 */
 static numa_strategy_factory_t noop_strategy_factory = {
     .name = "noop",
-    .description = "No-operation fallback strategy",
+    .description = "无操作傅底策略",
     .type = STRATEGY_TYPE_PERIODIC,
     .default_priority = STRATEGY_PRIORITY_LOW,
     .default_interval_us = 1000000,

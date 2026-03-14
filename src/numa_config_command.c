@@ -18,17 +18,17 @@ extern void addReplyStatus(client *c, const char *status);
 extern void addReplyArrayLen(client *c, long length);
 
 /*
- * NUMACONFIG command implementation
- * 
- * Usage:
- *   NUMACONFIG GET                           - Show current configuration
- *   NUMACONFIG SET strategy <strategy_name>  - Set allocation strategy
- *   NUMACONFIG SET weight <node> <weight>    - Set node weight
- *   NUMACONFIG SET cxl_optimization <on/off> - Enable/disable CXL optimization
- *   NUMACONFIG SET balance_threshold <value> - Set balance threshold
- *   NUMACONFIG REBALANCE                     - Trigger manual rebalance
- *   NUMACONFIG STATS                         - Show allocation statistics
- *   NUMACONFIG HELP                          - Show help information
+ * NUMACONFIG 命令实现
+ *
+ * 用法：
+ *   NUMACONFIG GET                           - 显示当前配置
+ *   NUMACONFIG SET strategy <strategy_name>  - 设置分配策略
+ *   NUMACONFIG SET weight <node> <weight>    - 设置节点权重
+ *   NUMACONFIG SET cxl_optimization <on/off> - 启用/禁用CXL优化
+ *   NUMACONFIG SET balance_threshold <value> - 设置平衡阈值
+ *   NUMACONFIG REBALANCE                     - 手动触发重新平衡
+ *   NUMACONFIG STATS                         - 显示分配统计信息
+ *   NUMACONFIG HELP                          - 显示帮助信息
  */
 void numaconfigCommand(client *c) {
     /* 初始化可配置策略系统（如果尚未初始化） */

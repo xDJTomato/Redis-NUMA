@@ -1,15 +1,14 @@
-/* numa_pool.h - NUMA-aware memory pool allocator
+/* numa_pool.h - NUMA感知内存池分配器
  *
- * This module provides node-granular memory pool management for NUMA systems.
- * It separates the memory pool logic from zmalloc to allow future extension
- * when libNUMA adds node-granular allocator support.
+ * 本模块为NUMA系统提供节点粒度的内存池管理，减少 numa_alloc_onnode 系统调用次数
+ * 以提升内存分配性能。Pool分配器和Slab分配器均实现于 numa_pool.c 中。
  *
- * Design principles:
- * - 64KB chunks per size class per NUMA node
- * - 8 size classes: 16, 32, 64, 128, 256, 512, 1024, 2048 bytes
- * - Bump pointer allocation within chunks (O(1) time complexity)
- * - Pool memory is not individually freed (bulk free on cleanup)
- * - 16-byte PREFIX metadata for size tracking and allocation source marking
+ * 设计原则：
+ * - 动态chunk大小：小对象256KB、中等对象512KB、大对象1MB
+ * - 16级大小分类：16/32/48/64/96/128/192/256/384/512/768/1024/1536/2048/3072/4096字节
+ * - Bump Pointer分配（O(1)时间复杂度）+ Free List复用
+ * - Slab分配器内置：≤128B小对象走Slab快速路径，原子位图O(1)管理
+ * - 16字节PREFIX元数据：跟踪对象大小、来源标记和节点ID
  */
 
 #ifndef NUMA_POOL_H
@@ -17,111 +16,111 @@
 
 #include <stddef.h>
 
-/* NUMA allocation strategies */
-#define NUMA_STRATEGY_LOCAL_FIRST 0
-#define NUMA_STRATEGY_INTERLEAVE  1
+/* NUMA分配策略 */
+#define NUMA_STRATEGY_LOCAL_FIRST 0   /* 本地节点优先 */
+#define NUMA_STRATEGY_INTERLEAVE  1   /* 交错分配（跨节点负载均衡） */
 
-/* Memory pool configuration */
-#define NUMA_POOL_SIZE_CLASSES 16
-#define NUMA_POOL_MAX_ALLOC 4096           /* Maximum allocation from pool (increased for P2) */
+/* 内存池配置 */
+#define NUMA_POOL_SIZE_CLASSES 16     /* 大小级别数量（P0优化后从8扩展为16） */
+#define NUMA_POOL_MAX_ALLOC 4096      /* 内存池分配的最大对象大小（P2扩展至4096） */
 
-/* P2 Optimization: Slab Allocator configuration - Optimized */
-#define SLAB_SIZE (16 * 1024)              /* 16KB slab size (P2 fix: increased from 4KB) */
-#define SLAB_MAX_OBJECT_SIZE 128           /* Use slab for small objects <=128B */
-#define SLAB_BITMAP_SIZE 16                /* 512 bits for up to 512 objects (increased for larger slab) */
-#define SLAB_EMPTY_CACHE_MAX 2             /* Max empty slabs to keep per class */
+/* P2优化：Slab分配器配置 */
+#define SLAB_SIZE (16 * 1024)         /* 16KB slab大小（P2修复：从4KB增至16KB） */
+#define SLAB_MAX_OBJECT_SIZE 128      /* Slab仅处理≤128B的小对象 */
+#define SLAB_BITMAP_SIZE 16           /* 512bit位图，最多支持512个对象 */
+#define SLAB_EMPTY_CACHE_MAX 2        /* 每个大小级别保留的空闲slab缓存数量 */
 
-/* P1 Optimization: Compact thresholds */
-#define COMPACT_THRESHOLD 0.3              /* Trigger compact when utilization < 30% */
-#define COMPACT_MIN_FREE_RATIO 0.5         /* Chunk must have >50% free space to compact */
-#define COMPACT_CHECK_INTERVAL 10          /* Check every N serverCron cycles */
+/* P1优化：Compact压缩阈值 */
+#define COMPACT_THRESHOLD 0.3         /* 利用率低于30%时触发压缩 */
+#define COMPACT_MIN_FREE_RATIO 0.5    /* chunk空闲率超过50%才参与压缩 */
+#define COMPACT_CHECK_INTERVAL 10     /* 每N次serverCron检查一次 */
 
-/* Dynamic chunk size thresholds - increased for better performance */
-#define CHUNK_SIZE_SMALL    (256 * 1024)   /* 256KB for small objects (<= 256B) */
-#define CHUNK_SIZE_MEDIUM   (512 * 1024)   /* 512KB for medium objects (<= 1KB) */
-#define CHUNK_SIZE_LARGE    (1024 * 1024)  /* 1MB for large objects (<= 4KB) */
+/* 动态chunk大小阈值（P0优化后增大以提升性能） */
+#define CHUNK_SIZE_SMALL    (256 * 1024)   /* 256KB：用于≤256B的小对象 */
+#define CHUNK_SIZE_MEDIUM   (512 * 1024)   /* 512KB：用于≤1KB的中等对象 */
+#define CHUNK_SIZE_LARGE    (1024 * 1024)  /* 1MB：用于≤4KB的较大对象 */
 
-/* Size classes for memory pool */
+/* 各大小级别的实际大小数组（16级） */
 extern const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES];
 
-/* Get optimal chunk size for object size */
+/* 根据对象大小获取最优chunk大小 */
 size_t get_chunk_size_for_object(size_t obj_size);
 
-/* Opaque pool handle */
+/* 内存池句柄（不透明类型） */
 typedef struct numa_pool numa_pool_t;
 
-/* Pool statistics */
+/* 内存池统计信息 */
 typedef struct {
-    size_t total_allocated;     /* Total bytes allocated */
-    size_t total_from_pool;     /* Bytes allocated from pool */
-    size_t total_direct;        /* Bytes allocated directly via numa_alloc */
-    size_t chunks_allocated;    /* Number of chunks allocated */
-    size_t pool_hits;           /* Number of allocations from pool */
-    size_t pool_misses;         /* Number of direct allocations */
+    size_t total_allocated;     /* 已分配的总字节数 */
+    size_t total_from_pool;     /* 从池中分配的字节数 */
+    size_t total_direct;        /* 通过numa_alloc直接分配的字节数 */
+    size_t chunks_allocated;    /* 已分配的chunk数量 */
+    size_t pool_hits;           /* 命中内存池的次数（池命中） */
+    size_t pool_misses;         /* 未命中内存池、直接分配的次数 */
 } numa_pool_stats_t;
 
-/* Initialize memory pool for all NUMA nodes
- * Returns 0 on success, -1 on failure */
+/* 初始化所有NUMA节点的内存池
+ * 成功返回0，失败返回-1 */
 int numa_pool_init(void);
 
-/* Cleanup all memory pools */
+/* 清理所有内存池，释放NUMA内存 */
 void numa_pool_cleanup(void);
 
-/* Allocate memory from pool on specified NUMA node
- * If pool allocation fails, falls back to direct NUMA allocation
- * Returns pointer with PREFIX metadata, or NULL on failure */
+/* 从指定NUMA节点的内存池分配内存
+ * 若池分配失败，回退至直接NUMA分配
+ * 返回含PREFIX元数据的指针，失败返回NULL */
 void *numa_pool_alloc(size_t size, int node, size_t *total_size);
 
-/* Free memory allocated via numa_pool_alloc
- * P1 optimization: Records freed blocks in free list for reuse
- * Only direct allocations are actually freed to system */
+/* 释放通过numa_pool_alloc分配的内存
+ * P1优化：将释放的块加入free_list以供复用
+ * 仅直接分配（from_pool=0）的内存才真正归还系统 */
 void numa_pool_free(void *ptr, size_t total_size, int from_pool);
 
-/* Set current NUMA node for allocations */
+/* 设置当前线程的目标NUMA节点 */
 void numa_pool_set_node(int node);
 
-/* Get current NUMA node */
+/* 获取当前NUMA节点 */
 int numa_pool_get_node(void);
 
-/* Get number of NUMA nodes */
+/* 获取NUMA节点总数 */
 int numa_pool_num_nodes(void);
 
-/* Check if NUMA is available */
+/* 检查NUMA是否可用 */
 int numa_pool_available(void);
 
-/* Get pool statistics for a specific node */
+/* 获取指定节点的内存池统计信息 */
 void numa_pool_get_stats(int node, numa_pool_stats_t *stats);
 
-/* Reset pool statistics */
+/* 重置内存池统计信息 */
 void numa_pool_reset_stats(void);
 
-/* P1 Optimization: Compact memory pools */
-/* Try to compact low-utilization chunks across all nodes
- * Returns number of chunks compacted */
+/* P1优化：压缩低利用率chunk
+ * 遍历所有节点和大小级别，回收利用率过低的chunk
+ * 返回被压缩的chunk数量 */
 int numa_pool_try_compact(void);
 
-/* Get chunk utilization ratio for a specific node and size class
- * Returns utilization percentage (0.0 - 1.0) */
+/* 获取指定节点和大小级别的chunk利用率（0.0~1.0） */
 float numa_pool_get_utilization(int node, int size_class_idx);
 
-/* P2 Optimization: Slab Allocator functions */
-/* Initialize slab allocator for all NUMA nodes
- * Returns 0 on success, -1 on failure */
+/* ===== P2优化：Slab分配器接口（实现于numa_pool.c中） ===== */
+
+/* 初始化所有NUMA节点的Slab分配器
+ * 成功返回0，失败返回-1 */
 int numa_slab_init(void);
 
-/* Cleanup all slabs */
+/* 清理所有Slab，释放内存 */
 void numa_slab_cleanup(void);
 
-/* Allocate memory from slab for small objects (<=512B)
- * Returns pointer with PREFIX metadata, or NULL on failure */
+/* 从Slab分配小对象（≤128B）
+ * 返回含PREFIX元数据的指针，失败返回NULL */
 void *numa_slab_alloc(size_t size, int node, size_t *total_size);
 
-/* Free memory allocated via numa_slab_alloc
- * Marks object as free in slab bitmap */
+/* 释放通过numa_slab_alloc分配的对象
+ * 通过原子位图操作将该槽位标记为空闲 */
 void numa_slab_free(void *ptr, size_t total_size, int node);
 
-/* Check if size should use slab allocator
- * Returns 1 if size <= SLAB_MAX_OBJECT_SIZE (128B), 0 otherwise */
+/* 判断给定大小是否应走Slab路径
+ * size ≤ SLAB_MAX_OBJECT_SIZE(128B) 时返回1，否则返回0 */
 static inline int should_use_slab(size_t size) {
     return size <= SLAB_MAX_OBJECT_SIZE;
 }

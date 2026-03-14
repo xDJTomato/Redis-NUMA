@@ -4,6 +4,8 @@
 
 **文件**: `src/zmalloc.c`, `src/zmalloc.h`
 
+**关联模块**: `src/numa_pool.h/c`（含Pool分配器和Slab分配器两路径实现，均内置于 numa_pool.c）
+
 **功能**: 改造Redis标准内存分配器，使其支持NUMA感知分配，同时保持与原有接口完全兼容。
 
 **设计目标**:
@@ -69,7 +71,7 @@
     │numa_slab_    │              │numa_pool_    │
     │alloc(size)   │              │alloc(size)   │
     │              │              │              │
-    │• 16KB slab   │              │• 256KB chunk │
+    │• 16KB slab   │              │• 动态chunk   │
     │• Bitmap O(1) │              │• Bump pointer│
     │• 128 objects │              │• Free list   │
     └──────┬───────┘              └──────┬───────┘

@@ -7,10 +7,11 @@
 **功能**: 为每个NUMA节点提供独立的内存池，减少`numa_alloc_onnode`系统调用次数，提升内存分配性能。
 
 **设计目标**:
-- 批量分配64KB内存块，按需切分小对象
-- 8级大小分类覆盖Redis大部分小对象
-- O(1)时间复杂度的分配算法
+- 批量分配动态大小内存块（256KB/512KB/1MB），按需切分小对象
+- 16级大小分类覆盖Redis全部常见对象（16~4096字节）
+- O(1)时间复杂度的分配算法（Free List + Bump Pointer）
 - 线程安全（per-pool互斥锁）
+- Slab分配器内置（≤128B走Slab快速路径）
 
 ---
 
@@ -34,11 +35,11 @@
            │                             │
            ▼                             ▼
     ┌──────────────┐              ┌──────────────┐
-    │numa_slab.c   │              │numa_pool.c   │
-    │Slab分配器    │              │内存池分配器  │
-    │              │              │              │
-    │• 16KB slab   │              │• 256KB chunk │
-    │• Bitmap管理  │              │• 16级size    │
+    │numa_pool.c   │              │numa_pool.c   │
+    │Slab分配器部分│              │内存池分配器  │
+    │              │              │部分          │
+    │• 16KB slab   │              │• 动态chunk   │
+    │• 原子位图管理│              │• 16级size分类│
     │• O(1)分配    │              │• Free list   │
     └──────────────┘              └──────────────┘
 ```
@@ -54,13 +55,13 @@
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  numa_pool.c: numa_pool_alloc()                             │
-│  1. 检查size <= NUMA_POOL_MAX_ALLOC (512B)                  │
-│  2. 查找合适的大小级别 (16/32/48/64/96/128/192/256/384/512) │
+│  1. 检查size <= NUMA_POOL_MAX_ALLOC (4096B)                 │
+│  2. 查找合适的大小级别 (16/32/48/64/96/128/192/256/384/512/768/1024/1536/2048/3072/4096) │
 │  3. 获取对应节点的pool                                      │
 │  4. 加锁 (pthread_mutex_lock)                               │
 │  5. 尝试从free_list分配 (O(1))                              │
 │  6. 尝试从现有chunk分配 (bump pointer)                      │
-│  7. 如无空间，分配新256KB chunk                             │
+│  7. 如无空间，分配新256KB/512KB/1MB chunk（根据对象大小动态选择） │
 │  8. 解锁                                                    │
 │  9. 返回内存地址                                            │
 └──────────────────────────┬──────────────────────────────────┘
@@ -79,16 +80,17 @@
 
 ```c
 typedef struct numa_pool_chunk {
-    void *memory;                  /* NUMA-allocated memory */
-    size_t size;                   /* Chunk size (64KB) */
-    size_t offset;                 /* Current allocation offset */
-    struct numa_pool_chunk *next;  /* Next chunk in list */
+    void *memory;                  /* NUMA分配的内存块 */
+    size_t size;                   /* Chunk大小（动态：256KB/512KB/1MB） */
+    size_t offset;                 /* 当前分配偏移量 */
+    size_t used_bytes;             /* 已实际分配字节数（P1优化：用于利用率统计） */
+    struct numa_pool_chunk *next;  /* 链表中下一个chunk */
 } numa_pool_chunk_t;
 ```
 
 **内存布局**:
 ```
-Chunk (64KB):
+Chunk (256KB~1MB，根据对象大小动态选择):
 ├─ offset: 0      ├─ offset: 256   ├─ offset: 512   ├─ ...
 │  [alloc 1]      │  [alloc 2]     │  [alloc 3]     │
 │  256 bytes      │  256 bytes     │  256 bytes     │
@@ -99,10 +101,11 @@ Chunk (64KB):
 
 ```c
 typedef struct {
-    size_t obj_size;               /* Object size for this class */
-    numa_pool_chunk_t *chunks;     /* Chunk list */
-    pthread_mutex_t lock;          /* Thread safety */
-    size_t chunks_count;           /* Statistics */
+    size_t obj_size;               /* 该级对象大小 */
+    numa_pool_chunk_t *chunks;     /* Chunk链表 */
+    free_block_t *free_list;       /* P1优化：已释放块的复用链表 */
+    pthread_mutex_t lock;          /* 线程安全锁 */
+    size_t chunks_count;           /* 统计信息 */
 } numa_size_class_pool_t;
 ```
 
@@ -111,7 +114,7 @@ typedef struct {
 ```c
 typedef struct numa_node_pool {
     int node_id;
-    numa_size_class_pool_t pools[NUMA_POOL_SIZE_CLASSES];  /* 8 pools */
+    numa_size_class_pool_t pools[NUMA_POOL_SIZE_CLASSES];  /* 16个大小级别池 */
     numa_pool_stats_t stats;
 } numa_node_pool_t;
 ```
@@ -124,7 +127,7 @@ static struct {
     int numa_available;
     int num_nodes;
     int current_node;
-    numa_node_pool_t *node_pools;  /* Array of node pools */
+    numa_node_pool_t *node_pools;  /* 各NUMA节点池数组 */
     pthread_mutex_t init_lock;
 } pool_ctx;
 ```
@@ -160,11 +163,14 @@ void *bump_pointer_alloc(pool, size) {
 ### 2. 大小级别选择
 
 ```c
-static const size_t numa_pool_size_classes[8] = {
-    16, 32, 64, 128, 256, 512, 1024, 2048
+static const size_t numa_pool_size_classes[16] = {
+    16, 32, 48, 64,          /* 细粒度小对象 */
+    96, 128, 192, 256,       /* 中小对象 */
+    384, 512, 768, 1024,     /* 中等对象 */
+    1536, 2048, 3072, 4096   /* 较大对象 */
 };
 
-/* 选择逻辑 */
+/* 选择逻辑（优化后二分查找式） */
 for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
     if (alloc_size <= numa_pool_size_classes[i]) {
         return &node_pool->pools[i];
@@ -178,10 +184,10 @@ for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| NUMA_POOL_SIZE_CLASSES | 16 | 大小级别数量 (P0优化后) |
-| NUMA_POOL_MAX_ALLOC | 512B | 内存池分配的最大对象 |
-| Size Classes | 16/32/48/64/96/128/192/256/384/512/768/1024/1536/2048/3072/4096 | 各级别大小 (P0优化后) |
-| Chunk Size | 动态选择 16KB/64KB/256KB | 根据对象大小选择 (P0优化后) |
+| NUMA_POOL_SIZE_CLASSES | 16 | 大小级别数量（P0优化后） |
+| NUMA_POOL_MAX_ALLOC | 4096B | 内存池分配的最大对象大小 |
+| Size Classes | 16/32/48/64/96/128/192/256/384/512/768/1024/1536/2048/3072/4096 | 各级别大小（P0优化后） |
+| Chunk Size | 动态选择 256KB/512KB/1MB | 小对象用256KB，中对象用512KB，大对象用1MB（P0优化后） |
 
 ---
 
