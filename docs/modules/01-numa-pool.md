@@ -75,25 +75,56 @@ NUMA内存池采用**Slab+Pool双路径**架构，根据不同对象大小选择
 - **Pool路径**(>128B)：较大对象相对稳定，采用动态chunk + bump pointer策略
 
 **2. 128B阈值的选择依据**：
+```c
+// [numa_pool.h:29] - 实际工程代码
+#define SLAB_MAX_OBJECT_SIZE 128      /* Slab仅处理≤128B的小对象 */
+
+// [numa_pool.h:124-126] - 内联判断函数
+static inline int should_use_slab(size_t size) {
+    return size <= SLAB_MAX_OBJECT_SIZE;
+}
+```
 - Redis中最常见的小对象（如sds header、dict entry等）大多在128B以内
 - 经过实际benchmark测试，128B是性能和内存利用率的最佳平衡点
+- ≤128B走Slab快速路径（原子位图O(1)），>128B走Pool路径（Bump Pointer）
 
 **3. 为什么Pool路径使用动态chunk大小？**
 ```c
-// src/numa_pool.c:29-39
-size_t get_chunk_size_for_object(size_t obj_size) {
-    if (obj_size <= 256) {
-        return CHUNK_SIZE_SMALL;    /* 小对象使用16KB */
-    } else if (obj_size <= 1024) {
-        return CHUNK_SIZE_MEDIUM;   /* 中型对象使用64KB */
-    } else if (obj_size <= 4096) {
-        return CHUNK_SIZE_LARGE;    /* 大型对象使用256KB */
-    } else {
-        return 0;  /* 超大对象直接分配 */
+// [numa_pool.h:39-41] - 实际chunk大小配置（注意：与文档图示不同）
+#define CHUNK_SIZE_SMALL    (256 * 1024)   /* 256KB：用于≤256B的小对象 */
+#define CHUNK_SIZE_MEDIUM   (512 * 1024)   /* 512KB：用于≤1KB的中等对象 */
+#define CHUNK_SIZE_LARGE    (1024 * 1024)  /* 1MB：用于≤4KB的较大对象 */
+
+// [numa_pool.c:196-219] - 实际chunk分配实现
+static numa_pool_chunk_t *alloc_new_chunk(int node, size_t obj_size) {
+    numa_pool_chunk_t *chunk = malloc(sizeof(numa_pool_chunk_t));
+    if (!chunk) return NULL;
+    
+    size_t chunk_size = get_chunk_size_for_object(obj_size);
+    if (chunk_size == 0) {
+        /* 超大对象，应使用直接分配 */
+        free(chunk);
+        return NULL;
     }
+    
+    chunk->memory = numa_alloc_onnode(chunk_size, node);
+    if (!chunk->memory) {
+        free(chunk);
+        return NULL;
+    }
+    
+    chunk->size = chunk_size;
+    chunk->offset = 0;
+    chunk->used_bytes = 0;        /* P1：初始化利用率跟踪 */
+    chunk->next = NULL;
+    
+    return chunk;
 }
 ```
 这种分级策略既避免了小对象浪费大chunk，也减少了大对象频繁分配小chunk的开销。
+- 小对象（≤256B）：256KB chunk，可容纳约1000个对象
+- 中等对象（256B-1KB）：512KB chunk，可容纳约500个对象
+- 大对象（1KB-4KB）：1MB chunk，可容纳约250个对象
 
 ### Pool分配核心算法详解
 
@@ -125,7 +156,7 @@ Pool分配器采用**三级快速路径**策略，最大化分配性能：
 
 **1. 快速路径1 - Free List复用 (O(1))**
 ```c
-// src/numa_pool.c:258-265
+// [numa_pool.c:258-265] - 实际工程代码
 free_block_t *free_block = pool->free_list;
 if (free_block && free_block->size >= aligned_size) {
     result = free_block->ptr;
@@ -135,35 +166,48 @@ if (free_block && free_block->size >= aligned_size) {
 }
 ```
 这是最高效的路径，直接复用已释放的内存块，避免任何系统调用。
+- **释放机制**：释放时创建 `free_block_t` 记录块信息（[numa_pool.c:362-368]）
+- **分配机制**：从链表头部取出，O(1)操作
+- **适用场景**：频繁分配释放的对象
 
 **2. 快速路径2 - Bump Pointer分配**
 ```c
-// src/numa_pool.c:268-276
-numa_pool_chunk_t *chunk = pool->chunks;
-if (chunk && chunk->offset + aligned_size <= chunk->size) {
-    result = (char *)chunk->memory + chunk->offset;
-    chunk->offset += aligned_size;       // 简单指针移动
-    chunk->used_bytes += aligned_size;
-    from_pool = 1;
+// [numa_pool.c:268-276] - 实际工程代码
+if (!result) {
+    numa_pool_chunk_t *chunk = pool->chunks;
+    if (chunk && chunk->offset + aligned_size <= chunk->size) {
+        result = (char *)chunk->memory + chunk->offset;
+        chunk->offset += aligned_size;       // 简单指针移动
+        chunk->used_bytes += aligned_size;
+        from_pool = 1;
+    }
 }
 ```
 利用预分配chunk的连续内存空间，通过简单的指针偏移实现O(1)分配。
+- `chunk->offset` 记录当前分配位置（bump pointer）
+- `chunk->used_bytes` 精确统计已使用字节（用于利用率监控）
+- **适用场景**：新对象首次分配
 
 **3. 慢速路径 - 新Chunk分配**
 ```c
-// src/numa_pool.c:280-290
-numa_pool_chunk_t *new_chunk = alloc_new_chunk(node, alloc_size);
-if (new_chunk) {
-    result = new_chunk->memory;
-    new_chunk->offset = aligned_size;
-    new_chunk->used_bytes = aligned_size;
-    new_chunk->next = pool->chunks;
-    pool->chunks = new_chunk;
-    pool->chunks_count++;
-    from_pool = 1;
+// [numa_pool.c:279-290] - 实际工程代码
+if (!result) {
+    numa_pool_chunk_t *new_chunk = alloc_new_chunk(node, alloc_size);
+    if (new_chunk) {
+        result = new_chunk->memory;
+        new_chunk->offset = aligned_size;
+        new_chunk->used_bytes = aligned_size;
+        new_chunk->next = pool->chunks;
+        pool->chunks = new_chunk;
+        pool->chunks_count++;
+        from_pool = 1;
+    }
 }
 ```
 当现有chunk空间不足时，调用`numa_alloc_onnode()`分配新的chunk，这是唯一的系统调用点。
+- 新chunk插入链表头部（LIFO顺序，提高缓存局部性）
+- 记录chunk数量用于统计
+- **触发条件**：所有现有chunk都满了
 
 ### 内存回收机制
 

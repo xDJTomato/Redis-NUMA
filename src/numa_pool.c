@@ -28,9 +28,9 @@ const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES] = {
 /* 根据对象大小获取最优chunk大小 */
 size_t get_chunk_size_for_object(size_t obj_size) {
     if (obj_size <= 256) {
-        return CHUNK_SIZE_SMALL;    /* 小对象使甖16KB */
+        return CHUNK_SIZE_SMALL;    /* 小对象使用16KB */
     } else if (obj_size <= 1024) {
-        return CHUNK_SIZE_MEDIUM;   /* 中型对象使甖64KB */
+        return CHUNK_SIZE_MEDIUM;   /* 中型对象使用64KB */
     } else if (obj_size <= 4096) {
         return CHUNK_SIZE_LARGE;    /* 大型对象使用256KB */
     } else {
@@ -101,7 +101,7 @@ int numa_pool_init(void)
     if (pool_ctx.initialized) {
         pthread_mutex_unlock(&pool_ctx.init_lock);
         return 0;
-    }
+    } 
     
     /* 检查NUMA可用性 */
     if (numa_available() == -1) {
