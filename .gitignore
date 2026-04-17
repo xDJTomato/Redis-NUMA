@@ -46,3 +46,5 @@ tests/legacy/results/*.rdb
 
 # YCSB binary distribution (jar files, do not track)
 tests/ycsb/ycsb-*/
+tests/ycsb/results/
+
