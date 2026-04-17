@@ -1,0 +1,4 @@
+  File "/home/xdjtomato/下载/Redis with CXL/redis-CXL in v6.2.21/tests/ycsb/ycsb-0.17.0/bin/ycsb", line 228
+    except subprocess.CalledProcessError, err:
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+SyntaxError: multiple exception types must be parenthesized

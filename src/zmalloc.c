@@ -55,6 +55,11 @@ void zlibc_free(void *ptr)
 #include <sched.h>
 #include <unistd.h>
 #include "numa_pool.h"
+/* numaGetNodePressure() 声明：弱符号回退供 redis-benchmark/cli 使用 */
+__attribute__((weak)) double numaGetNodePressure(int node_id) {
+    (void)node_id;
+    return 0.0;
+}
 
 /* NUMA全局上下文 - 保留用于兼容性和未来扩展 */
 static struct {
@@ -256,14 +261,20 @@ static void *numa_alloc_with_size(size_t size)
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
     
-    /* 快速路径：单节点时跳过轮询，直接使用节点0 */
+    /* 本地优先：Node 0 压力超过 95% 时溢出到 Node 1 */
     int target_node;
     if (numa_ctx.num_nodes == 1) {
         target_node = 0;
     } else {
-        static __thread int round_robin_index = 0;
-        target_node = round_robin_index % numa_ctx.num_nodes;
-        round_robin_index++;
+        static __thread int alloc_count = 0;
+        static __thread int cached_target = 0;
+
+        if ((alloc_count & 0x3FF) == 0) {
+            double pressure = numaGetNodePressure(0);
+            cached_target = (pressure >= 0.95) ? 1 : 0;
+        }
+        target_node = cached_target;
+        alloc_count++;
     }
     
     void *raw_ptr = NULL;
@@ -496,6 +507,14 @@ int numa_get_node_id(void *ptr)
     if (!ptr) return -1;
     numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
     return (int)prefix->node_id;
+}
+
+/* 设置分配内存的NUMA节点ID（用于迁移后更新标记） */
+void numa_set_node_id(void *ptr, int node_id)
+{
+    if (!ptr) return;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    prefix->node_id = (char)node_id;
 }
 
 #endif /* HAVE_NUMA */

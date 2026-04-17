@@ -32,6 +32,11 @@
 #include "atomicvar.h"
 #include "latency.h"
 
+#ifdef HAVE_NUMA
+#include "numa_strategy_slots.h"
+#include "numa_composite_lru.h"
+#endif
+
 #include <signal.h>
 #include <ctype.h>
 
@@ -75,6 +80,17 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
                 val->lru = LRU_CLOCK();
             }
         }
+
+        /* NUMA Composite LRU 热度追踪：记录每次键访问 */
+#ifdef HAVE_NUMA
+        {
+            numa_strategy_t *clru = numa_strategy_slot_get(1);
+            if (clru && clru->enabled) {
+                composite_lru_record_access(clru, key->ptr, val);
+            }
+        }
+#endif
+
         return val;
     } else {
         return NULL;

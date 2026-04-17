@@ -2259,6 +2259,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
 #ifdef HAVE_NUMA
+    /* NUMA 带宽采样（每秒） */
+    run_with_period(1000) {
+        numa_bw_monitor_sample();
+    }
+
     /* Run NUMA strategy slot framework */
     run_with_period(1000) {
         numa_strategy_run_all();
@@ -5123,6 +5128,11 @@ sds genRedisInfoString(const char *section) {
             "expired_time_cap_reached_count:%lld\r\n"
             "expire_cycle_cpu_milliseconds:%lld\r\n"
             "evicted_keys:%lld\r\n"
+            "numa_demote_count:%lld\r\n"
+            "numa_demote_bytes:%lld\r\n"
+            "numa_demote_failed:%lld\r\n"
+            "numa_demote_near:%lld\r\n"
+            "numa_demote_far:%lld\r\n"
             "keyspace_hits:%lld\r\n"
             "keyspace_misses:%lld\r\n"
             "pubsub_channels:%ld\r\n"
@@ -5161,6 +5171,11 @@ sds genRedisInfoString(const char *section) {
             server.stat_expired_time_cap_reached_count,
             server.stat_expire_cycle_time_used/1000,
             server.stat_evictedkeys,
+            server.stat_numa_demotions,
+            server.stat_numa_demote_bytes,
+            server.stat_numa_demote_failed,
+            server.stat_numa_demote_near,
+            server.stat_numa_demote_far,
             server.stat_keyspace_hits,
             server.stat_keyspace_misses,
             dictSize(server.pubsub_channels),
@@ -6483,10 +6498,17 @@ int main(int argc, char **argv) {
     printf("DEBUG: 调用numa_strategy_init()\n");
     numa_strategy_init();
     printf("DEBUG: numa_strategy_init()完成\n");
-    
+
     /* 初始化NUMA Key迁移模块 */
     if (numa_key_migrate_init() != NUMA_KEY_MIGRATE_OK) {
         serverLog(LL_WARNING, "Failed to initialize NUMA key migration module");
+    }
+
+    /* 初始化带宽监控 */
+    if (numa_bw_monitor_init() == 0) {
+        serverLog(LL_NOTICE, "NUMA bandwidth monitor initialized");
+    } else {
+        serverLog(LL_WARNING, "NUMA bandwidth monitor init failed, using defaults");
     }
 
     /* 如果配置文件中指定了 numa-migrate-config，加载 JSON 配置并应用到默认策略 */

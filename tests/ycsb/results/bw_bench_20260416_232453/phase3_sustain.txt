@@ -1,0 +1,838 @@
+/usr/bin/java  -classpath /tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/conf:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/lib/HdrHistogram-2.1.4.jar:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/lib/core-0.17.0.jar:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/lib/htrace-core4-4.1.0-incubating.jar:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/lib/jackson-core-asl-1.9.4.jar:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/lib/jackson-mapper-asl-1.9.4.jar:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/redis-binding/lib/commons-pool2-2.4.2.jar:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/redis-binding/lib/jedis-2.9.0.jar:/tmp/redis-cxl-bench-9847/tests/ycsb/ycsb-0.17.0/redis-binding/lib/redis-binding-0.17.0.jar site.ycsb.Client -t -db site.ycsb.db.RedisClient -s -P /tmp/redis-cxl-bench-9847/tests/ycsb/workloads/workload_bw_saturate -p operationcount=3000000 -p threadcount=48 -p readproportion=0.3 -p updateproportion=0.6 -p insertproportion=0.1 -p redis.host=127.0.0.1 -p redis.port=6379
+Command line: -t -db site.ycsb.db.RedisClient -s -P /tmp/redis-cxl-bench-9847/tests/ycsb/workloads/workload_bw_saturate -p operationcount=3000000 -p threadcount=48 -p readproportion=0.3 -p updateproportion=0.6 -p insertproportion=0.1 -p redis.host=127.0.0.1 -p redis.port=6379
+YCSB Client 0.17.0
+
+Loading workload...
+Starting test.
+Exception in thread "Thread-17" Exception in thread "Thread-49" Exception in thread "Thread-31" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-16" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-34" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-18" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-24" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-11" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-23" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-8" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-44" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-35" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-22" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-40" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-7" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-36" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-14" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-15" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-2" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-10" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-45" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-33" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-5" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-9" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-48" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-39" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-32" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-37" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-13" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-43" Exception in thread "Thread-29" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-3" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-25" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-47" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-4" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-26" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-6" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-19" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-27" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-38" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-21" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-12" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-42" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-28" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-41" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-46" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-20" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+Exception in thread "Thread-30" redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+2026-04-16 15:27:24:202 0 sec: 0 operations; est completion in 0 second 
+redis.clients.jedis.exceptions.JedisConnectionException: java.net.ConnectException: 连接被拒绝
+	at redis.clients.jedis.Connection.connect(Connection.java:207)
+	at redis.clients.jedis.BinaryClient.connect(BinaryClient.java:93)
+	at redis.clients.jedis.BinaryJedis.connect(BinaryJedis.java:1767)
+	at site.ycsb.db.RedisClient.init(RedisClient.java:85)
+	at site.ycsb.DBWrapper.init(DBWrapper.java:86)
+	at site.ycsb.ClientThread.run(ClientThread.java:91)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+Caused by: java.net.ConnectException: 连接被拒绝
+	at java.base/sun.nio.ch.Net.pollConnect(Native Method)
+	at java.base/sun.nio.ch.Net.pollConnectNow(Net.java:682)
+	at java.base/sun.nio.ch.NioSocketImpl.timedFinishConnect(NioSocketImpl.java:542)
+	at java.base/sun.nio.ch.NioSocketImpl.connect(NioSocketImpl.java:592)
+	at java.base/java.net.SocksSocketImpl.connect(SocksSocketImpl.java:327)
+	at java.base/java.net.Socket.connect(Socket.java:751)
+	at redis.clients.jedis.Connection.connect(Connection.java:184)
+	... 6 more
+2026-04-16 15:27:24:246 0 sec: 0 operations; est completion in 106751991167300 days 15 hours 
+[OVERALL], RunTime(ms), 130
+[OVERALL], Throughput(ops/sec), 0.0
+[TOTAL_GCS_G1_Young_Generation], Count, 1
+[TOTAL_GC_TIME_G1_Young_Generation], Time(ms), 3
+[TOTAL_GC_TIME_%_G1_Young_Generation], Time(%), 2.307692307692308
+[TOTAL_GCS_G1_Concurrent_GC], Count, 0
+[TOTAL_GC_TIME_G1_Concurrent_GC], Time(ms), 0
+[TOTAL_GC_TIME_%_G1_Concurrent_GC], Time(%), 0.0
+[TOTAL_GCS_G1_Old_Generation], Count, 0
+[TOTAL_GC_TIME_G1_Old_Generation], Time(ms), 0
+[TOTAL_GC_TIME_%_G1_Old_Generation], Time(%), 0.0
+[TOTAL_GCs], Count, 1
+[TOTAL_GC_TIME], Time(ms), 3
+[TOTAL_GC_TIME_%], Time(%), 2.307692307692308

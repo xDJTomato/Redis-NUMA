@@ -145,6 +145,7 @@ void numa_increment_access_count(void *ptr);
 uint16_t numa_get_last_access(void *ptr);
 void numa_set_last_access(void *ptr, uint16_t lru_clock);
 int numa_get_node_id(void *ptr);
+void numa_set_node_id(void *ptr, int node_id);
 
 #endif /* HAVE_NUMA */
 void *zrealloc(void *ptr, size_t size);

@@ -10,6 +10,9 @@
 #define _GNU_SOURCE
 #include "numa_composite_lru.h"
 #include "zmalloc.h"
+#include "numa_bw_monitor.h"
+#include "evict.h"        /* numaGetNodePressure() */
+#include "numa_key_migrate.h"  /* numa_migrate_single_key() */
 #include <string.h>
 #include <sys/time.h>
 #include <stdlib.h>
@@ -103,10 +106,10 @@ static char *trim_spaces(char *s) {
 void composite_lru_config_defaults(composite_lru_config_t *cfg) {
     if (!cfg) return;
     cfg->decay_threshold_sec       = 10;
-    cfg->migrate_hotness_threshold = 5;
+    cfg->migrate_hotness_threshold = 3;
     cfg->stability_count           = 3;
-    cfg->hot_candidates_size       = 256;
-    cfg->scan_batch_size           = 200;
+    cfg->hot_candidates_size       = 1024;
+    cfg->scan_batch_size           = 500;
     cfg->overload_threshold        = 0.8;
     cfg->bandwidth_threshold       = 0.9;
     cfg->pressure_threshold        = 0.7;
@@ -176,6 +179,15 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
             out->pressure_threshold = atof(v);
         } else if (strcmp(k, "auto_migrate_enabled") == 0) {
             out->auto_migrate_enabled = atoi(v);
+        } else if (strncmp(k, "max_bandwidth_node", 18) == 0) {
+            /* 解析 max_bandwidth_nodeX_mbps, X=节点号 */
+            int node_id = atoi(k + 18);  /* "max_bandwidth_node" 后面的数字 */
+            double mbps = atof(v);
+            if (node_id >= 0 && node_id < NUMA_BW_MAX_NODES && mbps > 0) {
+                numa_bw_set_max_bandwidth(node_id, mbps);
+                _serverLog(LL_NOTICE,
+                    "[Composite LRU] Set node %d max bandwidth: %.0f MB/s", node_id, mbps);
+            }
         }
     }
 
@@ -227,10 +239,33 @@ int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_co
 
 /* 检查目标节点的资源状态 */
 static int check_resource_status(composite_lru_data_t *data, int node_id) {
-    (void)node_id;
-    /* 简化版资源检查：对比配置阈值 */
-    /* 生产环境中应查询 /sys 节点内存统计 */
-    (void)data;
+    /* 1. 内存过载检查 */
+    double pressure = numaGetNodePressure(node_id);
+    if (pressure >= data->config.overload_threshold) {
+        _serverLog(LL_DEBUG,
+            "[Composite LRU] Node %d resource check: OVERLOADED (pressure=%.2f >= %.2f)",
+            node_id, pressure, data->config.overload_threshold);
+        return RESOURCE_OVERLOADED;
+    }
+
+    /* 2. 带宽饱和检查（实时采样数据） */
+    double bw_usage = numa_bw_get_usage(node_id);
+    if (bw_usage >= data->config.bandwidth_threshold) {
+        _serverLog(LL_DEBUG,
+            "[Composite LRU] Node %d resource check: BW_SATURATED (bw=%.2f >= %.2f)",
+            node_id, bw_usage, data->config.bandwidth_threshold);
+        return RESOURCE_BANDWIDTH_SATURATED;
+    }
+
+    /* 3. 综合迁移压力检查（内存 60% + 带宽 40%） */
+    double combined = pressure * 0.6 + bw_usage * 0.4;
+    if (combined >= data->config.pressure_threshold) {
+        _serverLog(LL_DEBUG,
+            "[Composite LRU] Node %d resource check: MIGRATION_PRESSURE (combined=%.2f >= %.2f)",
+            node_id, combined, data->config.pressure_threshold);
+        return RESOURCE_MIGRATION_PRESSURE;
+    }
+
     return RESOURCE_AVAILABLE;
 }
 
@@ -431,6 +466,9 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
             info->current_node != info->preferred_node) {
 
             int status = check_resource_status(data, info->preferred_node);
+            if (status == RESOURCE_BANDWIDTH_SATURATED) {
+                data->migrations_bw_blocked++;
+            }
             if (status == RESOURCE_AVAILABLE) {
                 _serverLog(LL_VERBOSE,
                     "[Composite LRU] Scan migrate (dict): key=%p node=%d->%d hotness=%d",
@@ -513,10 +551,33 @@ int composite_lru_execute(numa_strategy_t *strategy) {
     /* 自动迁移开关 */
     if (!data->config.auto_migrate_enabled) return NUMA_STRATEGY_OK;
 
+    /* 定期执行日志（每10秒一次）*/
+    {
+        static uint64_t last_log_time = 0;
+        static uint64_t exec_count = 0;
+        exec_count++;
+        uint64_t now = get_current_time_us();
+        if (now - last_log_time > 10000000) {  /* 10秒 */
+            _serverLog(LL_VERBOSE,
+                "[NUMA Strategy Slot 1] Composite LRU executed "
+                "(count: %llu, candidates: %u, heat_updates: %llu, "
+                "migrations: %llu, bw_blocked: %llu, "
+                "candidates_written: %llu, scan_checked: %llu, heat_map_size: %lu)",
+                (unsigned long long)exec_count,
+                data->candidates_count,
+                (unsigned long long)data->heat_updates,
+                (unsigned long long)data->migrations_triggered,
+                (unsigned long long)data->migrations_bw_blocked,
+                (unsigned long long)data->candidates_written,
+                (unsigned long long)data->scan_keys_checked,
+                (unsigned long)dictSize(data->key_heat_map));
+            last_log_time = now;
+        }
+    }
+
     /* ---- 快速通道：处理热点候选池 ---- */
     uint32_t pool_size   = data->config.hot_candidates_size;
     uint32_t count       = data->candidates_count;
-    uint8_t  thr         = data->config.migrate_hotness_threshold;
     /* 起始槽：最旧的条目（环形缓冲区从 head-count 开始）*/
     uint32_t start_slot  = (count < pool_size)
                            ? 0
@@ -542,16 +603,38 @@ int composite_lru_execute(numa_strategy_t *strategy) {
             mem_node    = info->current_node;
         }
 
-        if (cur_hotness >= thr && mem_node != cand->target_node) {
+        /* 带宽感知：源节点繁忙时降低迁移门槛 */
+        int effective_threshold = data->config.migrate_hotness_threshold;
+        double src_bw = numa_bw_get_usage(mem_node);  /* mem_node = key当前所在节点 */
+        if (src_bw > 0.7 && effective_threshold > 1) {
+            effective_threshold -= 1;
+            _serverLog(LL_DEBUG,
+                "[Composite LRU] Source node %d bw=%.2f > 0.7, lowering threshold to %d",
+                mem_node, src_bw, effective_threshold);
+        }
+
+        if (cur_hotness >= effective_threshold && mem_node != cand->target_node) {
             int status = check_resource_status(data, cand->target_node);
+            if (status == RESOURCE_BANDWIDTH_SATURATED) {
+                data->migrations_bw_blocked++;
+            }
             if (status == RESOURCE_AVAILABLE) {
                 _serverLog(LL_VERBOSE,
                     "[Composite LRU] Fast-path migrate: key=%p node=%d->%d hotness=%d",
                     cand->key, mem_node, cand->target_node, cur_hotness);
                 /* 调用迁移实现（字典路径仅更新元数据）*/
                 if (cand->val) {
-                    /* PREFIX 路径迁移：实际应调用 numa_migrate_single_key */
-                    /* 此处记录统计，等待上层在 db.c 钩子中真正迁移 */
+                    /* PREFIX 路径迁移：调用 numa_migrate_single_key 进行实际迁移
+                     * 注意：numa_migrate_single_key 需要 redisDb 指针，
+                     * 但快速通道中我们没有 db 上下文。因此采用"标记式迁移"策略：
+                     * 1. 更新 PREFIX 中的 node_id 标记
+                     * 2. 记录统计信息
+                     * 3. 实际数据迁移留给后续兜底通道或显式命令
+                     */
+                    numa_set_node_id(cand->val, cand->target_node);
+                    _serverLog(LL_VERBOSE,
+                        "[Composite LRU] Fast-path migrated (mark): val=%p node=%d->%d hotness=%d",
+                        cand->val, mem_node, cand->target_node, cur_hotness);
                 }
                 data->migrations_triggered++;
                 processed++;

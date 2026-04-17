@@ -2492,6 +2492,15 @@ standardConfig configs[] = {
     createIntConfig("active-defrag-threshold-upper", NULL, MODIFIABLE_CONFIG, 0, 1000, server.active_defrag_threshold_upper, 100, INTEGER_CONFIG, NULL, NULL), /* Default: maximum defrag force at 100% fragmentation */
     createIntConfig("lfu-log-factor", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.lfu_log_factor, 10, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("lfu-decay-time", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.lfu_decay_time, 1, INTEGER_CONFIG, NULL, NULL),
+    /* NUMA Demotion 配置 */
+    createIntConfig("numa-demote-enabled", NULL, MODIFIABLE_CONFIG, 0, 1, server.numa_demote_enabled, 1, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("numa-demote-min-size", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.numa_demote_min_size, 1024, MEMORY_CONFIG, NULL, NULL),
+    createIntConfig("numa-demote-max-migrate", NULL, MODIFIABLE_CONFIG, 1, 10, server.numa_demote_max_migrate, 3, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("numa-demote-pressure-threshold", NULL, MODIFIABLE_CONFIG, 0, 100, server.numa_demote_pressure_threshold, 90, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("numa-demote-distance-weight", NULL, MODIFIABLE_CONFIG, 0, 100, server.numa_demote_distance_weight, 70, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("numa-demote-pressure-weight", NULL, MODIFIABLE_CONFIG, 0, 100, server.numa_demote_pressure_weight, 30, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("numa-demote-bandwidth-weight", NULL, MODIFIABLE_CONFIG, 0, 100, server.numa_demote_bandwidth_weight, 30, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("numa-demote-prefer-closer", NULL, MODIFIABLE_CONFIG, 0, 1, server.numa_demote_prefer_closer, 1, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("replica-priority", "slave-priority", MODIFIABLE_CONFIG, 0, INT_MAX, server.slave_priority, 100, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("repl-diskless-sync-delay", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.repl_diskless_sync_delay, 5, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("maxmemory-samples", NULL, MODIFIABLE_CONFIG, 1, INT_MAX, server.maxmemory_samples, 5, INTEGER_CONFIG, NULL, NULL),

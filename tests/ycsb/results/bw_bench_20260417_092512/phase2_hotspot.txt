@@ -1,0 +1,26 @@
+/usr/bin/java  -classpath /tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/conf:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/lib/HdrHistogram-2.1.4.jar:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/lib/core-0.17.0.jar:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/lib/htrace-core4-4.1.0-incubating.jar:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/lib/jackson-core-asl-1.9.4.jar:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/lib/jackson-mapper-asl-1.9.4.jar:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/redis-binding/lib/commons-pool2-2.4.2.jar:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/redis-binding/lib/jedis-2.9.0.jar:/tmp/redis-cxl-bench-2210/tests/ycsb/ycsb-0.17.0/redis-binding/lib/redis-binding-0.17.0.jar site.ycsb.Client -t -db site.ycsb.db.RedisClient -s -P /tmp/redis-cxl-bench-2210/tests/ycsb/workloads/workload_bw_saturate -p operationcount=2000000 -p threadcount=16 -p redis.host=127.0.0.1 -p redis.port=6379 -p redis.timeout=30000
+Command line: -t -db site.ycsb.db.RedisClient -s -P /tmp/redis-cxl-bench-2210/tests/ycsb/workloads/workload_bw_saturate -p operationcount=2000000 -p threadcount=16 -p redis.host=127.0.0.1 -p redis.port=6379 -p redis.timeout=30000
+YCSB Client 0.17.0
+
+Loading workload...
+Starting test.
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+2026-04-17 09:28:13:470 0 sec: 0 operations; est completion in 0 second 
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+2026-04-17 09:28:23:425 10 sec: 23317 operations; 2331.7 current ops/sec; est completion in 14 minutes [READ: Count=16351, Max=850943, Min=109, Avg=5851.31, 90=9831, 99=26623, 99.9=57183, 99.99=850431] [UPDATE: Count=4710, Max=851967, Min=370, Avg=7568.15, 90=10663, 99=28207, 99.9=845823, 99.99=851967] [INSERT: Count=2281, Max=862719, Min=961, Avg=11910.88, 90=19023, 99=46399, 99.9=856575, 99.99=862719] 
+2026-04-17 09:28:33:424 20 sec: 51290 operations; 2797.3 current ops/sec; est completion in 12 minutes [READ: Count=19608, Max=67391, Min=48, Avg=5104.07, 90=9935, 99=26943, 99.9=49887, 99.99=61983] [UPDATE: Count=5579, Max=65343, Min=149, Avg=5758.1, 90=11287, 99=28175, 99.9=60927, 99.99=61951] [INSERT: Count=2770, Max=101311, Min=275, Avg=9944.57, 90=18303, 99=47391, 99.9=79999, 99.99=101311] 
+2026-04-17 09:28:43:426 30 sec: 102319 operations; 5102.9 current ops/sec; est completion in 9 minutes [READ: Count=35714, Max=28431, Min=68, Avg=2798.03, 90=4975, 99=10047, 99.9=22111, 99.99=27887] [UPDATE: Count=10205, Max=28303, Min=134, Avg=3155.15, 90=5355, 99=11095, 99.9=23999, 99.99=28015] [INSERT: Count=5122, Max=64095, Min=538, Avg=5454.57, 90=8639, 99=17215, 99.9=29615, 99.99=36479] 

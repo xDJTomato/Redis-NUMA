@@ -1,311 +1,276 @@
-# Composite LRU策略测试脚本使用说明
+# Redis NUMA/CXL 测试指南
 
-## 📁 测试文件组织
+## 测试文件组织
 
-项目测试文件已模块化整理，详见各目录README：
+项目测试文件按用途分层组织：
 
-- **[tests/numa/](tests/numa/README.md)** - NUMA 功能测试（推荐日常使用）
-- **[tests/ycsb/](tests/ycsb/README.md)** - YCSB 压力测试（推荐性能评估）
-- **[tests/legacy/](tests/legacy/README.md)** - 历史测试文件归档
+### tests/ycsb/ — 活跃测试脚本（推荐使用）
 
-## 测试脚本说明
+主力测试目录，包含完整的性能评估工具链：
 
-本文档介绍 Composite LRU 策略的两个测试脚本（位于 [tests/numa/](tests/numa/)）：
+| 脚本 | 用途 |
+|------|------|
+| `run_bw_benchmark.sh` | 三阶段 NUMA 带宽饱和基准测试（Fill→Hotspot→Sustain），主力测试脚本 |
+| `run_ycsb.sh` | YCSB 统一入口（baseline/stress 双模式） |
+| `run_numa_migration_test.sh` | NUMA 迁移触发专项测试 |
+| `setup_vm_env.sh` | CXL 虚拟机一键环境安装（Python+Java+依赖） |
+| `numa_migration_monitor.sh` | NUMA 迁移诊断与实时监控工具 |
 
-| 脚本 | 用途 | 适用环境 |
-|-----|------|---------|
-| `test_composite_lru.sh` | 通用功能测试 | 任何Linux环境 |
-| `test_composite_lru_cxl.sh` | CXL专用测试 | 带CXL设备的虚拟机/物理机 |
+### tests/ycsb/scripts/ — 辅助工具
 
----
+独立工具脚本，配合主测试流程使用：
 
-## 快速开始
+| 脚本 | 用途 |
+|------|------|
+| `eval_cxl_memory.sh` | CXL 内存性能评估（Node0 DRAM vs Node1 CXL 对比测试） |
+| `generate_report.sh` | 独立可视化报告生成（在宿主机上读取 VM 测试结果） |
+| `install_ycsb.sh` | YCSB 0.17.0 安装脚本 |
 
-### 1. 通用功能测试脚本
+### tests/legacy/numa/ — 归档 NUMA 功能测试
 
-**基本用法：**
-```bash
-# 默认参数（端口6379，测试60秒）
-./test_composite_lru.sh
+历史功能验证脚本，已归档供参考：
 
-# 指定端口和测试时长
-./test_composite_lru.sh 6379 120
-```
+| 脚本 | 用途 |
+|------|------|
+| `test_composite_lru.sh` | Composite LRU 通用功能测试（归档，仍可参考） |
+| `test_composite_lru_cxl.sh` | CXL 专用 LRU 测试（归档，仍可参考） |
+| `test_numa_command.sh` 等 | 其他 NUMA 命令/功能测试 |
 
-**测试内容：**
-1. ✅ Redis服务器状态检查
-2. ✅ Composite LRU策略加载验证
-3. ✅ 基础数据操作（STRING/HASH/LIST/SET/ZSET）
-4. ✅ 热度追踪测试（模拟热点/冷key访问）
-5. ✅ NUMA迁移命令测试（NUMAMIGRATE）
-6. ✅ CXL设备检测
-7. ✅ 压力测试（持续指定秒数）
-8. ✅ 策略执行日志检查
-9. ✅ 内存使用检查
-10. ✅ 测试数据清理
+### 项目根目录
 
-**输出示例：**
-```
-========================================
-Composite LRU策略完整测试脚本
-========================================
+快速诊断工具：
 
-[INFO] 检查Redis服务器状态...
-[PASS] Redis服务器运行正常
-[INFO] 测试1: 检查Composite LRU策略是否加载...
-[PASS] Composite LRU策略已正确加载到slot 1
-...
-[PASS] 所有测试完成！详细日志见: /tmp/composite_lru_test.log
-```
+| 脚本 | 用途 |
+|------|------|
+| `check_numa_config.sh` | NUMA 配置快速检查 |
+| `diagnose_numa.sh` | NUMA 环境诊断 |
 
 ---
 
-### 2. CXL专用测试脚本
+## 推荐测试流程
 
-**基本用法：**
+### 快速开始（新环境首次运行）
+
 ```bash
-# 默认参数（端口6379，测试120秒）
-./test_composite_lru_cxl.sh
+# 1. 检查 NUMA 环境
+./check_numa_config.sh
 
-# 指定端口和测试时长
-./test_composite_lru_cxl.sh 6379 300
+# 2. 进入测试目录
+cd tests/ycsb
+
+# 3. 运行完整三阶段基准测试
+./run_bw_benchmark.sh
 ```
 
-**CXL专用测试内容：**
-1. ✅ 系统环境检查（内核版本、CPU、内存）
-2. ✅ **CXL设备检测**（总线、设备、内存区域）
-3. ✅ NUMA拓扑分析
-4. ✅ **CXL感知数据创建**（小/中/大对象模拟内存层级）
-4. ✅ **CXL访问模式模拟**（热点/温数据/冷数据）
-5. ✅ NUMA迁移功能测试
-6. ✅ **CXL性能测试**（混合访问模式，持续指定秒数）
-7. ✅ 详细测试报告生成
-
-**CXL环境要求：**
-- Linux内核 >= 5.12（推荐 >= 6.0）
-- 启用CXL支持：`CONFIG_CXL_BUS=y`
-- 加载CXL模块：`modprobe cxl`
-- （可选）numactl工具用于NUMA分析
-
----
-
-## 在CXL虚拟机上测试步骤
-
-### 步骤1：准备环境
+### CXL 虚拟机测试流程
 
 ```bash
-# 1. 登录CXL虚拟机
+# 1. 登录 CXL 虚拟机
 ssh user@cxl-vm-ip
 
-# 2. 检查CXL支持
-ls /sys/bus/cxl  # 应该存在此目录
+# 2. 一键安装依赖环境（Python + Java + YCSB）
+cd tests/ycsb
+./setup_vm_env.sh
 
-# 3. 检查CXL设备
-ls /sys/bus/cxl/devices/
-
-# 4. 检查NUMA支持
-numactl --hardware
-```
-
-### 步骤2：部署Redis
-
-```bash
-# 1. 复制Redis源码到虚拟机
-scp -r redis-CXL-in-v6.2.21 user@cxl-vm-ip:~/
-
-# 2. 在虚拟机上编译
+# 3. 部署并编译 Redis
 cd ~/redis-CXL-in-v6.2.21
 make clean && make -j4
 
-# 3. 验证编译结果
-./src/redis-server --version
+# 4. 运行测试
+cd tests/ycsb
+./run_bw_benchmark.sh --maxmem 11gb
+
+# 5. 在宿主机上生成可视化报告
+./scripts/generate_report.sh --vm-results /path/to/vm/results
 ```
 
-### 步骤3：运行测试
+### CXL 内存性能评估
+
+对比 Node0 DRAM 与 Node1 CXL 内存性能：
 
 ```bash
-# 方法1：使用CXL专用脚本（推荐）
-./test_composite_lru_cxl.sh 6379 300
-
-# 方法2：使用通用脚本
-./test_composite_lru.sh 6379 120
+cd tests/ycsb/scripts
+./eval_cxl_memory.sh --port 6379 --duration 120
 ```
 
-### 步骤4：查看结果
+输出包括：
+- Node0 DRAM 访问延迟统计
+- Node1 CXL 访问延迟统计
+- 带宽对比分析
+- 延迟分布直方图
+
+---
+
+## 核心脚本详细说明
+
+### run_bw_benchmark.sh — NUMA 带宽饱和基准测试
+
+三阶段压力测试，验证 NUMA 带宽感知降级评分和迁移策略在高压场景下的行为。
+
+#### 快速开始
 
 ```bash
-# 查看详细日志
-cat /tmp/composite_lru_cxl_test.log
+cd tests/ycsb
+./run_bw_benchmark.sh --help          # 查看所有选项
+./run_bw_benchmark.sh                 # 运行完整三阶段测试
+./run_bw_benchmark.sh --phase 2       # 仅运行热点迁移阶段
+```
 
-# 查看测试报告
-cat /tmp/composite_lru_cxl_result.txt
+#### 三阶段说明
 
-# 查看Redis日志
-grep "Composite LRU\|NUMA Strategy" /tmp/redis-*.log
+| 阶段 | 描述 | 数据量 | 线程数 | 预期时间 |
+|------|------|--------|--------|----------|
+| Phase 1: Fill | YCSB load 100万条x10KB，吃满 Node0 溢出到 Node1 | ~10GB | 自动 | 3-5 分钟 |
+| Phase 2: Hotspot | Zipfian α=0.99 极端热点访问，触发升降级迁移 | 200万操作 | 16 | 5-10 分钟 |
+| Phase 3: Sustain | 写密集 60% 更新 + 高并发，持续带宽饱和 | 300万操作 | 24 | 5-10 分钟 |
+
+#### 常用选项
+
+```bash
+--port PORT          # Redis 端口 (默认 6379)
+--maxmem MEM         # 最大内存 (默认 11gb，触发溢出到 Node1)
+--output-dir DIR     # 结果输出目录
+--phase 1|2|3|all    # 选择运行阶段 (默认 all)
+--skip-fill          # 跳过填充阶段（已有数据时）
+--no-restart         # 使用已运行的 Redis 实例
+```
+
+#### 输出文件
+
+测试完成后在 `results/bw_bench_<timestamp>/` 目录下生成：
+
+| 文件 | 说明 |
+|------|------|
+| `metrics.csv` | 每秒采集的性能指标（吞吐量、内存、迁移、NUMA 页面访问等） |
+| `benchmark_report.png` | matplotlib 生成的 6 面板可视化图表 |
+| `phase1_load.txt` | Phase 1 YCSB 输出 |
+| `phase2_hotspot.txt` | Phase 2 YCSB 输出 |
+| `phase3_sustain.txt` | Phase 3 YCSB 输出 |
+| `redis.log` | Redis 服务器日志 |
+| `sysinfo.txt` | 系统 NUMA 拓扑信息 |
+
+#### 前置依赖
+
+- YCSB 0.17.0 (已安装在 `tests/ycsb/ycsb-0.17.0/`)
+- Python 3 + matplotlib (`pip3 install matplotlib`)
+- NUMA 支持 (`numactl --hardware` 可用)
+
+#### 可视化图表
+
+运行后自动生成 `benchmark_report.png`，包含 6 个子图：
+1. **吞吐量** (ops/sec) — 各阶段性能变化
+2. **内存使用** (MB) — used_memory + RSS，标注 Node0 容量线
+3. **迁移速率** (migrations/sec) — NUMA 降级/升级触发频率
+4. **NUMA 页面访问** — Node0 vs Node1 访问速率对比
+5. **内存碎片率** — 碎片率变化趋势
+6. **淘汰计数** — 累计淘汰 key 数量
+
+也可手动重新生成图表：
+```bash
+python3 scripts/visualize_bw_benchmark.py \
+    --input results/bw_bench_xxx/metrics.csv \
+    --output results/bw_bench_xxx/benchmark_report.png
 ```
 
 ---
 
-## 预期测试结果
+### eval_cxl_memory.sh — CXL 内存性能评估
 
-### 正常情况
+对比评估 Node0 本地 DRAM 与 Node1 CXL 内存的性能差异。
 
-```
-[PASS] Redis服务器运行正常
-[PASS] Composite LRU策略已正确加载到slot 1
-[PASS] STRING/HASH/LIST/SET/ZSET操作正常
-[PASS] NUMAMIGRATE命令正常
-[PASS] 单key迁移成功
-[PASS] 迁移后数据完整性验证通过
-[PASS] CXL性能测试完成
-```
+#### 基本用法
 
-### CXL设备检测
-
-**有CXL设备时：**
-```
-[PASS] CXL总线已启用
-[CXL] CXL设备列表:
-  - mem0
-    类型: cxl-mem
-    内存: 536870912 bytes
+```bash
+cd tests/ycsb/scripts
+./eval_cxl_memory.sh                    # 默认测试
+./eval_cxl_memory.sh --duration 300     # 指定测试时长
+./eval_cxl_memory.sh --pattern random  # 访问模式：random/sequential
 ```
 
-**无CXL设备时：**
+#### 输出内容
+
+- 延迟统计：P50/P90/P99 延迟对比
+- 吞吐量：Node0 vs Node1 带宽对比
+- 延迟分布直方图
+
+---
+
+### generate_report.sh — 独立报告生成
+
+在宿主机上读取虚拟机测试结果，生成交互式可视化报告。
+
+#### 基本用法
+
+```bash
+cd tests/ycsb/scripts
+./generate_report.sh --vm-results /path/to/vm/results --output ./report
 ```
-[WARN] 未检测到CXL总线
-[INFO] 提示: 如果是CXL虚拟机，请确保内核已启用CXL支持
-```
+
+---
+
+## 归档脚本说明
+
+`tests/legacy/numa/` 目录包含历史 NUMA 功能测试脚本，已归档但可作为参考：
+
+- **test_composite_lru.sh** — Composite LRU 策略功能验证，测试 STRING/HASH/LIST/SET/ZSET 操作及热度追踪
+- **test_composite_lru_cxl.sh** — CXL 环境专用测试，包含 CXL 设备检测和分层访问模式模拟
+- **test_numa_command.sh** — NUMA 命令功能测试
+
+这些脚本不再作为主要测试入口，但功能逻辑仍可参考。
 
 ---
 
 ## 故障排查
 
-### 问题1：Redis无法启动
+### Redis 无法启动
 
-**现象：**
-```
-[FAIL] Redis服务器未运行
-```
-
-**解决：**
 ```bash
 # 检查端口占用
 netstat -tlnp | grep 6379
 
 # 使用其他端口
 ./src/redis-server --port 6380 --daemonize yes
-./test_composite_lru.sh 6380 60
+./run_bw_benchmark.sh --port 6380
 ```
 
-### 问题2：策略未加载
+### 策略未加载
 
-**现象：**
-```
-[WARN] 无法从日志确认策略加载状态
-```
-
-**解决：**
 ```bash
-# 检查Redis日志
+# 检查 Redis 日志
 tail -100 /tmp/redis-test.log | grep -i "strategy\|lru"
 
 # 确认编译包含策略模块
 grep "numa_composite_lru" src/Makefile
 ```
 
-### 问题3：CXL设备未检测到
+### CXL 设备未检测到
 
-**现象：**
-```
-[WARN] 未检测到CXL总线
-```
-
-**解决：**
 ```bash
 # 检查内核配置
 zcat /proc/config.gz | grep CXL
 
-# 手动加载CXL模块
+# 手动加载 CXL 模块
 sudo modprobe cxl
 
-# 检查dmesg
+# 检查 dmesg
 dmesg | grep -i cxl
 ```
 
-### 问题4：NUMAMIGRATE命令不可用
-
-**现象：**
-```
-[WARN] NUMAMIGRATE命令可能不支持
-```
-
-**解决：**
-- 这是正常的，如果Key迁移模块未完全集成
-- 检查05文档中的NUMAMIGRATE实现状态
-
----
-
-## 高级用法
-
-### 自定义测试参数
+### NUMA 带宽测试异常
 
 ```bash
-# 长时间压力测试（10分钟）
-./test_composite_lru_cxl.sh 6379 600
+# 确认 NUMA 支持
+numactl --hardware
 
-# 指定Redis配置文件
-./src/redis-server ./redis.conf --daemonize yes
-./test_composite_lru.sh 6379 60
+# 检查 Redis 内存监控
+redis-cli INFO memory | grep used_memory_rss
 ```
-
-### 分析测试结果
-
-```bash
-# 提取性能数据
-grep "OPS:" /tmp/composite_lru_cxl_test.log
-
-# 提取错误信息
-grep "\[FAIL\]" /tmp/composite_lru_cxl_test.log
-
-# 生成图表数据
-awk '/OPS:/{print $3}' /tmp/composite_lru_cxl_test.log > ops_data.txt
-```
-
-### 自动化测试
-
-```bash
-# 创建自动化测试脚本
-cat > run_auto_test.sh << 'EOF'
-#!/bin/bash
-for duration in 60 120 300; do
-    echo "Testing with duration=${duration}s"
-    ./test_composite_lru_cxl.sh 6379 $duration
-    sleep 10
-done
-EOF
-chmod +x run_auto_test.sh
-```
-
----
-
-## 测试脚本对比
-
-| 特性 | test_composite_lru.sh | test_composite_lru_cxl.sh |
-|-----|----------------------|--------------------------|
-| 执行时间 | 短（约1-2分钟） | 较长（根据参数） |
-| CXL检测 | 基础检测 | 详细检测 |
-| 数据对象 | 标准大小 | 分层大小（模拟CXL层级） |
-| 访问模式 | 简单热点/冷key | CXL感知（热点/温/冷） |
-| 性能测试 | 基础压力测试 | CXL优化压力测试 |
-| 报告详细度 | 标准 | 详细（含系统信息） |
-| 适用场景 | 功能验证 | CXL环境性能评估 |
 
 ---
 
 ## 联系与支持
 
 如有问题，请检查：
-1. Redis日志文件（`/tmp/redis-*.log`）
-2. 测试脚本日志（`/tmp/composite_lru*.log`）
-3. 系统dmesg日志（`dmesg | grep -i cxl`）
+1. Redis 日志文件（`/tmp/redis-*.log`）
+2. 测试脚本日志（`tests/ycsb/results/`）
+3. 系统 dmesg 日志（`dmesg | grep -i cxl`）

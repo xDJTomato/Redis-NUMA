@@ -716,13 +716,13 @@ static numa_slab_t *alloc_new_slab(int node, size_t obj_size, int class_idx) {
         free(slab);
         return NULL;
     }
-    
+
     /* 对齐到SLAB_SIZE边界 */
     uintptr_t raw_addr = (uintptr_t)raw_mem;
     uintptr_t aligned_addr = (raw_addr + SLAB_SIZE - 1) & ~((uintptr_t)(SLAB_SIZE - 1));
     slab->memory = (void *)aligned_addr;
-    /* 存储稿后释放用的原始指针，将偏移量存入头部 */
-    
+    /* 存储原始指针用于释放 */
+
     /* P2修复：初始化带回指针的slab头部，支持O(1)free查找 */
     numa_slab_header_t *header = (numa_slab_header_t *)slab->memory;
     header->magic = SLAB_HEADER_MAGIC;

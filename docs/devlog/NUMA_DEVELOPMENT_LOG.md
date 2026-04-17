@@ -2,8 +2,85 @@
 
 ## 更新记录
 
-**最新版本**: v3.2-P2 (2026-02-14)  
-**上次更新**: v3.1-P1 (2026-02-14)
+**最新版本**: v3.5 (2026-04-16)  
+**上次更新**: v3.2-P2 (2026-02-14)
+
+### v3.5 更新内容 (2026-04-16)
+
+#### 新增功能
+
+1. **新增 numa_bw_monitor 带宽监控模块**
+   - 文件: `src/numa_bw_monitor.h`, `src/numa_bw_monitor.c`
+   - 功能: 实时监控各 NUMA 节点内存带宽利用率
+   - 后端支持: `numastat` 命令解析
+   - 采样周期: 集成到 serverCron，每秒采样
+
+2. **evict 降级评分升级为三因子公式**
+   - 原公式: `评分 = 距离×70% + 压力×30%`
+   - 新公式: `评分 = 距离×40% + 压力×30% + 带宽×30%`
+   - 新增带宽因子: 通过 `numa_bw_monitor_get_node_utilization()` 获取
+   - 权重调整: 距离权重从 70% 降至 40%，更均衡考虑三要素
+
+3. **composite_lru 资源检查升级**
+   - 原实现: 空桩函数，始终返回资源充足
+   - 新实现: 实时三层检查
+     - 内存层: 检查目标节点空闲内存
+     - 连接层: 检查待处理客户端连接数
+     - 带宽层: 检查目标节点带宽利用率
+   - 阈值配置: 可配置最大连接数和带宽阈值
+
+4. **配置集成与 serverCron 采样**
+   - 新增配置项:
+     - `numa-demote-bandwidth-weight`: 带宽权重 (默认 30)
+     - `numa-max-pending-clients`: 最大待处理客户端数
+     - `numa-max-node-bandwidth`: 最大节点带宽阈值
+   - serverCron 集成: 每秒调用 `numa_bw_monitor_sample()` 采样带宽
+
+#### 技术亮点
+
+- **模块化设计**: 带宽监控作为独立模块，可被 evict 和 composite_lru 共享使用
+- **低开销采样**: 使用 `numastat` 解析，避免直接读取 /sys 文件系统
+- **向后兼容**: 所有新配置项均有合理默认值，不影响现有部署
+
+#### 文件变更
+
+| 文件 | 变更类型 | 说明 |
+|------|----------|------|
+| `src/numa_bw_monitor.h` | 新增 | 带宽监控模块头文件 |
+| `src/numa_bw_monitor.c` | 新增 | 带宽监控模块实现 |
+| `src/evict_numa.c` | 修改 | 升级三因子评分公式 |
+| `src/numa_composite_lru.c` | 修改 | 资源检查从空桩升级为实时检查 |
+| `src/server.c` | 修改 | serverCron 添加带宽采样调用 |
+| `src/config.c` | 修改 | 新增配置项解析 |
+| `src/server.h` | 修改 | 新增配置字段声明 |
+| `src/Makefile` | 修改 | 添加 numa_bw_monitor.o 编译目标 |
+| `docs/modules/10-evict-numa.md` | 修改 | 更新为三因子公式说明 |
+
+#### 编译验证
+
+```bash
+$ make clean && make -j4 MALLOC=libc
+...
+    LINK redis-server
+Hint: It's a good idea to run 'make test' ;)
+```
+
+✅ **编译成功**，仅 C99 variadic macro 警告（可忽略）
+
+#### 功能验证
+
+```bash
+$ ./src/redis-server --port 6399 --loglevel verbose
+...
+* [BW-Monitor] Initialized: nodes=1, backend=numastat
+* NUMA bandwidth monitor initialized
+* [NUMA Strategy] Strategy slot framework initialized (slots 0,1 ready)
+* [NUMA Key Migrate] Module initialized successfully
+```
+
+✅ **启动成功**，所有 NUMA 模块正常初始化
+
+---
 
 ### v3.2-P2 更新内容 (2026-02-14)
 

@@ -1282,6 +1282,12 @@ struct redisServer {
     long long stat_evictedkeys;     /* Number of evicted keys (maxmemory) */
     long long stat_keyspace_hits;   /* Number of successful lookups of keys */
     long long stat_keyspace_misses; /* Number of failed lookups of keys */
+    /* NUMA Demotion 统计 */
+    long long stat_numa_demotions;     /* NUMA降级迁移次数 */
+    long long stat_numa_demote_bytes;  /* NUMA降级迁移字节数 */
+    long long stat_numa_demote_failed; /* NUMA降级失败次数 */
+    long long stat_numa_demote_near;   /* 迁移到近端节点的次数 */
+    long long stat_numa_demote_far;    /* 迁移到远端节点的次数 */
     long long stat_active_defrag_hits;      /* number of allocations moved */
     long long stat_active_defrag_misses;    /* number of allocations scanned but not moved */
     long long stat_active_defrag_key_hits;  /* number of keys with moved allocations */
@@ -1512,6 +1518,16 @@ struct redisServer {
     int maxmemory_eviction_tenacity;/* Aggressiveness of eviction processing */
     int lfu_log_factor;             /* LFU logarithmic counter factor. */
     int lfu_decay_time;             /* LFU counter decay factor. */
+    /* NUMA Demotion 配置 */
+    int numa_demote_enabled;           /* 启用 NUMA 降级 */
+    size_t numa_demote_min_size;       /* 最小降级大小 */
+    int numa_demote_max_migrate;       /* 最大迁移次数 */
+    int numa_demote_pressure_threshold; /* 压力阈值 (百分比, 0-100) */
+    int numa_demote_distance_weight;   /* 距离权重 (默认 70) */
+    int numa_demote_pressure_weight;   /* 压力权重 (默认 30) */
+    int numa_demote_bandwidth_weight;  /* NUMA降级带宽权重 (0-100, 默认30) */
+    double numa_bw_saturation_threshold; /* 带宽饱和排除阈值 (默认0.95) */
+    int numa_demote_prefer_closer;     /* 优先更近节点 */
     long long proto_max_bulk_len;   /* Protocol bulk length maximum size. */
     int oom_score_adj_base;         /* Base oom_score_adj value, as observed on startup */
     int oom_score_adj_values[CONFIG_OOM_COUNT];   /* Linux oom_score_adj configuration */
@@ -2007,6 +2023,7 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llongval);
 robj *tryObjectEncoding(robj *o);
 robj *getDecodedObject(robj *o);
 size_t stringObjectLen(robj *o);
+size_t objectComputeSize(robj *o, size_t sample_size);
 robj *createStringObjectFromLongLong(long long value);
 robj *createStringObjectFromLongLongForValue(long long value);
 robj *createStringObjectFromLongDouble(long double value, int humanfriendly);
@@ -2790,6 +2807,7 @@ int iAmMaster(void);
 #include "numa_strategy_slots.h"
 #include "numa_key_migrate.h"
 #include "numa_composite_lru.h"
+#include "numa_bw_monitor.h"
 #endif
 
 #endif

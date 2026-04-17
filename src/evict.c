@@ -33,6 +33,7 @@
 #include "server.h"
 #include "bio.h"
 #include "atomicvar.h"
+#include "evict.h"
 #include <math.h>
 
 /* ----------------------------------------------------------------------------
@@ -52,12 +53,7 @@
  * Empty entries have the key pointer set to NULL. */
 #define EVPOOL_SIZE 16
 #define EVPOOL_CACHED_SDS_SIZE 255
-struct evictionPoolEntry {
-    unsigned long long idle;    /* Object idle time (inverse frequency for LFU) */
-    sds key;                    /* Key name. */
-    sds cached;                 /* Cached SDS object for key name. */
-    int dbid;                   /* Key DB number. */
-};
+/* struct evictionPoolEntry 已移至 evict.h */
 
 static struct evictionPoolEntry *EvictionPoolLRU;
 
@@ -589,6 +585,45 @@ int performEvictions(void) {
                      * a ghost and we need to try the next element. */
                     if (de) {
                         bestkey = dictGetKey(de);
+                        robj *val = dictGetVal(de);
+                        
+                        /* === NUMA 降级尝试 === */
+#ifdef HAVE_NUMA
+                        if (server.numa_demote_enabled && val != NULL) {
+                            int target_node = -1;
+                            numa_demote_result_t demote_result = evictionTryNumaDemote(
+                                &server.db[bestdbid], bestkey, val, &target_node);
+                            
+                            if (demote_result == NUMA_DEMOTE_OK) {
+                                /* 降级成功，释放本地内存但保留对象 */
+                                pool[k].current_node = target_node;
+                                pool[k].numa_migrated++;
+                                
+                                size_t obj_size = objectComputeSize(val, 0);
+                                mem_freed += obj_size;
+                                keys_freed++;
+                                
+                                serverLog(LL_VERBOSE,
+                                    "[Eviction] NUMA demote succeeded: %s -> node %d, size=%zu",
+                                    bestkey, target_node, obj_size);
+                                
+                                /* 清空池条目，继续下一轮 */
+                                if (pool[k].key != pool[k].cached)
+                                    sdsfree(pool[k].key);
+                                pool[k].key = NULL;
+                                pool[k].idle = 0;
+                                bestkey = NULL;
+                                continue; /* 继续处理下一个候选者 */
+                            }
+                            
+                            if (demote_result == NUMA_DEMOTE_NO_NODE) {
+                                serverLog(LL_DEBUG,
+                                    "[Eviction] No NUMA node available, proceed to evict");
+                            }
+                        }
+#endif /* HAVE_NUMA */
+                        
+                        /* 进入真正淘汰流程 */
                         break;
                     } else {
                         /* Ghost... Iterate again. */

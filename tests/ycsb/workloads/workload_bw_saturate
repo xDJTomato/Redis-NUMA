@@ -1,0 +1,39 @@
+# =============================================================================
+# NUMA 带宽饱和基准测试工作负载
+# =============================================================================
+# 用途：三阶段压力测试（填充 → 热点迁移 → 持续高压）
+# 目标：吃满 NUMA 节点带宽，触发降级/迁移策略
+#
+# Phase 1 (Fill): 使用 YCSB load 模式写入数据
+# Phase 2 (Hotspot): 使用本配置 run 模式，Zipfian 热点访问
+# Phase 3 (Sustain): 通过 -p 参数覆盖为写密集模式
+# =============================================================================
+
+# 工作负载类（YCSB 必需）
+workload=site.ycsb.workloads.CoreWorkload
+
+# 数据规模
+recordcount=2500000
+operationcount=2000000
+
+# 并发线程
+threadcount=32
+
+# 操作比例 (Phase 2: 热点读密集)
+readproportion=0.8
+updateproportion=0.2
+insertproportion=0
+scanproportion=0
+
+# 访问分布：极强 Zipfian (α=0.99, ~1% key 承担 90% 访问)
+requestdistribution=zipfian
+zipfianconstant=0.99
+
+# 数据大小：~1.8KB (走 NUMA Pool 2048 size_class, 避开间隙)
+fieldcount=1
+fieldlength=1800
+
+# Redis 连接
+redis.host=127.0.0.1
+redis.port=6379
+redis.timeout=10000

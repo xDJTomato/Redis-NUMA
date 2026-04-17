@@ -1,0 +1,10 @@
+timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys
+PHASE_MARKER,1,fill_start,1776395322
+1776395322,1_fill,5,5,1.0,3.7,3.81,0,0,768024,2374,0
+PHASE_MARKER,1,fill_end,1776395323
+PHASE_MARKER,2,hotspot_start,1776395323
+1776395323,1_fill,0,0,0,0,0,0,0,30797,0,0
+PHASE_MARKER,2,hotspot_end,1776395324
+PHASE_MARKER,3,sustain_start,1776395324
+1776395324,3_sustain,0,0,0,0,0,0,0,20495,0,0
+PHASE_MARKER,3,sustain_end,1776395325
