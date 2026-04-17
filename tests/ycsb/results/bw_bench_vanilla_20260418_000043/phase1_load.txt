@@ -1,0 +1,64 @@
+/usr/bin/java  -classpath /tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/conf:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/lib/HdrHistogram-2.1.4.jar:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/lib/core-0.17.0.jar:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/lib/htrace-core4-4.1.0-incubating.jar:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/lib/jackson-core-asl-1.9.4.jar:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/lib/jackson-mapper-asl-1.9.4.jar:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/redis-binding/lib/commons-pool2-2.4.2.jar:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/redis-binding/lib/jedis-2.9.0.jar:/tmp/redis-vanilla-bench-11052/tests/ycsb/ycsb-0.17.0/redis-binding/lib/redis-binding-0.17.0.jar site.ycsb.Client -load -db site.ycsb.db.RedisClient -s -P /tmp/redis-vanilla-bench-11052/tests/ycsb/workloads/workload_bw_saturate -p recordcount=3000000 -p fieldlength=1800 -p redis.host=127.0.0.1 -p redis.port=6380 -p redis.timeout=30000 -p threadcount=8
+Command line: -load -db site.ycsb.db.RedisClient -s -P /tmp/redis-vanilla-bench-11052/tests/ycsb/workloads/workload_bw_saturate -p recordcount=3000000 -p fieldlength=1800 -p redis.host=127.0.0.1 -p redis.port=6380 -p redis.timeout=30000 -p threadcount=8
+YCSB Client 0.17.0
+
+Loading workload...
+Starting test.
+2026-04-18 00:00:47:386 0 sec: 0 operations; est completion in 0 second 
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+DBWrapper: report latency for each error is false and specific error codes to track for latency are: []
+2026-04-18 00:00:57:363 10 sec: 289767 operations; 28976.7 current ops/sec; est completion in 1 minute [INSERT: Count=289799, Max=8007, Min=32, Avg=272.82, 90=359, 99=559, 99.9=2545, 99.99=5191] 
+2026-04-18 00:01:07:363 20 sec: 549278 operations; 25951.1 current ops/sec; est completion in 1 minute [INSERT: Count=259509, Max=57087, Min=53, Avg=306.69, 90=356, 99=540, 99.9=2461, 99.99=4839] 
+2026-04-18 00:01:17:363 30 sec: 796253 operations; 24697.5 current ops/sec; est completion in 1 minute [INSERT: Count=246972, Max=9567, Min=55, Avg=322.32, 90=373, 99=596, 99.9=2455, 99.99=4387] 
+2026-04-18 00:01:27:362 40 sec: 1046454 operations; 25020.1 current ops/sec; est completion in 1 minute [INSERT: Count=250190, Max=5631, Min=51, Avg=318.19, 90=364, 99=525, 99.9=2277, 99.99=4191] 
+2026-04-18 00:01:37:363 50 sec: 1239901 operations; 19342.77 current ops/sec; est completion in 1 minute [INSERT: Count=193431, Max=24415, Min=55, Avg=411.88, 90=503, 99=1650, 99.9=5219, 99.99=15823] 
+2026-04-18 00:01:47:363 60 sec: 1358790 operations; 11890.09 current ops/sec; est completion in 1 minute [INSERT: Count=118903, Max=76735, Min=57, Avg=670.34, 90=733, 99=4183, 99.9=18383, 99.99=44383] 
+2026-04-18 00:01:57:377 70 sec: 1500922 operations; 14213.2 current ops/sec; est completion in 1 minute [INSERT: Count=142137, Max=43039, Min=91, Avg=561.21, 90=624, 99=2805, 99.9=12407, 99.99=33695] 
+2026-04-18 00:02:07:363 80 sec: 1652285 operations; 15136.3 current ops/sec; est completion in 1 minute [INSERT: Count=151363, Max=32495, Min=81, Avg=525.47, 90=579, 99=2873, 99.9=11127, 99.99=20575] 
+2026-04-18 00:02:17:362 90 sec: 1794091 operations; 14180.6 current ops/sec; est completion in 1 minute [INSERT: Count=141792, Max=84287, Min=82, Avg=561.69, 90=613, 99=2979, 99.9=12207, 99.99=27599] 
+2026-04-18 00:02:27:364 100 sec: 1925115 operations; 13101.09 current ops/sec; est completion in 56 seconds [INSERT: Count=131019, Max=25007, Min=81, Avg=608.05, 90=870, 99=2641, 99.9=11079, 99.99=15479] 
+2026-04-18 00:02:37:363 110 sec: 2048126 operations; 12302.33 current ops/sec; est completion in 52 seconds [INSERT: Count=123022, Max=29359, Min=90, Avg=647.58, 90=802, 99=3145, 99.9=11007, 99.99=21551] 
+2026-04-18 00:02:47:363 120 sec: 2119659 operations; 7153.3 current ops/sec; est completion in 50 seconds [INSERT: Count=71535, Max=46751, Min=64, Avg=1114.63, 90=1943, 99=6587, 99.9=23919, 99.99=39071] 
+2026-04-18 00:02:57:363 130 sec: 2173311 operations; 5365.2 current ops/sec; est completion in 50 seconds [INSERT: Count=53647, Max=52511, Min=108, Avg=1486.63, 90=2827, 99=6195, 99.9=22095, 99.99=39199] 
+2026-04-18 00:03:07:367 140 sec: 2226056 operations; 5273.97 current ops/sec; est completion in 49 seconds [INSERT: Count=52749, Max=34687, Min=98, Avg=1512.89, 90=2969, 99=6335, 99.9=14679, 99.99=34527] 
+2026-04-18 00:03:17:363 150 sec: 2275400 operations; 4934.89 current ops/sec; est completion in 48 seconds [INSERT: Count=49342, Max=60479, Min=120, Avg=1615.22, 90=3187, 99=7143, 99.9=18047, 99.99=43615] 
+2026-04-18 00:03:27:363 160 sec: 2329601 operations; 5419.56 current ops/sec; est completion in 47 seconds [INSERT: Count=54198, Max=61727, Min=133, Avg=1471.35, 90=2961, 99=6755, 99.9=17775, 99.99=53951] 
+2026-04-18 00:03:37:363 170 sec: 2394180 operations; 6457.9 current ops/sec; est completion in 44 seconds [INSERT: Count=64575, Max=50079, Min=99, Avg=1235.38, 90=2305, 99=5527, 99.9=18527, 99.99=42687] 
+2026-04-18 00:03:47:363 180 sec: 2444981 operations; 5080.61 current ops/sec; est completion in 41 seconds [INSERT: Count=50807, Max=43519, Min=124, Avg=1569.77, 90=3013, 99=6339, 99.9=16343, 99.99=42303] 
+2026-04-18 00:03:57:363 190 sec: 2521329 operations; 7634.8 current ops/sec; est completion in 37 seconds [INSERT: Count=76344, Max=44063, Min=76, Avg=1044.77, 90=2085, 99=4355, 99.9=11303, 99.99=19887] 
+2026-04-18 00:04:07:364 200 sec: 2606716 operations; 8538.7 current ops/sec; est completion in 31 seconds [INSERT: Count=85393, Max=24927, Min=83, Avg=933.68, 90=1796, 99=3979, 99.9=11487, 99.99=14295] 
+2026-04-18 00:04:17:364 210 sec: 2680240 operations; 7351.66 current ops/sec; est completion in 26 seconds [INSERT: Count=73528, Max=34783, Min=95, Avg=1083.87, 90=2105, 99=4903, 99.9=11727, 99.99=34175] 
+2026-04-18 00:04:27:366 220 sec: 2770264 operations; 9002.4 current ops/sec; est completion in 19 seconds [INSERT: Count=90019, Max=22655, Min=77, Avg=886.02, 90=1695, 99=3481, 99.9=11247, 99.99=18991] 
+2026-04-18 00:04:37:363 230 sec: 2868361 operations; 9810.68 current ops/sec; est completion in 11 seconds [INSERT: Count=98097, Max=104831, Min=64, Avg=812.33, 90=1439, 99=3737, 99.9=11143, 99.99=24431] 
+2026-04-18 00:04:47:364 240 sec: 2976020 operations; 10765.9 current ops/sec; est completion in 2 second [INSERT: Count=107661, Max=36287, Min=64, Avg=740.8, 90=1197, 99=3475, 99.9=11175, 99.99=13783] 
+2026-04-18 00:04:49:599 242 sec: 3000000 operations; 10724.51 current ops/sec; [CLEANUP: Count=8, Max=8391, Min=85, Avg=1159, 90=259, 99=8391, 99.9=8391, 99.99=8391] [INSERT: Count=23968, Max=16055, Min=85, Avg=702.61, 90=1112, 99=3371, 99.9=10967, 99.99=15927] 
+[OVERALL], RunTime(ms), 242237
+[OVERALL], Throughput(ops/sec), 12384.565528800307
+[TOTAL_GCS_G1_Young_Generation], Count, 272
+[TOTAL_GC_TIME_G1_Young_Generation], Time(ms), 404
+[TOTAL_GC_TIME_%_G1_Young_Generation], Time(%), 0.16677881578784415
+[TOTAL_GCS_G1_Old_Generation], Count, 0
+[TOTAL_GC_TIME_G1_Old_Generation], Time(ms), 0
+[TOTAL_GC_TIME_%_G1_Old_Generation], Time(%), 0.0
+[TOTAL_GCs], Count, 272
+[TOTAL_GC_TIME], Time(ms), 404
+[TOTAL_GC_TIME_%], Time(%), 0.16677881578784415
+[CLEANUP], Operations, 8
+[CLEANUP], AverageLatency(us), 1159.0
+[CLEANUP], MinLatency(us), 85
+[CLEANUP], MaxLatency(us), 8391
+[CLEANUP], 95thPercentileLatency(us), 8391
+[CLEANUP], 99thPercentileLatency(us), 8391
+[INSERT], Operations, 3000000
+[INSERT], AverageLatency(us), 643.0035293333333
+[INSERT], MinLatency(us), 32
+[INSERT], MaxLatency(us), 104831
+[INSERT], 95thPercentileLatency(us), 1775
+[INSERT], 99thPercentileLatency(us), 3747
+[INSERT], Return=OK, 3000000

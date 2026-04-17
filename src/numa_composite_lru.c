@@ -26,6 +26,7 @@
 #define _serverLog(level, fmt, ...) printf("[%s] " fmt "\n", level, ##__VA_ARGS__)
 #else
 extern void _serverLog(int level, const char *fmt, ...);
+extern struct redisServer server;
 #define LL_DEBUG 0
 #define LL_VERBOSE 1
 #define LL_NOTICE 2
@@ -62,6 +63,20 @@ static uint8_t compute_lazy_decay_steps(uint16_t elapsed_secs) {
 static int get_current_numa_node(void) {
     if (numa_available() < 0) return 0;
     return numa_node_of_cpu(sched_getcpu());
+}
+
+/*
+ * compute_target_node - 选择迁移目标节点
+ *
+ * CXL 场景：热 key 拉回本地 DRAM，冷 key 推到远程 CXL。
+ * 策略：
+ *   - key 在远程节点 → 拉回本地（current_node），减少远程访问延迟
+ *   - key 已在本地   → 无需迁移（返回 -1，跳过）
+ */
+static int compute_target_node(int mem_node, int current_node) {
+    if (mem_node != current_node)
+        return current_node;   /* 远程热 key → 拉回本地 */
+    return -1;                 /* 本地 key → 不迁移 */
 }
 
 /* ========== 热度图字典回调 ========== */
@@ -317,25 +332,53 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
         data->heat_updates++;
 
         /*
-         * 快速通道写入条件：
-         *   1. 内存在远程节点（mem_node != current_node）
-         *   2. 本次访问恰好越过阈值（before < threshold <= after）
+         * 同步写入 key_heat_map：扫描通道依赖此字典发现热 key。
+         * 热度 >= 阈值时写入或更新，低于阈值时仅更新已有条目。
          */
         uint8_t thr = data->config.migrate_hotness_threshold;
-        if (mem_node != current_node &&
-            hotness_before < thr && hotness >= thr) {
+        {
+            composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
+            if (info) {
+                info->hotness         = hotness;
+                info->last_access     = current_time;
+                info->access_count++;
+                info->current_node    = mem_node;
+            } else if (hotness >= thr) {
+                info = zmalloc(sizeof(*info));
+                if (info) {
+                    info->hotness         = hotness;
+                    info->stability_counter = 0;
+                    info->last_access     = current_time;
+                    info->access_count    = 1;
+                    info->current_node    = mem_node;
+                    info->preferred_node  = -1;
+                    dictAdd(data->key_heat_map, key, info);
+                }
+            }
+        }
+
+        /*
+         * 快速通道写入条件：
+         *   1. 本次访问恰好越过阈值（before < threshold <= after）
+         *   2. key 在远程节点（需要拉回本地）
+         *
+         * target_node = current_node（拉回本地）。
+         * 本地 key 不需要入候选池。
+         */
+        int target = compute_target_node(mem_node, current_node);
+        if (target >= 0 && hotness_before < thr && hotness >= thr) {
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
             data->hot_candidates[idx].key             = key;
             data->hot_candidates[idx].val             = val;
-            data->hot_candidates[idx].target_node     = current_node;
+            data->hot_candidates[idx].target_node     = target;
             data->hot_candidates[idx].hotness_snapshot = hotness;
             data->candidates_head++;
             if (data->candidates_count < data->config.hot_candidates_size)
                 data->candidates_count++;
             data->candidates_written++;
             _serverLog(LL_VERBOSE,
-                "[Composite LRU] Candidate written: val=%p mem_node=%d cpu_node=%d hotness=%d",
-                val, mem_node, current_node, hotness);
+                "[Composite LRU] Candidate written: val=%p mem_node=%d cpu_node=%d hotness=%d target=%d",
+                val, mem_node, current_node, hotness, target);
         }
     } else {
         /* ---- 字典回退路径（val 为 NULL 时） ---- */
@@ -375,15 +418,15 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             info->hotness++;
         info->stability_counter = 0;
 
-        /* 字典路径候选池写入（热度刚越过阈值且是远程访问） */
+        /* 字典路径候选池写入（热度刚越过阈值且 key 在远程节点） */
         uint8_t thr = data->config.migrate_hotness_threshold;
-        if (info->current_node != current_node &&
-            hotness_before < thr && info->hotness >= thr) {
-            info->preferred_node = current_node;
+        int target = compute_target_node(info->current_node, current_node);
+        if (target >= 0 && hotness_before < thr && info->hotness >= thr) {
+            info->preferred_node = target;
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
             data->hot_candidates[idx].key             = key;
             data->hot_candidates[idx].val             = NULL;  /* 字典路径无 val 指针 */
-            data->hot_candidates[idx].target_node     = current_node;
+            data->hot_candidates[idx].target_node     = target;
             data->hot_candidates[idx].hotness_snapshot = info->hotness;
             data->candidates_head++;
             if (data->candidates_count < data->config.hot_candidates_size)
@@ -455,12 +498,18 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
     uint8_t  thr = data->config.migrate_hotness_threshold;
     dictEntry *de;
 
+    /* 判断当前节点压力，高压力时启用冷 key 推出 */
+    int current_node = get_current_numa_node();
+    double local_pressure = numaGetNodePressure(current_node);
+    int demote_enabled = (numa_available() >= 0 && numa_max_node() >= 1 &&
+                          local_pressure >= data->config.overload_threshold);
+
     while (scanned < batch_size && (de = dictNext(data->scan_iter)) != NULL) {
         composite_lru_heat_info_t *info = dictGetVal(de);
         scanned++;
         data->scan_keys_checked++;
 
-        /* 执行时重读热度（不依赖快照） */
+        /* 路径 A：热 key 拉回本地（preferred_node 已由候选池设置） */
         if (info->hotness >= thr &&
             info->preferred_node >= 0 &&
             info->current_node != info->preferred_node) {
@@ -471,12 +520,46 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
             }
             if (status == RESOURCE_AVAILABLE) {
                 _serverLog(LL_VERBOSE,
-                    "[Composite LRU] Scan migrate (dict): key=%p node=%d->%d hotness=%d",
+                    "[Composite LRU] Scan migrate (hot pull): key=%p node=%d->%d hotness=%d",
                     dictGetKey(de), info->current_node, info->preferred_node, info->hotness);
-                /* 此处实际迁移应调用 numa_migrate_single_key；
-                 * 字典路径没有 redisDb 指针，仅更新元数据节点记录 */
-                info->current_node = info->preferred_node;
-                info->preferred_node = -1;
+                int rc = -1;
+                if (data->db) {
+                    rc = numa_migrate_single_key(data->db, (robj *)dictGetKey(de),
+                                                 info->preferred_node);
+                }
+                if (rc == 0) {
+                    info->current_node = info->preferred_node;
+                    info->preferred_node = -1;
+                    data->migrations_completed++;
+                } else {
+                    data->migrations_failed++;
+                }
+                data->migrations_triggered++;
+                migrated++;
+            }
+            continue;
+        }
+
+        /* 路径 B：冷 key 推出到远程（本地节点压力高时） */
+        if (demote_enabled &&
+            info->current_node == current_node &&
+            info->hotness < thr) {
+            int target = (current_node == 0) ? 1 : 0;
+            int status = check_resource_status(data, target);
+            if (status == RESOURCE_AVAILABLE) {
+                _serverLog(LL_VERBOSE,
+                    "[Composite LRU] Scan migrate (cold demote): key=%p node=%d->%d hotness=%d",
+                    dictGetKey(de), current_node, target, info->hotness);
+                int rc = -1;
+                if (data->db) {
+                    rc = numa_migrate_single_key(data->db, (robj *)dictGetKey(de), target);
+                }
+                if (rc == 0) {
+                    info->current_node = target;
+                    data->migrations_completed++;
+                } else {
+                    data->migrations_failed++;
+                }
                 data->migrations_triggered++;
                 migrated++;
             }
@@ -525,6 +608,14 @@ int composite_lru_init(numa_strategy_t *strategy) {
     }
 
     data->last_decay_time = get_current_time_us();
+
+    /* 设置数据库上下文，供迁移调用使用 */
+#ifndef NUMA_STRATEGY_STANDALONE
+    data->db = server.db;
+#else
+    data->db = NULL;
+#endif
+
     strategy->private_data = data;
 
     _serverLog(LL_NOTICE,
@@ -622,19 +713,20 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                 _serverLog(LL_VERBOSE,
                     "[Composite LRU] Fast-path migrate: key=%p node=%d->%d hotness=%d",
                     cand->key, mem_node, cand->target_node, cur_hotness);
-                /* 调用迁移实现（字典路径仅更新元数据）*/
-                if (cand->val) {
-                    /* PREFIX 路径迁移：调用 numa_migrate_single_key 进行实际迁移
-                     * 注意：numa_migrate_single_key 需要 redisDb 指针，
-                     * 但快速通道中我们没有 db 上下文。因此采用"标记式迁移"策略：
-                     * 1. 更新 PREFIX 中的 node_id 标记
-                     * 2. 记录统计信息
-                     * 3. 实际数据迁移留给后续兜底通道或显式命令
-                     */
-                    numa_set_node_id(cand->val, cand->target_node);
-                    _serverLog(LL_VERBOSE,
-                        "[Composite LRU] Fast-path migrated (mark): val=%p node=%d->%d hotness=%d",
-                        cand->val, mem_node, cand->target_node, cur_hotness);
+                if (data->db && cand->key) {
+                    int rc = numa_migrate_single_key(data->db, (robj *)cand->key,
+                                                     cand->target_node);
+                    if (rc == 0) {
+                        data->migrations_completed++;
+                        _serverLog(LL_VERBOSE,
+                            "[Composite LRU] Fast-path migrated (actual): key=%p node=%d->%d",
+                            cand->key, mem_node, cand->target_node);
+                    } else {
+                        data->migrations_failed++;
+                        _serverLog(LL_DEBUG,
+                            "[Composite LRU] Fast-path migrate failed: key=%p rc=%d",
+                            cand->key, rc);
+                    }
                 }
                 data->migrations_triggered++;
                 processed++;

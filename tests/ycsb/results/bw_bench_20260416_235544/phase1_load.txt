@@ -1,1 +1,0 @@
-[ERROR] Java executable not found. Exiting.

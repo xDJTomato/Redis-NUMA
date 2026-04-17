@@ -4,7 +4,7 @@
 
 `numa_composite_lru.c/h` 实现了本项目的默认 NUMA 迁移策略——Composite LRU。它结合了 Redis 原生 LRU 机制和 NUMA 感知迁移决策，通过**双通道架构**实现高效的跨节点数据迁移。
 
-**版本**：v2.3
+**版本**：v2.4
 
 ## 设计思想
 
@@ -13,30 +13,40 @@
 2. **NUMA 位置**：Key 当前所在节点与最优节点的匹配度
 3. **资源状态**：目标节点的内存压力、带宽饱和度
 
+### CXL 场景迁移方向
+
+在 CXL 环境中，Node 0 = DRAM（小容量/低延迟），Node 1 = CXL（大容量/高延迟）。迁移策略为双向：
+
+- **热 Key 拉回**：远程（CXL）上的热 Key 拉回本地（DRAM），减少访问延迟
+- **冷 Key 推出**：本地（DRAM）上的冷 Key 推到远程（CXL），释放 DRAM 空间
+
+迁移目标节点由 `compute_target_node(mem_node, current_node)` 决定：
+- Key 在远程 → `target = current_node`（拉回本地）
+- Key 已在本地 → 不入候选池（候选池仅处理远程热 Key）
+
+冷 Key 推出由扫描通道在本地节点压力超过 `overload_threshold` 时自动触发。
+
 ## 双通道架构
 
 ```mermaid
 graph TB
-    subgraph "Composite LRU 策略"
-        A[Key 访问] --> B{热度越过阈值?}
-        B -->|是| C[快速通道: 候选池]
-        B -->|否| D[兜底通道: 渐进扫描]
-        
-        C --> C1[环形缓冲区 256 条目]
-        C1 --> C2[serverCron 每秒处理]
-        C2 --> E[重读 PREFIX 当前热度]
-        
-        D --> D1[key_heat_map]
-        D1 --> D2[每次 200 个 Key]
-        D2 --> E
-        
-        E --> F{热度 >= 阈值?}
-        F -->|否| G[跳过]
-        F -->|是| H{资源状态检查}
-        
-        H -->|过载| G
-        H -->|带宽饱和| G
-        H -->|可用| I[numa_migrate_single_key]
+    subgraph "访问路径（写入）"
+        A[Key 访问] --> B[更新 PREFIX 热度]
+        B --> C[同步写入 key_heat_map]
+        C --> D{热度越过阈值?}
+        D -->|是 且 Key 在远程| E[写入快速通道候选池]
+    end
+
+    subgraph "执行路径（每秒 serverCron）"
+        F[快速通道: 处理候选池] --> G{重读热度仍 >= 阈值?}
+        G -->|是| H{目标节点资源可用?}
+        H -->|是| I[numa_migrate_single_key 热拉回]
+
+        J[扫描通道: 渐进扫描 key_heat_map] --> K{热 Key 在远程?}
+        K -->|是| H
+        J --> L{冷 Key 在本地 且 本地压力高?}
+        L -->|是| M{远程节点资源可用?}
+        M -->|是| N[numa_migrate_single_key 冷推出]
     end
 ```
 
@@ -44,8 +54,8 @@ graph TB
 
 | 通道 | 优势 | 劣势 | 适用场景 |
 |------|------|------|---------|
-| 快速通道 | 低延迟（毫秒级） | 可能遗漏冷门热点 | 高频访问的热点数据 |
-| 兜底通道 | 全覆盖 | 延迟较高（渐进式） | 低频但重要的热点数据 |
+| 快速通道 | 低延迟（毫秒级） | 仅处理远程热 Key | 高频访问的远程热点数据 |
+| 扫描通道 | 全覆盖 + 冷 Key 推出 | 延迟较高（渐进式） | 低频热点 + DRAM 压力下的冷数据驱逐 |
 
 ## 核心数据结构
 
@@ -65,7 +75,7 @@ typedef struct {
 } composite_lru_config_t;
 ```
 
-### Key 热度信息（字典回退路径）
+### Key 热度信息（key_heat_map 字典）
 
 ```c
 typedef struct {
@@ -74,7 +84,7 @@ typedef struct {
     uint16_t last_access;               // 上次访问时间（LRU_CLOCK 低 16 位）
     uint64_t access_count;              // 累计访问次数
     int      current_node;              // 当前所在 NUMA 节点
-    int      preferred_node;            // 迁移目标节点
+    int      preferred_node;            // 迁移目标节点（热拉回时由候选池设置）
 } composite_lru_heat_info_t;
 ```
 
@@ -84,7 +94,7 @@ typedef struct {
 typedef struct {
     void    *key;                       // Key 指针（robj*）
     void    *val;                       // Value 指针（用于重读 PREFIX 热度）
-    int      target_node;               // 写入时的目标节点（CPU 所在节点）
+    int      target_node;               // 迁移目标节点（compute_target_node 计算）
     uint8_t  hotness_snapshot;          // 写入时热度快照（仅用于排序）
 } hot_candidate_t;
 ```
@@ -93,6 +103,7 @@ typedef struct {
 
 ```c
 typedef struct {
+    redisDb *db;                            // 数据库上下文（用于实际迁移调用）
     composite_lru_config_t config;           // 运行时配置
 
     // 快速通道
@@ -100,12 +111,12 @@ typedef struct {
     uint32_t  candidates_head;               // 写入游标
     uint32_t  candidates_count;              // 当前有效数量
 
-    // 兜底通道
+    // 扫描通道
     dictIterator *scan_iter;                 // 当前扫描位置
 
     // 内部状态
     uint64_t last_decay_time;                // 上次衰减时间（微秒）
-    dict    *key_heat_map;                   // 字典回退路径热度表
+    dict    *key_heat_map;                   // 热度表（PREFIX 路径同步写入）
 
     // 统计
     uint64_t heat_updates;                   // 热度更新次数
@@ -115,6 +126,7 @@ typedef struct {
     uint64_t migrations_failed;              // 失败的迁移次数
     uint64_t candidates_written;             // 写入候选池次数
     uint64_t scan_keys_checked;              // 渐进扫描检查的 Key 数
+    uint64_t migrations_bw_blocked;          // 因带宽饱和被阻止的迁移次数
 } composite_lru_data_t;
 ```
 
@@ -135,23 +147,19 @@ graph TB
     H -->|否| J{idle < 30min?}
     J -->|是| K[decay = 3]
     J -->|否| L[decay = 7 清零]
-    
+
     E --> M[hotness = hotness - decay]
     G --> M
     I --> M
     K --> M
     L --> M
-    
+
     M --> N{hotness < 7?}
     N -->|是| O[hotness++]
     N -->|否| P[保持最大值]
-    
-    O --> Q[写回 PREFIX]
+
+    O --> Q[写回 PREFIX + 同步 key_heat_map]
     P --> Q
-    Q --> R{热度首次越过阈值?}
-    R -->|是| S[写入候选池]
-    R -->|否| T[结束]
-    S --> T
 ```
 
 ### 衰减规则
@@ -166,227 +174,108 @@ graph TB
 | < 30 分钟 | 3 | 长期空闲，大幅衰减 |
 | ≥ 30 分钟 | 7 | 完全清零 |
 
-### 为什么是"阶梯式"？
+## 访问路径：composite_lru_record_access()
 
-1. **计算成本低**：查表而非浮点运算
-2. **行为可预测**：4 个明确级别，易于调参
-3. **符合实际模式**：短暂停顿不应影响热度判断
+每次 `lookupKey()` 命中时调用。执行以下操作：
 
-### 实现
-
-```c
-uint8_t calculate_decay(uint16_t idle_secs) {
-    if (idle_secs < LAZY_DECAY_STEP1_SECS)   return 0;  // < 10s
-    if (idle_secs < LAZY_DECAY_STEP2_SECS)   return 1;  // < 60s
-    if (idle_secs < LAZY_DECAY_STEP3_SECS)   return 2;  // < 5min
-    if (idle_secs < LAZY_DECAY_STEP4_SECS)   return 3;  // < 30min
-    return 7;  // ≥ 30min: 清零
-}
-```
-
-## 快速通道：候选池
-
-### 环形缓冲区设计
-
-```
-大小：256 条目（可配置）
-结构：
-  head → 写入位置（持续增长，不模长）
-  count → 有效元素数（最多 256）
-
-写入：
-  idx = head % size
-  buffer[idx] = new_candidate
-  head++
-  if (count < size) count++
-
-读取：
-  start = (head - count) % size
-  for i in 0..count-1:
-      process buffer[(start + i) % size]
-  count = 0  // 清空
-```
-
-### 何时写入候选池？
-
-在 Key 被访问时，如果**热度首次越过阈值**且**内存在远程节点**：
+1. **阶梯衰减**：根据空闲时间衰减热度
+2. **热度递增**：`hotness++`（上限 7）
+3. **写回 PREFIX**：更新 `hotness`、`access_count`、`last_access`
+4. **同步 key_heat_map**：更新或创建字典条目，确保扫描通道有数据可迭代
+5. **候选池写入**：当热度首次越过阈值 且 Key 在远程节点时，写入环形缓冲区
 
 ```c
 void composite_lru_record_access(strategy, key, val) {
-    // 1. 读取当前热度
     uint8_t hotness = numa_get_hotness(val);
+    // ... 衰减 + 递增 ...
 
-    // 2. 应用衰减
-    uint16_t idle_time = now - numa_get_last_access(val);
-    uint8_t decay = calculate_decay(idle_time);
-    if (hotness > decay) hotness -= decay;
-    else hotness = 0;
+    // 同步写入 key_heat_map（扫描通道依赖）
+    composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
+    if (info) {
+        info->hotness = hotness;
+        info->access_count++;
+        info->current_node = mem_node;
+    } else if (hotness >= thr) {
+        // 新条目，仅在热度达到阈值时创建
+        info = zmalloc(sizeof(*info));
+        info->hotness = hotness;
+        info->current_node = mem_node;
+        dictAdd(data->key_heat_map, key, info);
+    }
 
-    // 3. 热度 +1
-    if (hotness < COMPOSITE_LRU_HOTNESS_MAX) hotness++;
-
-    // 4. 写回 PREFIX
-    numa_set_hotness(val, hotness);
-    numa_set_last_access(val, now);
-
-    // 5. 判断是否写入候选池
-    composite_lru_data_t *data = strategy->private_data;
-    if (hotness >= data->config.migrate_hotness_threshold &&
-        hotness_snapshot < data->config.migrate_hotness_threshold) {
-        // 热度首次越过阈值，写入候选池
-        add_to_candidates(key, val, target_node, hotness);
+    // 快速通道：仅远程热 Key 入候选池
+    int target = compute_target_node(mem_node, current_node);
+    if (target >= 0 && hotness_before < thr && hotness >= thr) {
+        add_to_candidates(key, val, target, hotness);
     }
 }
 ```
 
-## 兜底通道：渐进扫描
+## 执行路径：composite_lru_execute()
 
-### 扫描逻辑
+每秒由 `serverCron` → `numa_strategy_run_all()` 调用。
+
+### 快速通道（候选池处理）
 
 ```c
-int composite_lru_scan_once(strategy, batch_size, scanned_out, migrated_out) {
-    composite_lru_data_t *data = strategy->private_data;
-    int scanned = 0;
-    int migrated = 0;
+// 遍历候选池中所有条目
+for each candidate:
+    // 重读 PREFIX 当前热度（不依赖快照）
+    cur_hotness = numa_get_hotness(cand->val);
+    mem_node = numa_get_node_id(cand->val);
 
-    // 获取或创建迭代器
-    if (!data->scan_iter) {
-        data->scan_iter = dictGetSafeIterator(data->key_heat_map);
-    }
+    // 带宽感知：源节点繁忙时降低迁移门槛
+    if (src_bw > 0.7) effective_threshold--;
 
-    // 扫描 batch_size 个 Key
-    for (int i = 0; i < batch_size; i++) {
-        dictEntry *de = dictNext(data->scan_iter);
-        if (!de) {
-            // 扫描完毕，重置迭代器
-            dictReleaseIterator(data->scan_iter);
-            data->scan_iter = NULL;
-            break;
+    if (cur_hotness >= effective_threshold && mem_node != cand->target_node) {
+        // 检查目标节点资源
+        if (check_resource_status(cand->target_node) == RESOURCE_AVAILABLE) {
+            // 实际迁移：调用 numa_migrate_single_key()
+            numa_migrate_single_key(data->db, cand->key, cand->target_node);
         }
-
-        // 评估热度
-        composite_lru_heat_info_t *heat = dictGetVal(de);
-        if (heat->hotness >= data->config.migrate_hotness_threshold) {
-            // 触发迁移
-            if (try_migrate_key(heat->key, heat->preferred_node) == OK) {
-                migrated++;
-            }
-        }
-        scanned++;
     }
-
-    *scanned_out = scanned;
-    *migrated_out = migrated;
-    data->scan_keys_checked += scanned;
-    return scanned;
-}
 ```
 
-### 为什么使用安全迭代器？
-
-因为扫描过程中可能有 Key 被删除或迁移，安全迭代器保证不会访问已释放的内存。
-
-## 执行流程：composite_lru_execute()
-
-```mermaid
-graph TB
-    A[composite_lru_execute] --> B{auto_migrate_enabled?}
-    B -->|否| C[直接返回 OK]
-    B -->|是| D{需要周期衰减?}
-    D -->|是| E[composite_lru_decay_heat]
-    D -->|否| F[处理快速通道]
-    E --> F
-    
-    F --> G[遍历候选池]
-    G --> H{还有候选?}
-    H -->|否| I[处理兜底通道]
-    H -->|是| J[重读 PREFIX 热度]
-    J --> K{热度 >= 阈值?}
-    K -->|否| G
-    K -->|是| L{资源可用?}
-    L -->|否| G
-    L -->|是| M[numa_migrate_single_key]
-    M --> G
-    
-    I --> N[composite_lru_scan_once]
-    N --> O[返回 OK]
-```
-
-每秒 serverCron 调用一次：
+### 扫描通道（渐进扫描 + 冷 Key 推出）
 
 ```c
-int composite_lru_execute(strategy) {
-    composite_lru_data_t *data = strategy->private_data;
+// 判断本地节点压力，高压力时启用冷 Key 推出
+double local_pressure = numaGetNodePressure(current_node);
+int demote_enabled = (local_pressure >= overload_threshold && numa_max_node() >= 1);
 
-    // 1. 检查自动迁移开关
-    if (!data->config.auto_migrate_enabled) return NUMA_STRATEGY_OK;
-
-    // 2. 周期衰减
-    uint64_t now = get_time_us();
-    if (now - data->last_decay_time > data->config.decay_threshold_sec * 1000000) {
-        composite_lru_decay_heat(data);
-        data->last_decay_time = now;
+for each entry in key_heat_map (batch_size per tick):
+    // 路径 A：热 Key 拉回本地
+    if (hotness >= threshold && preferred_node >= 0 && current_node != preferred_node) {
+        if (check_resource_status(preferred_node) == AVAILABLE) {
+            numa_migrate_single_key(db, key, preferred_node);
+        }
+        continue;
     }
 
-    // 3. 快速通道：处理候选池
-    process_candidates(data);
-
-    // 4. 兜底通道：渐进扫描
-    uint64_t scanned, migrated;
-    composite_lru_scan_once(strategy, data->config.scan_batch_size, &scanned, &migrated);
-
-    return NUMA_STRATEGY_OK;
-}
-```
-
-### 候选池处理
-
-```c
-void process_candidates(data) {
-    if (data->candidates_count == 0) return;
-
-    // 遍历候选池
-    uint32_t start = (data->candidates_head - data->candidates_count) % data->config.hot_candidates_size;
-
-    for (uint32_t i = 0; i < data->candidates_count; i++) {
-        hot_candidate_t *cand = &data->hot_candidates[(start + i) % data->config.hot_candidates_size];
-
-        // 重读 PREFIX 当前热度（不依赖快照）
-        uint8_t current_hotness = numa_get_hotness(cand->val);
-
-        // 检查是否仍满足条件
-        if (current_hotness < data->config.migrate_hotness_threshold) continue;
-
-        // 检查资源状态
-        int resource_state = check_resource_status(cand->target_node);
-        if (resource_state != RESOURCE_AVAILABLE) continue;
-
-        // 触发迁移
-        if (numa_migrate_single_key(db, cand->key, cand->target_node) == OK) {
-            data->migrations_triggered++;
+    // 路径 B：冷 Key 推出到远程（本地压力高时）
+    if (demote_enabled && current_node == local_node && hotness < threshold) {
+        target = (local_node == 0) ? 1 : 0;
+        if (check_resource_status(target) == AVAILABLE) {
+            numa_migrate_single_key(db, key, target);
         }
     }
-
-    // 清空候选池
-    data->candidates_count = 0;
-}
 ```
 
 ### 资源状态检查
 
 ```c
-int check_resource_status(int node) {
-    // 1. 检查内存过载
-    double mem_util = get_node_memory_utilization(node);
-    if (mem_util > overload_threshold) return RESOURCE_OVERLOADED;
+int check_resource_status(int node_id) {
+    // 1. 内存过载检查
+    double pressure = numaGetNodePressure(node_id);
+    if (pressure >= overload_threshold) return RESOURCE_OVERLOADED;
 
-    // 2. 检查带宽饱和
-    double bw_util = get_node_bandwidth_utilization(node);
-    if (bw_util > bandwidth_threshold) return RESOURCE_BANDWIDTH_SATURATED;
+    // 2. 带宽饱和检查
+    double bw_usage = numa_bw_get_usage(node_id);
+    if (bw_usage >= bandwidth_threshold) return RESOURCE_BANDWIDTH_SATURATED;
 
-    // 3. 检查迁移压力
-    double pressure = get_migration_pressure(node);
-    if (pressure > pressure_threshold) return RESOURCE_MIGRATION_PRESSURE;
+    // 3. 综合迁移压力检查（内存 60% + 带宽 40%）
+    double combined = pressure * 0.6 + bw_usage * 0.4;
+    if (combined >= pressure_threshold) return RESOURCE_MIGRATION_PRESSURE;
 
     return RESOURCE_AVAILABLE;
 }
@@ -399,22 +288,22 @@ int check_resource_status(int node) {
 - **条件**：Value 对象存在且包含 PREFIX
 - **优势**：零额外内存，O(1) 访问
 - **流程**：直接读写 PREFIX 中的热度字段
+- **同步**：每次更新后同步写入 `key_heat_map`
 
-### 字典回退路径（兼容路径）
+### key_heat_map 字典（扫描通道数据源）
 
-- **条件**：PREFIX 不可用（val == NULL）
-- **优势**：支持未改造 PREFIX 的老接口
-- **流程**：通过 `key_heat_map` 字典维护热度信息
-
-### 路径选择
+- **用途**：为扫描通道提供可迭代的热 Key 集合
+- **写入时机**：PREFIX 路径每次 `record_access` 时同步更新
+- **淘汰**：热度清零后由扫描通道清理
 
 ```c
 void composite_lru_record_access(strategy, key, val) {
     if (val != NULL) {
-        // PREFIX 路径
+        // PREFIX 路径：更新热度 + 同步 key_heat_map
         update_hotness_via_prefix(val);
+        sync_to_heat_map(key, val);
     } else {
-        // 字典路径
+        // 字典路径（兼容 val==NULL 的场景）
         update_hotness_via_dict(key);
     }
 }
@@ -438,48 +327,7 @@ void composite_lru_record_access(strategy, key, val) {
 }
 ```
 
-### 加载流程
-
-```c
-int composite_lru_load_config(path, out_config) {
-    // 1. 打开文件
-    FILE *fp = fopen(path, "r");
-    if (!fp) return -1;
-
-    // 2. 逐行解析 "key": value 格式
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        // 解析键值对
-        // 类型转换并验证范围
-        // 填充 out_config
-    }
-
-    fclose(fp);
-    return 0;
-}
-
-int composite_lru_apply_config(strategy, cfg) {
-    composite_lru_data_t *data = strategy->private_data;
-
-    // 1. 候选池大小变化 → 重建
-    if (cfg->hot_candidates_size != data->config.hot_candidates_size) {
-        rebuild_candidates_pool(data, cfg->hot_candidates_size);
-    }
-
-    // 2. 应用新配置
-    data->config = *cfg;
-
-    // 3. 重置扫描游标
-    if (data->scan_iter) {
-        dictReleaseIterator(data->scan_iter);
-        data->scan_iter = NULL;
-    }
-
-    return 0;
-}
-```
-
-### 热加载命令
+### 加载命令
 
 ```bash
 NUMA CONFIG LOAD /path/to/composite_lru.json
@@ -487,32 +335,29 @@ NUMA CONFIG LOAD /path/to/composite_lru.json
 
 ## 统计信息
 
-```c
-typedef struct {
-    uint64_t heat_updates;              // 热度更新次数
-    uint64_t migrations_triggered;      // 已触发的迁移次数
-    uint64_t decay_operations;          // 衰减操作次数
-    uint64_t migrations_completed;      // 已完成的迁移次数
-    uint64_t migrations_failed;         // 失败的迁移次数
-    uint64_t candidates_written;        // 写入候选池次数
-    uint64_t scan_keys_checked;         // 渐进扫描累计检查 Key 数
-} composite_lru_stats_t;
-```
+| 字段 | 说明 |
+|------|------|
+| `heat_updates` | 热度更新次数 |
+| `migrations_triggered` | 已触发的迁移次数 |
+| `migrations_completed` | 实际完成的迁移次数 |
+| `migrations_failed` | 失败的迁移次数 |
+| `migrations_bw_blocked` | 因带宽饱和被阻止的迁移次数 |
+| `decay_operations` | 衰减操作次数 |
+| `candidates_written` | 写入候选池次数 |
+| `scan_keys_checked` | 渐进扫描累计检查 Key 数 |
 
 查询命令：
 ```bash
-NUMA CONFIG GET
+NUMA MIGRATE STATS
 ```
 
 ## 手动触发扫描
 
 供 `NUMA MIGRATE SCAN` 命令调用：
 
-```c
-int composite_lru_scan_once(strategy, batch_size, &scanned, &migrated);
+```bash
+NUMA MIGRATE SCAN COUNT 500
 ```
-
-用户可以指定自定义批次大小，而非使用配置值。
 
 ## 与其他模块的关系
 
@@ -520,16 +365,17 @@ int composite_lru_scan_once(strategy, batch_size, &scanned, &migrated);
 graph LR
     A[serverCron] -->|每秒| B[numa_strategy_run_all]
     B --> C[composite_lru_execute]
-    
+
     D[lookupKey] --> E[composite_lru_record_access]
     E --> F[更新 PREFIX 热度]
-    F --> G{越过阈值?}
-    G -->|是| H[写入候选池]
-    
-    C --> I[快速通道处理]
-    C --> J[兜底通道扫描]
-    I --> K[numa_migrate_single_key]
-    J --> K
+    E --> G[同步 key_heat_map]
+    F --> H{越过阈值且远程?}
+    H -->|是| I[写入候选池]
+
+    C --> J[快速通道: 热拉回]
+    C --> K[扫描通道: 热拉回 + 冷推出]
+    J --> L[numa_migrate_single_key]
+    K --> L
 ```
 
 ### 被策略插槽框架调度
@@ -543,12 +389,12 @@ serverCron() ──► numa_strategy_run_all() ──► composite_lru_execute()
 ```
 composite_lru_execute()
     │
-    ├── process_candidates() ──► numa_migrate_single_key()
+    ├── 快速通道 ──► numa_migrate_single_key()  (热 Key 拉回)
     │
-    └── scan_once() ──► numa_migrate_single_key()
+    └── 扫描通道 ──► numa_migrate_single_key()  (热拉回 + 冷推出)
 ```
 
-### 接收 zmalloc 访问记录
+### 接收 lookupKey 访问记录
 
 ```
 lookupKey() ──► composite_lru_record_access()
@@ -558,10 +404,10 @@ lookupKey() ──► composite_lru_record_access()
 
 | 操作 | 时间复杂度 | 频率 | 说明 |
 |------|-----------|------|------|
-| record_access | O(1) | 每次 Key 访问 | PREFIX 路径直接更新 |
+| record_access | O(1) | 每次 Key 访问 | PREFIX 路径直接更新 + key_heat_map 同步 |
 | 候选池写入 | O(1) | 热度越过阈值时 | 环形缓冲区索引计算 |
 | 候选池处理 | O(pool_size) | 每秒一次 | 遍历 256 条目 |
-| 渐进扫描 | O(batch_size) | 每秒一次 | 扫描 200 个 Key |
+| 渐进扫描 | O(batch_size) | 每秒一次 | 扫描 200 个 Key（含冷 Key 推出检查） |
 | JSON 加载 | O(n) | 手动触发 | n = JSON 行数 |
 
 ## 空间开销
@@ -569,6 +415,6 @@ lookupKey() ──► composite_lru_record_access()
 | 组件 | 空间 | 说明 |
 |------|------|------|
 | 候选池 | 256 × 40B = 10KB | 默认配置 |
-| key_heat_map | 按需增长 | 仅字典路径使用 |
+| key_heat_map | 按需增长 | 达到热度阈值的 Key 才创建条目 |
 | 迭代器 | O(1) | 单一活跃迭代器 |
 | **总计** | **< 1MB** | 高度优化 |

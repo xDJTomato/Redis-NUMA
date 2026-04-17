@@ -1,3 +1,0 @@
-timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys
-PHASE_MARKER,1,fill_start,1776352917
-1776352917,1_fill,2,2,.9,3.7,3.90,0,0,51259532,0,0

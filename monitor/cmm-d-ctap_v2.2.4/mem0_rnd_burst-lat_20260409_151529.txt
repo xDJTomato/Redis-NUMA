@@ -1,0 +1,14 @@
+Burst Latency (Random)
+
+memory size: 2048 MiB
+chunk size : 16 Byte
+stride size: 256 Byte
+cpu-numa_id: 0
+cpu-id     : 2
+mem-numa_id: 0
+
+Sample: 25165824
+Avg.  : 27.09 ns
+Median: 3 ns
+99th  : 141 ns
+99.9th: 249 ns

@@ -31,9 +31,9 @@
 #define SLAB_EMPTY_CACHE_MAX 2        /* 每个大小级别保留的空闲slab缓存数量 */
 
 /* P1优化：Compact压缩阈值 */
-#define COMPACT_THRESHOLD 0.3         /* 利用率低于30%时触发压缩 */
-#define COMPACT_MIN_FREE_RATIO 0.5    /* chunk空闲率超过50%才参与压缩 */
-#define COMPACT_CHECK_INTERVAL 10     /* 每N次serverCron检查一次 */
+#define COMPACT_THRESHOLD 0.5         /* 利用率低于50%时触发压缩 */
+#define COMPACT_MIN_FREE_RATIO 0.6    /* chunk空闲率超过60%才参与压缩 */
+#define COMPACT_CHECK_INTERVAL 5      /* 每N次serverCron检查一次 */
 
 /* 动态chunk大小阈值（P0优化后增大以提升性能） */
 #define CHUNK_SIZE_SMALL    (256 * 1024)   /* 256KB：用于≤256B的小对象 */

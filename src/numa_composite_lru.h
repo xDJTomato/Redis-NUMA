@@ -16,6 +16,9 @@
 #include "dict.h"
 #include <stdint.h>
 
+/* 前向声明，避免引入 server.h 造成循环依赖 */
+typedef struct redisDb redisDb;
+
 /* ========== 阶梯衰减常量（不随 JSON 配置变化）========== */
 #define LAZY_DECAY_STEP1_SECS    10    /* 空闲 < 10秒  ：衰减0（短暂停顿，完全豁免） */
 #define LAZY_DECAY_STEP2_SECS    60    /* 空闲 < 60秒  ：衰减1 */
@@ -68,6 +71,9 @@ typedef struct {
 
 /* 策略私有数据 */
 typedef struct {
+    /* 数据库上下文（用于实际迁移调用）*/
+    redisDb *db;
+
     /* 运行时配置（从 JSON 加载）*/
     composite_lru_config_t config;
 

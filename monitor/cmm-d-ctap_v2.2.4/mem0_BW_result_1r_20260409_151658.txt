@@ -1,0 +1,26 @@
+Bandwidth
+
+memory size: 106 MiB/thread
+chunk size : 16 Byte
+cpu-numa_id: 0
+BW threads cpu_id: 1-19
+main thread cpu_id: 0
+mem-numa_id: none (follow the system allocation)
+the number of BW threads: 19
+
+Read Ratio: 1
+Write Ratio: 0
+
+#1: 49424.5 MB/s
+#2: 50459.1 MB/s
+#3: 50345.7 MB/s
+#4: 51289.3 MB/s
+#5: 48987.6 MB/s
+#6: 51420.9 MB/s
+#7: 52242.5 MB/s
+#8: 52118 MB/s
+#9: 52055.5 MB/s
+#10: 52125.9 MB/s
+Avg. BW: 51046.9 MB/s
+Max. BW: 52242.5 MB/s
+Min. BW: 48987.6 MB/s
