@@ -16,6 +16,7 @@
 #include "numa_composite_lru.h"
 #include "numa_strategy_slots.h"
 #include "numa_configurable_strategy.h"
+#include "numa_pool.h"
 #include <sched.h>
 #include <numa.h>
 
@@ -418,7 +419,8 @@ static void numa_cmd_config(client *c) {
             return;
         }
         numa_config_get_statistics(allocs, bytes, cfg->num_nodes);
-        addReplyArrayLen(c, cfg->num_nodes * 2);
+        /* 先输出原有节点统计 */
+        addReplyArrayLen(c, cfg->num_nodes * 2 + 1);
         for (int i = 0; i < cfg->num_nodes; i++) {
             addReplyArrayLen(c, 2);
             addReplyBulkCString(c, "node");
@@ -431,6 +433,41 @@ static void numa_cmd_config(client *c) {
         }
         zfree(allocs);
         zfree(bytes);
+
+        /* 追加分配路径统计 */
+        size_t slab_bytes, pool_bytes, direct_bytes;
+        size_t slab_count, pool_count, direct_count;
+        numa_get_alloc_stats(&slab_bytes, &pool_bytes, &direct_bytes,
+                             &slab_count, &pool_count, &direct_count);
+
+        /* 汇总Pool chunk统计 */
+        size_t chunk_total = 0, chunk_used = 0;
+        for (int i = 0; i < cfg->num_nodes; i++) {
+            numa_pool_stats_t ps;
+            numa_pool_get_stats(i, &ps);
+            chunk_total += ps.chunks_allocated * 16384; /* SLAB_SIZE = 16KB */
+            chunk_used  += ps.total_from_pool;
+        }
+
+        addReplyArrayLen(c, 2);
+        addReplyBulkCString(c, "alloc_paths");
+        addReplyArrayLen(c, 16);
+        addReplyBulkCString(c, "alloc_slab_bytes");
+        addReplyLongLong(c, slab_bytes);
+        addReplyBulkCString(c, "alloc_pool_bytes");
+        addReplyLongLong(c, pool_bytes);
+        addReplyBulkCString(c, "alloc_direct_bytes");
+        addReplyLongLong(c, direct_bytes);
+        addReplyBulkCString(c, "alloc_slab_count");
+        addReplyLongLong(c, slab_count);
+        addReplyBulkCString(c, "alloc_pool_count");
+        addReplyLongLong(c, pool_count);
+        addReplyBulkCString(c, "alloc_direct_count");
+        addReplyLongLong(c, direct_count);
+        addReplyBulkCString(c, "chunk_total_bytes");
+        addReplyLongLong(c, chunk_total);
+        addReplyBulkCString(c, "chunk_used_bytes");
+        addReplyLongLong(c, chunk_used);
         return;
     }
 

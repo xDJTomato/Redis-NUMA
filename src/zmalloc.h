@@ -147,6 +147,12 @@ void numa_set_last_access(void *ptr, uint16_t lru_clock);
 int numa_get_node_id(void *ptr);
 void numa_set_node_id(void *ptr, int node_id);
 
+/* 分配路径统计 */
+void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes,
+                          size_t *direct_bytes,
+                          size_t *slab_count, size_t *pool_count,
+                          size_t *direct_count);
+
 #endif /* HAVE_NUMA */
 void *zrealloc(void *ptr, size_t size);
 void *ztrymalloc(size_t size);

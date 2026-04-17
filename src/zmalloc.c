@@ -177,6 +177,15 @@ typedef struct {
 
 #define PREFIX_SIZE (sizeof(numa_alloc_prefix_t))
 #define ASSERT_NO_SIZE_OVERFLOW(sz) assert((sz) <= SIZE_MAX - PREFIX_SIZE)
+
+/* 分配路径计数器：记录各路径的实时字节数和累计分配次数 */
+static redisAtomic size_t numa_alloc_slab_bytes   = 0;
+static redisAtomic size_t numa_alloc_pool_bytes   = 0;
+static redisAtomic size_t numa_alloc_direct_bytes = 0;
+static redisAtomic size_t numa_alloc_slab_count   = 0;
+static redisAtomic size_t numa_alloc_pool_count   = 0;
+static redisAtomic size_t numa_alloc_direct_count = 0;
+
 #else
 /* Standard allocator can use HAVE_MALLOC_SIZE if available */
 #ifdef HAVE_MALLOC_SIZE
@@ -280,18 +289,33 @@ static void *numa_alloc_with_size(size_t size)
     void *raw_ptr = NULL;
     
     /* P2优化：≤128B的小对象走Slab快速路径 */
+    int used_slab = 0, used_pool = 0;
     if (should_use_slab(size)) {
         raw_ptr = numa_slab_alloc(size, target_node, &alloc_size);
+        if (raw_ptr) used_slab = 1;
     }
-    
+
     /* 回退：大对象或Slab分配失败时走Pool路径 */
     if (!raw_ptr) {
         raw_ptr = numa_pool_alloc(total_size, target_node, &alloc_size);
+        if (raw_ptr) used_pool = 1;
     }
-    
+
     if (!raw_ptr)
         return NULL;
-    
+
+    /* 埋点：按路径更新计数器 */
+    if (used_slab) {
+        atomicIncr(numa_alloc_slab_bytes, total_size);
+        atomicIncr(numa_alloc_slab_count, 1);
+    } else if (used_pool) {
+        atomicIncr(numa_alloc_pool_bytes, total_size);
+        atomicIncr(numa_alloc_pool_count, 1);
+    } else {
+        atomicIncr(numa_alloc_direct_bytes, total_size);
+        atomicIncr(numa_alloc_direct_count, 1);
+    }
+
     /* 根据大小判断是否来自内存池（用于free路由） */
     int from_pool = (total_size <= NUMA_POOL_MAX_ALLOC) ? 1 : 0;
 
@@ -314,14 +338,23 @@ static void numa_free_with_size(void *user_ptr)
     update_zmalloc_stat_free(total_size);
 
     void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
-    
+
     /* P2优化：小对象归还Slab */
     if (should_use_slab(size) && prefix->from_pool) {
         /* P2修复：使用存储的node_id，而非轮询值 */
         numa_slab_free(raw_ptr, total_size, node_id);
+        atomicDecr(numa_alloc_slab_bytes, total_size);
+        atomicDecr(numa_alloc_slab_count, 1);
     } else {
         /* 大对象归还Pool */
         numa_pool_free(raw_ptr, total_size, prefix->from_pool);
+        if (total_size <= NUMA_POOL_MAX_ALLOC) {
+            atomicDecr(numa_alloc_pool_bytes, total_size);
+            atomicDecr(numa_alloc_pool_count, 1);
+        } else {
+            atomicDecr(numa_alloc_direct_bytes, total_size);
+            atomicDecr(numa_alloc_direct_count, 1);
+        }
     }
 }
 
@@ -515,6 +548,20 @@ void numa_set_node_id(void *ptr, int node_id)
     if (!ptr) return;
     numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
     prefix->node_id = (char)node_id;
+}
+
+/* 读取各分配路径的实时字节数和累计分配次数 */
+void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes,
+                          size_t *direct_bytes,
+                          size_t *slab_count, size_t *pool_count,
+                          size_t *direct_count)
+{
+    atomicGet(numa_alloc_slab_bytes,   *slab_bytes);
+    atomicGet(numa_alloc_pool_bytes,   *pool_bytes);
+    atomicGet(numa_alloc_direct_bytes, *direct_bytes);
+    atomicGet(numa_alloc_slab_count,   *slab_count);
+    atomicGet(numa_alloc_pool_count,   *pool_count);
+    atomicGet(numa_alloc_direct_count, *direct_count);
 }
 
 #endif /* HAVE_NUMA */

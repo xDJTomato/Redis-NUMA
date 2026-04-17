@@ -293,8 +293,8 @@ start_redis() {
 start_collector() {
     local csv_file="$1"
     
-    # 写入 CSV header
-    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys" > "$csv_file"
+    # 写入 CSV header（含分配路径统计列）
+    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys,slab_bytes,pool_bytes,direct_bytes,slab_count,pool_count,direct_count,chunk_total,chunk_used" > "$csv_file"
     
     local prev_ops=0
     local prev_migrate=0
@@ -354,9 +354,25 @@ start_collector() {
         [[ "${migrate_sec:-0}" -lt 0 ]] 2>/dev/null && migrate_sec=0
         [[ "${n0_delta:-0}" -lt 0 ]] 2>/dev/null && n0_delta=0
         [[ "${n1_delta:-0}" -lt 0 ]] 2>/dev/null && n1_delta=0
-        
+
+        # 采集分配路径统计（NUMA CONFIG STATS 的 alloc_paths 子字段）
+        local alloc_stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG STATS 2>/dev/null || echo "")
+        local slab_bytes=0 pool_bytes=0 direct_bytes=0
+        local slab_count=0 pool_count=0 direct_count=0
+        local chunk_total=0 chunk_used=0
+        if echo "$alloc_stats" | grep -q "alloc_slab_bytes"; then
+            slab_bytes=$(echo "$alloc_stats" | grep -A1 "alloc_slab_bytes" | tail -1 | grep -oP '\d+' || echo "0")
+            pool_bytes=$(echo "$alloc_stats" | grep -A1 "alloc_pool_bytes" | tail -1 | grep -oP '\d+' || echo "0")
+            direct_bytes=$(echo "$alloc_stats" | grep -A1 "alloc_direct_bytes" | tail -1 | grep -oP '\d+' || echo "0")
+            slab_count=$(echo "$alloc_stats" | grep -A1 "alloc_slab_count" | tail -1 | grep -oP '\d+' || echo "0")
+            pool_count=$(echo "$alloc_stats" | grep -A1 "alloc_pool_count" | tail -1 | grep -oP '\d+' || echo "0")
+            direct_count=$(echo "$alloc_stats" | grep -A1 "alloc_direct_count" | tail -1 | grep -oP '\d+' || echo "0")
+            chunk_total=$(echo "$alloc_stats" | grep -A1 "chunk_total_bytes" | tail -1 | grep -oP '\d+' || echo "0")
+            chunk_used=$(echo "$alloc_stats" | grep -A1 "chunk_used_bytes" | tail -1 | grep -oP '\d+' || echo "0")
+        fi
+
         # 写入 CSV
-        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0}" >> "$csv_file"
+        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0},${slab_bytes},${pool_bytes},${direct_bytes},${slab_count},${pool_count},${direct_count},${chunk_total},${chunk_used}" >> "$csv_file"
         
         # 更新前值
         prev_ops=${ops_total:-0}
