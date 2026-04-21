@@ -442,16 +442,23 @@ static void numa_cmd_config(client *c) {
 
         /* 汇总Pool chunk统计 */
         size_t chunk_total = 0, chunk_used = 0;
+        size_t chunks_allocated = 0, chunks_freed = 0;
+        size_t free_list_hits = 0, free_list_misses = 0, free_list_length = 0;
         for (int i = 0; i < cfg->num_nodes; i++) {
             numa_pool_stats_t ps;
             numa_pool_get_stats(i, &ps);
             chunk_total += ps.chunks_allocated * 16384; /* SLAB_SIZE = 16KB */
             chunk_used  += ps.total_from_pool;
+            chunks_allocated += ps.chunks_allocated;
+            chunks_freed += ps.chunks_freed;
+            free_list_hits += ps.free_list_hits;
+            free_list_misses += ps.free_list_misses;
+            free_list_length += ps.free_list_length;
         }
 
         addReplyArrayLen(c, 2);
         addReplyBulkCString(c, "alloc_paths");
-        addReplyArrayLen(c, 16);
+        addReplyArrayLen(c, 26);
         addReplyBulkCString(c, "alloc_slab_bytes");
         addReplyLongLong(c, slab_bytes);
         addReplyBulkCString(c, "alloc_pool_bytes");
@@ -468,6 +475,16 @@ static void numa_cmd_config(client *c) {
         addReplyLongLong(c, chunk_total);
         addReplyBulkCString(c, "chunk_used_bytes");
         addReplyLongLong(c, chunk_used);
+        addReplyBulkCString(c, "pool_chunks_allocated");
+        addReplyLongLong(c, chunks_allocated);
+        addReplyBulkCString(c, "pool_chunks_freed");
+        addReplyLongLong(c, chunks_freed);
+        addReplyBulkCString(c, "pool_free_list_hits");
+        addReplyLongLong(c, free_list_hits);
+        addReplyBulkCString(c, "pool_free_list_misses");
+        addReplyLongLong(c, free_list_misses);
+        addReplyBulkCString(c, "pool_free_list_length");
+        addReplyLongLong(c, free_list_length);
         return;
     }
 

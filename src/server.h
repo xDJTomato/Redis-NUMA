@@ -2808,6 +2808,7 @@ int iAmMaster(void);
 #include "numa_key_migrate.h"
 #include "numa_composite_lru.h"
 #include "numa_bw_monitor.h"
+#include "numa_configurable_strategy.h"
 #endif
 
 #endif

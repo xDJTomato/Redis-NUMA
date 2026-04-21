@@ -86,6 +86,15 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
         {
             numa_strategy_t *clru = numa_strategy_slot_get(1);
             if (clru && clru->enabled) {
+                if (clru->private_data) {
+                    composite_lru_data_t *data = clru->private_data;
+                    if (data->db != db) {
+                        data->db = db;
+                        serverLog(LL_NOTICE,
+                            "[Composite LRU][debug] bind db id=%d ptr=%p from lookupKey",
+                            db->id, (void *)db);
+                    }
+                }
                 composite_lru_record_access(clru, key->ptr, val);
             }
         }

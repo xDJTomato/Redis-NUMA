@@ -55,10 +55,16 @@ void zlibc_free(void *ptr)
 #include <sched.h>
 #include <unistd.h>
 #include "numa_pool.h"
+#include "numa_configurable_strategy.h"
 /* numaGetNodePressure() 声明：弱符号回退供 redis-benchmark/cli 使用 */
 __attribute__((weak)) double numaGetNodePressure(int node_id) {
     (void)node_id;
     return 0.0;
+}
+/* numa_config_get_best_node 弱符号回退：未链接策略模块时回退到 node 0 */
+__attribute__((weak)) int numa_config_get_best_node(size_t size) {
+    (void)size;
+    return 0;
 }
 
 /* NUMA全局上下文 - 保留用于兼容性和未来扩展 */
@@ -270,20 +276,12 @@ static void *numa_alloc_with_size(size_t size)
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
     
-    /* 本地优先：Node 0 压力超过 95% 时溢出到 Node 1 */
+    /* 由 numa_configurable_strategy 模块决定目标节点 */
     int target_node;
-    if (numa_ctx.num_nodes == 1) {
+    if (numa_ctx.num_nodes <= 1) {
         target_node = 0;
     } else {
-        static __thread int alloc_count = 0;
-        static __thread int cached_target = 0;
-
-        if ((alloc_count & 0x3FF) == 0) {
-            double pressure = numaGetNodePressure(0);
-            cached_target = (pressure >= 0.95) ? 1 : 0;
-        }
-        target_node = cached_target;
-        alloc_count++;
+        target_node = numa_config_get_best_node(size);
     }
     
     void *raw_ptr = NULL;

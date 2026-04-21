@@ -93,6 +93,9 @@ void numa_key_migrate_cleanup(void);
 /* 单Key迁移：将指定Key迁移到目标节点 */
 int numa_migrate_single_key(redisDb *db, robj *key, int target_node);
 
+/* 按 key name (SDS) 迁移：composite_lru 候选池使用 */
+int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node);
+
 /* 批量迁移：将列表中的所有Key迁移到目标节点 */
 int numa_migrate_multiple_keys(redisDb *db, list *key_list, int target_node);
 

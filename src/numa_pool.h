@@ -31,9 +31,9 @@
 #define SLAB_EMPTY_CACHE_MAX 2        /* 每个大小级别保留的空闲slab缓存数量 */
 
 /* P1优化：Compact压缩阈值 */
-#define COMPACT_THRESHOLD 0.5         /* 利用率低于50%时触发压缩 */
-#define COMPACT_MIN_FREE_RATIO 0.6    /* chunk空闲率超过60%才参与压缩 */
-#define COMPACT_CHECK_INTERVAL 5      /* 每N次serverCron检查一次 */
+#define COMPACT_THRESHOLD 0.3         /* 利用率低于30%时触发压缩 */
+#define COMPACT_MIN_FREE_RATIO 0.5    /* chunk空闲率超过50%才参与压缩 */
+#define COMPACT_CHECK_INTERVAL 10     /* 每N次serverCron检查一次 */
 
 /* 动态chunk大小阈值（P0优化后增大以提升性能） */
 #define CHUNK_SIZE_SMALL    (256 * 1024)   /* 256KB：用于≤256B的小对象 */
@@ -55,8 +55,12 @@ typedef struct {
     size_t total_from_pool;     /* 从池中分配的字节数 */
     size_t total_direct;        /* 通过numa_alloc直接分配的字节数 */
     size_t chunks_allocated;    /* 已分配的chunk数量 */
+    size_t chunks_freed;        /* 已释放的chunk数量 */
     size_t pool_hits;           /* 命中内存池的次数（池命中） */
     size_t pool_misses;         /* 未命中内存池、直接分配的次数 */
+    size_t free_list_hits;      /* free_list复用成功的次数 */
+    size_t free_list_misses;    /* free_list未命中的次数 */
+    size_t free_list_length;    /* 当前free_list总条目数（快照） */
 } numa_pool_stats_t;
 
 /* 初始化所有NUMA节点的内存池

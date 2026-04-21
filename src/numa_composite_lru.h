@@ -12,6 +12,7 @@
 #ifndef NUMA_COMPOSITE_LRU_H
 #define NUMA_COMPOSITE_LRU_H
 
+#include "sds.h"
 #include "numa_strategy_slots.h"
 #include "dict.h"
 #include <stdint.h>
@@ -47,6 +48,7 @@ typedef struct {
     double   bandwidth_threshold;       /* 带宽饱和阈值（0~1），默认 0.9 */
     double   pressure_threshold;        /* 迁移压力阈值（0~1），默认 0.7 */
     int      auto_migrate_enabled;      /* 1=开启后台自动迁移，0=仅手动触发，默认 1 */
+    int      debug_logging_enabled;     /* 1=打印迁移调试日志，0=关闭 */
 } composite_lru_config_t;
 
 /* ========== 数据结构 ========== */
@@ -63,7 +65,7 @@ typedef struct {
 
 /* 热点候选池条目（环形缓冲区元素）*/
 typedef struct {
-    void    *key;                       /* Key 指针（robj*） */
+    sds      key;                       /* Key 名称（SDS） */
     void    *val;                       /* Value 指针（用于重读 PREFIX 热度）*/
     int      target_node;               /* 写入时的目标节点（CPU 所在节点）*/
     uint8_t  hotness_snapshot;          /* 写入时热度快照（仅用于优先级排序，执行前重读）*/

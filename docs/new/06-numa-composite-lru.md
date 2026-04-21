@@ -4,7 +4,7 @@
 
 `numa_composite_lru.c/h` 实现了本项目的默认 NUMA 迁移策略——Composite LRU。它结合了 Redis 原生 LRU 机制和 NUMA 感知迁移决策，通过**双通道架构**实现高效的跨节点数据迁移。
 
-**版本**：v2.4
+**版本**：v3.0
 
 ## 设计思想
 
@@ -40,13 +40,13 @@ graph TB
     subgraph "执行路径（每秒 serverCron）"
         F[快速通道: 处理候选池] --> G{重读热度仍 >= 阈值?}
         G -->|是| H{目标节点资源可用?}
-        H -->|是| I[numa_migrate_single_key 热拉回]
+        H -->|是| I[numa_migrate_key_by_name 热拉回]
 
         J[扫描通道: 渐进扫描 key_heat_map] --> K{热 Key 在远程?}
         K -->|是| H
         J --> L{冷 Key 在本地 且 本地压力高?}
         L -->|是| M{远程节点资源可用?}
-        M -->|是| N[numa_migrate_single_key 冷推出]
+        M -->|是| N[numa_migrate_key_by_name 冷推出]
     end
 ```
 
@@ -72,6 +72,7 @@ typedef struct {
     double   bandwidth_threshold;       // 带宽饱和阈值（0~1），默认 0.9
     double   pressure_threshold;        // 迁移压力阈值（0~1），默认 0.7
     int      auto_migrate_enabled;      // 1=开启自动迁移，0=仅手动，默认 1
+    int      debug_logging_enabled;     // 1=打印迁移调试日志，0=关闭，默认 0
 } composite_lru_config_t;
 ```
 
@@ -92,18 +93,20 @@ typedef struct {
 
 ```c
 typedef struct {
-    void    *key;                       // Key 指针（robj*）
+    sds      key;                       // Key 名称（SDS 副本，通过 sdsdup 创建）
     void    *val;                       // Value 指针（用于重读 PREFIX 热度）
     int      target_node;               // 迁移目标节点（compute_target_node 计算）
     uint8_t  hotness_snapshot;          // 写入时热度快照（仅用于排序）
 } hot_candidate_t;
 ```
 
+> **v3.0 变更**：`key` 字段从 `void *`（裸指针）改为 `sds`（SDS 副本）。写入候选池时调用 `sdsdup()` 创建独立副本，处理/清空候选池时调用 `sdsfree()` 释放。这解决了原设计中 `serverCron` 执行迁移时原始 SDS 可能已失效的悬空指针问题。
+
 ### 策略私有数据
 
 ```c
 typedef struct {
-    redisDb *db;                            // 数据库上下文（用于实际迁移调用）
+    redisDb *db;                            // 数据库上下文（在 lookupKey 中动态绑定）
     composite_lru_config_t config;           // 运行时配置
 
     // 快速通道
@@ -129,6 +132,8 @@ typedef struct {
     uint64_t migrations_bw_blocked;          // 因带宽饱和被阻止的迁移次数
 } composite_lru_data_t;
 ```
+
+> **`db` 绑定机制**：`composite_lru_data_t->db` 在初始化时为 `NULL`，由 `lookupKey()` 路径动态绑定。`db.c:lookupKey` 每次命中时检查 `data->db != db`，若不同则更新为当前 `redisDb *db`。这确保 `composite_lru_execute()` 在 `serverCron` 中执行迁移时拥有有效的数据库指针。
 
 ## 阶梯式惰性衰减
 
@@ -230,10 +235,14 @@ for each candidate:
     if (cur_hotness >= effective_threshold && mem_node != cand->target_node) {
         // 检查目标节点资源
         if (check_resource_status(cand->target_node) == RESOURCE_AVAILABLE) {
-            // 实际迁移：调用 numa_migrate_single_key()
-            numa_migrate_single_key(data->db, cand->key, cand->target_node);
+            // 实际迁移：调用 numa_migrate_key_by_name()
+            // 候选池存储的是 sds key name（sdsdup 副本），直接用于 dictFind
+            numa_migrate_key_by_name(data->db, (const char *)cand->key, cand->target_node);
         }
     }
+    // 处理后释放 sds 副本
+    sdsfree(cand->key);
+    cand->key = NULL;
 ```
 
 ### 扫描通道（渐进扫描 + 冷 Key 推出）
@@ -247,7 +256,7 @@ for each entry in key_heat_map (batch_size per tick):
     // 路径 A：热 Key 拉回本地
     if (hotness >= threshold && preferred_node >= 0 && current_node != preferred_node) {
         if (check_resource_status(preferred_node) == AVAILABLE) {
-            numa_migrate_single_key(db, key, preferred_node);
+            numa_migrate_key_by_name(db, dictGetKey(de), preferred_node);
         }
         continue;
     }
@@ -256,7 +265,7 @@ for each entry in key_heat_map (batch_size per tick):
     if (demote_enabled && current_node == local_node && hotness < threshold) {
         target = (local_node == 0) ? 1 : 0;
         if (check_resource_status(target) == AVAILABLE) {
-            numa_migrate_single_key(db, key, target);
+            numa_migrate_key_by_name(db, dictGetKey(de), target);
         }
     }
 ```
@@ -320,12 +329,21 @@ void composite_lru_record_access(strategy, key, val) {
     "scan_batch_size": 500,
     "decay_threshold_sec": 10,
     "auto_migrate_enabled": 1,
+    "debug_logging_enabled": 0,
     "overload_threshold": 0.8,
     "bandwidth_threshold": 0.9,
     "pressure_threshold": 0.7,
-    "stability_count": 3
+    "stability_count": 3,
+    "max_bandwidth_node0_mbps": 51000,
+    "max_bandwidth_node1_mbps": 12000
 }
 ```
+
+| 字段 | 说明 |
+|------|------|
+| `debug_logging_enabled` | 1=打印 access/resource/fast-path/scan/key-migrate 调试日志，0=关闭。生产环境务必关闭，否则高频日志严重影响吞吐。 |
+| `max_bandwidth_node0_mbps` | Node 0 基线最大带宽（MB/s），用于带宽利用率计算 |
+| `max_bandwidth_node1_mbps` | Node 1 基线最大带宽（MB/s） |
 
 ### 加载命令
 
@@ -374,7 +392,7 @@ graph LR
 
     C --> J[快速通道: 热拉回]
     C --> K[扫描通道: 热拉回 + 冷推出]
-    J --> L[numa_migrate_single_key]
+    J --> L[numa_migrate_key_by_name]
     K --> L
 ```
 

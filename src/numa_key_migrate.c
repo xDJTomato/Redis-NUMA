@@ -301,29 +301,29 @@ void numa_perform_heat_decay(void) {
 
 /* 迁移 STRING 类型 */
 int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
-    (void)key_obj;  /* 未使用参数 */
-    (void)target_node;  /* sds分配时不直接使用 */
-    
-    if (val_obj->encoding != OBJ_ENCODING_RAW && 
+    (void)key_obj;
+
+    if (val_obj->encoding != OBJ_ENCODING_RAW &&
         val_obj->encoding != OBJ_ENCODING_EMBSTR) {
-        /* 整数编码，无需迁移 */
         return NUMA_KEY_MIGRATE_OK;
     }
-    
+
     sds old_str = val_obj->ptr;
-    
-    /* 创建新sds（使用标准分配，处理复杂SDS头部结构） */
-    sds new_str = sdsnewlen(old_str, sdslen(old_str));
-    if (!new_str) {
+    size_t total = sdsAllocSize(old_str);
+    void *old_base = sdsAllocPtr(old_str);
+    ptrdiff_t str_offset = (char *)old_str - (char *)old_base;
+
+    void *new_base = numa_zmalloc_onnode(total, target_node);
+    if (!new_base) {
         return NUMA_KEY_MIGRATE_ENOMEM;
     }
-    
-    /* 更新指针 */
+
+    memcpy(new_base, old_base, total);
+    sds new_str = (char *)new_base + str_offset;
     val_obj->ptr = new_str;
-    
-    /* 释放旧内存 */
     sdsfree(old_str);
-    
+
+    numa_set_node_id(val_obj, target_node);
     return NUMA_KEY_MIGRATE_OK;
 }
 
@@ -800,7 +800,82 @@ int numa_migrate_single_key(redisDb *db, robj *key, int target_node) {
     global_ctx.stats.total_migration_time_us += (get_current_time_us() - start_time);
     
     pthread_mutex_unlock(&global_ctx.mutex);
-    
+
+    return result;
+}
+
+int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node) {
+    if (!global_ctx.initialized || !db || !keyname) {
+        KEY_MIGRATE_LOG(LL_DEBUG,
+            "[NUMA Key Migrate][debug] by-name rejected initialized=%d db=%p key=%p target=%d",
+            global_ctx.initialized, (void *)db, (const void *)keyname, target_node);
+        return NUMA_KEY_MIGRATE_EINVAL;
+    }
+
+    if (target_node < 0 || target_node > numa_max_node()) {
+        KEY_MIGRATE_LOG(LL_DEBUG,
+            "[NUMA Key Migrate][debug] by-name invalid target key=%s target=%d max=%d",
+            keyname, target_node, numa_max_node());
+        return NUMA_KEY_MIGRATE_EINVAL;
+    }
+
+    dictEntry *de = dictFind(db->dict, keyname);
+    if (!de) {
+        KEY_MIGRATE_LOG(LL_DEBUG,
+            "[NUMA Key Migrate][debug] by-name lookup miss key=%s target=%d",
+            keyname, target_node);
+        return NUMA_KEY_MIGRATE_ENOENT;
+    }
+
+    robj *val = dictGetVal(de);
+    if (!val) {
+        KEY_MIGRATE_LOG(LL_DEBUG,
+            "[NUMA Key Migrate][debug] by-name null value key=%s target=%d",
+            keyname, target_node);
+        return NUMA_KEY_MIGRATE_ENOENT;
+    }
+
+    uint64_t start_time = get_current_time_us();
+    int result = NUMA_KEY_MIGRATE_OK;
+
+    KEY_MIGRATE_LOG(LL_DEBUG,
+        "[NUMA Key Migrate][debug] by-name begin key=%s type=%d encoding=%d ptr=%p target=%d",
+        keyname, val->type, val->encoding, val->ptr, target_node);
+
+    switch (val->type) {
+        case OBJ_STRING:
+            result = migrate_string_type(NULL, val, target_node);
+            break;
+        case OBJ_HASH:
+            result = migrate_hash_type(NULL, val, target_node);
+            break;
+        case OBJ_LIST:
+            result = migrate_list_type(NULL, val, target_node);
+            break;
+        case OBJ_SET:
+            result = migrate_set_type(NULL, val, target_node);
+            break;
+        case OBJ_ZSET:
+            result = migrate_zset_type(NULL, val, target_node);
+            break;
+        default:
+            result = NUMA_KEY_MIGRATE_ETYPE;
+    }
+
+    KEY_MIGRATE_LOG(LL_DEBUG,
+        "[NUMA Key Migrate][debug] by-name end key=%s result=%d elapsed_us=%llu",
+        keyname, result, (unsigned long long)(get_current_time_us() - start_time));
+
+    pthread_mutex_lock(&global_ctx.mutex);
+    global_ctx.stats.total_migrations++;
+    if (result == NUMA_KEY_MIGRATE_OK) {
+        global_ctx.stats.successful_migrations++;
+    } else {
+        global_ctx.stats.failed_migrations++;
+    }
+    global_ctx.stats.total_migration_time_us += (get_current_time_us() - start_time);
+    pthread_mutex_unlock(&global_ctx.mutex);
+
     return result;
 }
 

@@ -13,11 +13,11 @@
 workload=site.ycsb.workloads.CoreWorkload
 
 # 数据规模
-recordcount=2500000
-operationcount=2000000
+recordcount=800000
+operationcount=5000000
 
 # 并发线程
-threadcount=32
+threadcount=64
 
 # 操作比例 (Phase 2: 热点读密集)
 readproportion=0.8

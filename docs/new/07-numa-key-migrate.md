@@ -103,7 +103,7 @@ int numa_key_migrate_init(void);
 void numa_key_migrate_cleanup(void);
 ```
 
-### 单 Key 迁移
+### 单 Key 迁移（按 robj 指针）
 
 ```c
 int numa_migrate_single_key(redisDb *db, robj *key, int target_node);
@@ -115,6 +115,23 @@ int numa_migrate_single_key(redisDb *db, robj *key, int target_node);
 - `target_node`: 目标 NUMA 节点 ID
 
 **返回**：`NUMA_KEY_MIGRATE_OK` 或错误码
+
+> 该接口用于 `NUMA MIGRATE KEY` 手动命令，内部通过 `dictFind(db->dict, key->ptr)` 查找。
+
+### 按 Key Name 迁移（SDS 字符串）
+
+```c
+int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node);
+```
+
+**参数**：
+- `db`: Redis 数据库实例
+- `keyname`: Key 名称（SDS / const char*）
+- `target_node`: 目标 NUMA 节点 ID
+
+**返回**：`NUMA_KEY_MIGRATE_OK` 或错误码
+
+> **v3.0 新增**。该接口用于 Composite LRU 自动迁移路径。候选池存储的是 `sdsdup` 出来的 key name 副本，直接传给 `dictFind(db->dict, keyname)` 查找 value，再按类型调用迁移适配器。与 `numa_migrate_single_key` 共享同一套类型适配器（`migrate_string_type` 等），区别仅在于查找方式。
 
 ### 批量迁移
 
@@ -142,24 +159,32 @@ int numa_migrate_entire_database(redisDb *db, int target_node);
 
 ```c
 int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
-    // 1. 计算内存大小
-    size_t size = sdslen(val_obj->ptr) + 1;
+    // 跳过非 RAW/EMBSTR 编码（整数编码无需迁移）
+    if (val_obj->encoding != OBJ_ENCODING_RAW &&
+        val_obj->encoding != OBJ_ENCODING_EMBSTR)
+        return NUMA_KEY_MIGRATE_OK;
 
-    // 2. 在目标节点分配新内存
-    void *new_ptr = zmalloc_onnode(size, target_node);
+    sds old_str = val_obj->ptr;
+    size_t total = sdsAllocSize(old_str);           // 整个 SDS 分配块大小
+    void *old_base = sdsAllocPtr(old_str);          // SDS 原始指针（含 PREFIX）
+    ptrdiff_t str_offset = (char *)old_str - (char *)old_base;
 
-    // 3. 复制数据
-    memcpy(new_ptr, val_obj->ptr, size);
+    // 1. 在目标节点分配新内存（通过 numa_zmalloc_onnode，走 Direct 路径）
+    void *new_base = numa_zmalloc_onnode(total, target_node);
+    if (!new_base) return NUMA_KEY_MIGRATE_ENOMEM;
 
-    // 4. 原子指针切换
-    val_obj->ptr = new_ptr;
+    // 2. 完整复制（含 SDS header）
+    memcpy(new_base, old_base, total);
 
-    // 5. 释放旧内存
-    zfree(old_ptr);
+    // 3. 重新计算 SDS 指针并原子切换
+    sds new_str = (char *)new_base + str_offset;
+    val_obj->ptr = new_str;
 
-    // 6. 更新 PREFIX 中的 node_id
-    numa_set_key_node(val_obj, target_node);
+    // 4. 释放旧内存（sdsfree -> zfree -> 根据 PREFIX 路由到 Pool/Slab/Direct）
+    sdsfree(old_str);
 
+    // 5. 更新 PREFIX 中的 node_id
+    numa_set_node_id(val_obj, target_node);
     return NUMA_KEY_MIGRATE_OK;
 }
 ```
@@ -407,9 +432,9 @@ Redis 主线程处理所有客户端命令，迁移操作：
 ```
 composite_lru_execute()
     │
-    ├── 快速通道 ──► numa_migrate_single_key()
+    ├── 快速通道 ──► numa_migrate_key_by_name()  (SDS key name)
     │
-    └── 兜底通道 ──► numa_migrate_single_key()
+    └── 兜底通道 ──► numa_migrate_key_by_name()  (SDS key name)
 ```
 
 ### 被统一命令接口调用
@@ -417,7 +442,7 @@ composite_lru_execute()
 ```
 numa_command.c
     │
-    ├── NUMA MIGRATE KEY ──► numa_migrate_single_key()
+    ├── NUMA MIGRATE KEY ──► numa_migrate_single_key()  (robj* key)
     ├── NUMA MIGRATE DB  ──► numa_migrate_entire_database()
     └── NUMA MIGRATE SCAN ──► composite_lru_scan_once()
 ```

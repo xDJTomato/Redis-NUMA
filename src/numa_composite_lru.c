@@ -26,7 +26,6 @@
 #define _serverLog(level, fmt, ...) printf("[%s] " fmt "\n", level, ##__VA_ARGS__)
 #else
 extern void _serverLog(int level, const char *fmt, ...);
-extern struct redisServer server;
 #define LL_DEBUG 0
 #define LL_VERBOSE 1
 #define LL_NOTICE 2
@@ -63,20 +62,6 @@ static uint8_t compute_lazy_decay_steps(uint16_t elapsed_secs) {
 static int get_current_numa_node(void) {
     if (numa_available() < 0) return 0;
     return numa_node_of_cpu(sched_getcpu());
-}
-
-/*
- * compute_target_node - 选择迁移目标节点
- *
- * CXL 场景：热 key 拉回本地 DRAM，冷 key 推到远程 CXL。
- * 策略：
- *   - key 在远程节点 → 拉回本地（current_node），减少远程访问延迟
- *   - key 已在本地   → 无需迁移（返回 -1，跳过）
- */
-static int compute_target_node(int mem_node, int current_node) {
-    if (mem_node != current_node)
-        return current_node;   /* 远程热 key → 拉回本地 */
-    return -1;                 /* 本地 key → 不迁移 */
 }
 
 /* ========== 热度图字典回调 ========== */
@@ -129,6 +114,7 @@ void composite_lru_config_defaults(composite_lru_config_t *cfg) {
     cfg->bandwidth_threshold       = 0.9;
     cfg->pressure_threshold        = 0.7;
     cfg->auto_migrate_enabled      = 1;
+    cfg->debug_logging_enabled     = 0;
 }
 
 /*
@@ -194,6 +180,8 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
             out->pressure_threshold = atof(v);
         } else if (strcmp(k, "auto_migrate_enabled") == 0) {
             out->auto_migrate_enabled = atoi(v);
+        } else if (strcmp(k, "debug_logging_enabled") == 0) {
+            out->debug_logging_enabled = atoi(v);
         } else if (strncmp(k, "max_bandwidth_node", 18) == 0) {
             /* 解析 max_bandwidth_nodeX_mbps, X=节点号 */
             int node_id = atoi(k + 18);  /* "max_bandwidth_node" 后面的数字 */
@@ -257,6 +245,11 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
     /* 1. 内存过载检查 */
     double pressure = numaGetNodePressure(node_id);
     if (pressure >= data->config.overload_threshold) {
+        if (data->config.debug_logging_enabled) {
+            _serverLog(LL_NOTICE,
+                "[Composite LRU][debug] resource target=%d pressure=%.2f bw=%.2f combined=%.2f decision=OVERLOADED",
+                node_id, pressure, numa_bw_get_usage(node_id), pressure * 0.6 + numa_bw_get_usage(node_id) * 0.4);
+        }
         _serverLog(LL_DEBUG,
             "[Composite LRU] Node %d resource check: OVERLOADED (pressure=%.2f >= %.2f)",
             node_id, pressure, data->config.overload_threshold);
@@ -266,6 +259,11 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
     /* 2. 带宽饱和检查（实时采样数据） */
     double bw_usage = numa_bw_get_usage(node_id);
     if (bw_usage >= data->config.bandwidth_threshold) {
+        if (data->config.debug_logging_enabled) {
+            _serverLog(LL_NOTICE,
+                "[Composite LRU][debug] resource target=%d pressure=%.2f bw=%.2f combined=%.2f decision=BW_SATURATED",
+                node_id, pressure, bw_usage, pressure * 0.6 + bw_usage * 0.4);
+        }
         _serverLog(LL_DEBUG,
             "[Composite LRU] Node %d resource check: BW_SATURATED (bw=%.2f >= %.2f)",
             node_id, bw_usage, data->config.bandwidth_threshold);
@@ -275,10 +273,21 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
     /* 3. 综合迁移压力检查（内存 60% + 带宽 40%） */
     double combined = pressure * 0.6 + bw_usage * 0.4;
     if (combined >= data->config.pressure_threshold) {
+        if (data->config.debug_logging_enabled) {
+            _serverLog(LL_NOTICE,
+                "[Composite LRU][debug] resource target=%d pressure=%.2f bw=%.2f combined=%.2f decision=MIGRATION_PRESSURE",
+                node_id, pressure, bw_usage, combined);
+        }
         _serverLog(LL_DEBUG,
             "[Composite LRU] Node %d resource check: MIGRATION_PRESSURE (combined=%.2f >= %.2f)",
             node_id, combined, data->config.pressure_threshold);
         return RESOURCE_MIGRATION_PRESSURE;
+    }
+
+    if (data->config.debug_logging_enabled) {
+        _serverLog(LL_NOTICE,
+            "[Composite LRU][debug] resource target=%d pressure=%.2f bw=%.2f combined=%.2f decision=AVAILABLE",
+            node_id, pressure, bw_usage, combined);
     }
 
     return RESOURCE_AVAILABLE;
@@ -332,53 +341,31 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
         data->heat_updates++;
 
         /*
-         * 同步写入 key_heat_map：扫描通道依赖此字典发现热 key。
-         * 热度 >= 阈值时写入或更新，低于阈值时仅更新已有条目。
+         * 快速通道写入条件：
+         *   1. 内存在远程节点（mem_node != current_node）
+         *   2. 本次访问恰好越过阈值（before < threshold <= after）
          */
         uint8_t thr = data->config.migrate_hotness_threshold;
-        {
-            composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
-            if (info) {
-                info->hotness         = hotness;
-                info->last_access     = current_time;
-                info->access_count++;
-                info->current_node    = mem_node;
-            } else if (hotness >= thr) {
-                info = zmalloc(sizeof(*info));
-                if (info) {
-                    info->hotness         = hotness;
-                    info->stability_counter = 0;
-                    info->last_access     = current_time;
-                    info->access_count    = 1;
-                    info->current_node    = mem_node;
-                    info->preferred_node  = -1;
-                    dictAdd(data->key_heat_map, key, info);
-                }
-            }
+        if (data->config.debug_logging_enabled) {
+            _serverLog(LL_NOTICE,
+                "[Composite LRU][debug] access key=%p val=%p mem_node=%d cpu_node=%d hotness_before=%u hotness_after=%u threshold=%u crossed=%d",
+                key, val, mem_node, current_node, hotness_before, hotness, thr,
+                (mem_node != current_node && hotness_before < thr && hotness >= thr));
         }
-
-        /*
-         * 快速通道写入条件：
-         *   1. 本次访问恰好越过阈值（before < threshold <= after）
-         *   2. key 在远程节点（需要拉回本地）
-         *
-         * target_node = current_node（拉回本地）。
-         * 本地 key 不需要入候选池。
-         */
-        int target = compute_target_node(mem_node, current_node);
-        if (target >= 0 && hotness_before < thr && hotness >= thr) {
+        if (mem_node != current_node &&
+            hotness_before < thr && hotness >= thr) {
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
-            data->hot_candidates[idx].key             = key;
+            data->hot_candidates[idx].key             = sdsdup((sds)key);
             data->hot_candidates[idx].val             = val;
-            data->hot_candidates[idx].target_node     = target;
+            data->hot_candidates[idx].target_node     = current_node;
             data->hot_candidates[idx].hotness_snapshot = hotness;
             data->candidates_head++;
             if (data->candidates_count < data->config.hot_candidates_size)
                 data->candidates_count++;
             data->candidates_written++;
             _serverLog(LL_VERBOSE,
-                "[Composite LRU] Candidate written: val=%p mem_node=%d cpu_node=%d hotness=%d target=%d",
-                val, mem_node, current_node, hotness, target);
+                "[Composite LRU] Candidate written: val=%p mem_node=%d cpu_node=%d hotness=%d",
+                val, mem_node, current_node, hotness);
         }
     } else {
         /* ---- 字典回退路径（val 为 NULL 时） ---- */
@@ -418,15 +405,15 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             info->hotness++;
         info->stability_counter = 0;
 
-        /* 字典路径候选池写入（热度刚越过阈值且 key 在远程节点） */
+        /* 字典路径候选池写入（热度刚越过阈值且是远程访问） */
         uint8_t thr = data->config.migrate_hotness_threshold;
-        int target = compute_target_node(info->current_node, current_node);
-        if (target >= 0 && hotness_before < thr && info->hotness >= thr) {
-            info->preferred_node = target;
+        if (info->current_node != current_node &&
+            hotness_before < thr && info->hotness >= thr) {
+            info->preferred_node = current_node;
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
-            data->hot_candidates[idx].key             = key;
+            data->hot_candidates[idx].key             = sdsdup((sds)key);
             data->hot_candidates[idx].val             = NULL;  /* 字典路径无 val 指针 */
-            data->hot_candidates[idx].target_node     = target;
+            data->hot_candidates[idx].target_node     = current_node;
             data->hot_candidates[idx].hotness_snapshot = info->hotness;
             data->candidates_head++;
             if (data->candidates_count < data->config.hot_candidates_size)
@@ -498,18 +485,12 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
     uint8_t  thr = data->config.migrate_hotness_threshold;
     dictEntry *de;
 
-    /* 判断当前节点压力，高压力时启用冷 key 推出 */
-    int current_node = get_current_numa_node();
-    double local_pressure = numaGetNodePressure(current_node);
-    int demote_enabled = (numa_available() >= 0 && numa_max_node() >= 1 &&
-                          local_pressure >= data->config.overload_threshold);
-
     while (scanned < batch_size && (de = dictNext(data->scan_iter)) != NULL) {
         composite_lru_heat_info_t *info = dictGetVal(de);
         scanned++;
         data->scan_keys_checked++;
 
-        /* 路径 A：热 key 拉回本地（preferred_node 已由候选池设置） */
+        /* 执行时重读热度（不依赖快照） */
         if (info->hotness >= thr &&
             info->preferred_node >= 0 &&
             info->current_node != info->preferred_node) {
@@ -520,42 +501,21 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
             }
             if (status == RESOURCE_AVAILABLE) {
                 _serverLog(LL_VERBOSE,
-                    "[Composite LRU] Scan migrate (hot pull): key=%p node=%d->%d hotness=%d",
+                    "[Composite LRU] Scan migrate (dict): key=%p node=%d->%d hotness=%d",
                     dictGetKey(de), info->current_node, info->preferred_node, info->hotness);
                 int rc = -1;
                 if (data->db) {
-                    rc = numa_migrate_single_key(data->db, (robj *)dictGetKey(de),
-                                                 info->preferred_node);
+                    rc = numa_migrate_key_by_name(data->db,
+                             (const char *)dictGetKey(de), info->preferred_node);
+                }
+                if (data->config.debug_logging_enabled) {
+                    _serverLog(LL_NOTICE,
+                        "[Composite LRU][debug] scan key=%p current_node=%d preferred_node=%d hotness=%u rc=%d",
+                        dictGetKey(de), info->current_node, info->preferred_node, info->hotness, rc);
                 }
                 if (rc == 0) {
                     info->current_node = info->preferred_node;
                     info->preferred_node = -1;
-                    data->migrations_completed++;
-                } else {
-                    data->migrations_failed++;
-                }
-                data->migrations_triggered++;
-                migrated++;
-            }
-            continue;
-        }
-
-        /* 路径 B：冷 key 推出到远程（本地节点压力高时） */
-        if (demote_enabled &&
-            info->current_node == current_node &&
-            info->hotness < thr) {
-            int target = (current_node == 0) ? 1 : 0;
-            int status = check_resource_status(data, target);
-            if (status == RESOURCE_AVAILABLE) {
-                _serverLog(LL_VERBOSE,
-                    "[Composite LRU] Scan migrate (cold demote): key=%p node=%d->%d hotness=%d",
-                    dictGetKey(de), current_node, target, info->hotness);
-                int rc = -1;
-                if (data->db) {
-                    rc = numa_migrate_single_key(data->db, (robj *)dictGetKey(de), target);
-                }
-                if (rc == 0) {
-                    info->current_node = target;
                     data->migrations_completed++;
                 } else {
                     data->migrations_failed++;
@@ -608,14 +568,6 @@ int composite_lru_init(numa_strategy_t *strategy) {
     }
 
     data->last_decay_time = get_current_time_us();
-
-    /* 设置数据库上下文，供迁移调用使用 */
-#ifndef NUMA_STRATEGY_STANDALONE
-    data->db = server.db;
-#else
-    data->db = NULL;
-#endif
-
     strategy->private_data = data;
 
     _serverLog(LL_NOTICE,
@@ -689,7 +641,11 @@ int composite_lru_execute(numa_strategy_t *strategy) {
         } else {
             /* 字典路径：从 heat_map 重读 */
             composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, cand->key);
-            if (!info) { cand->key = NULL; continue; }
+            if (!info) {
+                sdsfree(cand->key);
+                cand->key = NULL;
+                continue;
+            }
             cur_hotness = info->hotness;
             mem_node    = info->current_node;
         }
@@ -703,7 +659,6 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                 "[Composite LRU] Source node %d bw=%.2f > 0.7, lowering threshold to %d",
                 mem_node, src_bw, effective_threshold);
         }
-
         if (cur_hotness >= effective_threshold && mem_node != cand->target_node) {
             int status = check_resource_status(data, cand->target_node);
             if (status == RESOURCE_BANDWIDTH_SATURATED) {
@@ -714,25 +669,34 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                     "[Composite LRU] Fast-path migrate: key=%p node=%d->%d hotness=%d",
                     cand->key, mem_node, cand->target_node, cur_hotness);
                 if (data->db && cand->key) {
-                    int rc = numa_migrate_single_key(data->db, (robj *)cand->key,
-                                                     cand->target_node);
+                    if (data->config.debug_logging_enabled) {
+                        _serverLog(LL_NOTICE,
+                            "[Composite LRU][debug] fast invoke db=%p key=%p val=%p target=%d",
+                            (void *)data->db, cand->key, cand->val, cand->target_node);
+                    }
+                    int rc = numa_migrate_key_by_name(data->db,
+                                 (const char *)cand->key, cand->target_node);
+                    if (data->config.debug_logging_enabled) {
+                        _serverLog(LL_NOTICE,
+                            "[Composite LRU][debug] fast key=%p val=%p mem_node=%d target_node=%d hotness=%u threshold=%d rc=%d",
+                            cand->key, cand->val, mem_node, cand->target_node, cur_hotness, effective_threshold, rc);
+                    }
                     if (rc == 0) {
                         data->migrations_completed++;
-                        _serverLog(LL_VERBOSE,
-                            "[Composite LRU] Fast-path migrated (actual): key=%p node=%d->%d",
-                            cand->key, mem_node, cand->target_node);
                     } else {
                         data->migrations_failed++;
-                        _serverLog(LL_DEBUG,
-                            "[Composite LRU] Fast-path migrate failed: key=%p rc=%d",
-                            cand->key, rc);
                     }
+                } else if (data->config.debug_logging_enabled) {
+                    _serverLog(LL_NOTICE,
+                        "[Composite LRU][debug] fast skipped db=%p key=%p val=%p target=%d",
+                        (void *)data->db, cand->key, cand->val, cand->target_node);
                 }
                 data->migrations_triggered++;
                 processed++;
             }
         }
         /* 清空已处理槽位 */
+        sdsfree(cand->key);
         cand->key = NULL;
         cand->val = NULL;
     }

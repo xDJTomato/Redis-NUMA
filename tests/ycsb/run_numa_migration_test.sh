@@ -30,8 +30,8 @@ REDIS_CLI="$ROOT_DIR/src/redis-cli"
 # ── 默认参数 ────────────────────────────────────────────────────────────────
 MODE="full"
 REDIS_PORT=6379
-MIGRATION_THRESHOLD=3
-RECORD_COUNT=500000
+MIGRATION_THRESHOLD=2
+RECORD_COUNT=300000
 OPERATION_COUNT=2000000
 THREAD_COUNT=16
 

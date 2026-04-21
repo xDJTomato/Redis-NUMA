@@ -169,7 +169,14 @@ lookupKeyRead(c->db, c->argv[1], flags)
     │     │
     │     └── #ifdef HAVE_NUMA
     │             │
-    │             └── composite_lru_record_access(strategy, key, val)
+    │             ├── 绑定 db 到 Composite LRU（首次或 db 变化时）
+    │             │     composite_lru_data_t *data = clru->private_data;
+    │             │     if (data->db != db) {
+    │             │         data->db = db;  // 动态绑定
+    │             │     }
+    │             │
+    │             └── composite_lru_record_access(strategy, key->ptr, val)
+    │                     │                             ↑ SDS string
     │                     │
     │                     ├── 1. 读取 PREFIX 热度
     │                     │     hotness = numa_get_hotness(val)
@@ -190,8 +197,11 @@ lookupKeyRead(c->db, c->argv[1], flags)
     │                     │     numa_set_last_access(val, now)
     │                     │
     │                     └── 6. 判断是否写入候选池
-    │                           if (首次越过阈值 && 远程节点)
-    │                               add_to_candidates(key, val, target_node, hotness)
+    │                           if (首次越过阈值 && Key 在远程节点)
+    │                               sds key_copy = sdsdup(key);  // 创建独立副本
+    │                               hot_candidates[idx].key = key_copy;
+    │                               hot_candidates[idx].val = val;
+    │                               hot_candidates[idx].target_node = current_cpu_node;
     │
     └── 返回 Value 给客户端
 ```
@@ -292,31 +302,85 @@ numa_strategy_run_all()
     │
     └── composite_lru_execute(strategy)
             │
-            ├── 快速通道
+            ├── 快速通道（候选池处理）
             │     │
-            │     └── process_candidates(data)
+            │     └── for each candidate in hot_candidates:
             │             │
-            │             ├── 遍历候选池
-            │             │     │
-            │             │     ├── 重读 PREFIX 当前热度
-            │             │     │
-            │             │     ├── 检查资源状态
-            │             │     │
-            │             │     └── 满足条件 ──► numa_migrate_single_key()
+            │             ├── 重读 PREFIX 当前热度
+            │             │     cur_hotness = numa_get_hotness(cand->val)
+            │             │     mem_node = numa_get_node_id(cand->val)
             │             │
-            │             └── 清空候选池
+            │             ├── 带宽感知门槛调整
+            │             │     if (src_bw > 0.7) effective_threshold--
+            │             │
+            │             ├── 检查资源状态
+            │             │     status = check_resource_status(cand->target_node)
+            │             │
+            │             ├── 满足条件 ──► 迁移
+            │             │     numa_migrate_key_by_name(data->db, cand->key, cand->target_node)
+            │             │         │        ↑ SDS 副本         ↑ lookupKey 中绑定的 db
+            │             │         │
+            │             │         ├── dictFind(db->dict, keyname)  // 用 SDS 直接查字典
+            │             │         ├── val = dictGetVal(de)
+            │             │         ├── switch (val->type)
+            │             │         │     ├── OBJ_STRING → migrate_string_type(NULL, val, target)
+            │             │         │     ├── OBJ_HASH   → migrate_hash_type(NULL, val, target)
+            │             │         │     ├── OBJ_LIST   → migrate_list_type(NULL, val, target)
+            │             │         │     ├── OBJ_SET    → migrate_set_type(NULL, val, target)
+            │             │         │     └── OBJ_ZSET   → migrate_zset_type(NULL, val, target)
+            │             │         │
+            │             │         └── 更新 global_ctx.stats
+            │             │
+            │             └── 释放 SDS 副本
+            │                   sdsfree(cand->key)
+            │                   cand->key = NULL
             │
-            └── 兜底通道
+            └── 兜底通道（渐进扫描 key_heat_map）
                   │
                   └── composite_lru_scan_once()
                           │
-                          ├── 扫描 key_heat_map
+                          ├── 扫描 key_heat_map（每次 batch_size 个条目）
                           │     │
-                          │     ├── 评估热度
+                          │     ├── 热度 >= 阈值 且 在远程
+                          │     │     └── numa_migrate_key_by_name(data->db, dictGetKey(de), preferred_node)
                           │     │
-                          │     └── 满足条件 ──► numa_migrate_single_key()
+                          │     └── 冷 Key 在本地 且 压力高
+                          │           └── numa_migrate_key_by_name(data->db, dictGetKey(de), remote_node)
                           │
                           └── 更新扫描统计
+```
+
+### migrate_string_type 内部流程
+
+```
+migrate_string_type(NULL, val_obj, target_node)
+    │
+    ├── 1. 获取 SDS 分配信息
+    │     sds old_str = val_obj->ptr
+    │     total = sdsAllocSize(old_str)       // 整个 SDS 块大小
+    │     old_base = sdsAllocPtr(old_str)     // 含 PREFIX 的原始指针
+    │     str_offset = old_str - old_base     // SDS 头偏移
+    │
+    ├── 2. 在目标节点分配新内存
+    │     new_base = numa_zmalloc_onnode(total, target_node)
+    │         └── 走 Direct 分配路径（total 通常 > 4KB）
+    │             └── numa_alloc_onnode(total + PREFIX_SIZE, target_node)
+    │                 └── 写入新 PREFIX: from_pool=0, node_id=target_node
+    │
+    ├── 3. 完整复制
+    │     memcpy(new_base, old_base, total)
+    │
+    ├── 4. 重算 SDS 指针 + 原子切换
+    │     new_str = new_base + str_offset
+    │     val_obj->ptr = new_str              // 此刻生效
+    │
+    ├── 5. 释放旧内存
+    │     sdsfree(old_str)
+    │         └── zfree → numa_free_with_size
+    │             └── 读 old PREFIX: from_pool → 路由到 Pool free_list 或 Direct numa_free
+    │
+    └── 6. 更新节点标记
+          numa_set_node_id(val_obj, target_node)
 ```
 
 ## 内存分配调用链
@@ -490,14 +554,17 @@ zmalloc.c
 ### 迁移路径
 
 ```
-serverCron ──► Composite LRU ──► 选择候选 Key ──► 迁移适配器 ──► 更新指针 ──► 释放旧内存
+serverCron ──► Composite LRU ──► 选择候选 Key (SDS name)
+    ──► numa_migrate_key_by_name ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
 ```
 
 ### 监控路径
 
 ```
-客户端 NUMA MIGRATE STATS ──► 读取全局统计 ──► 返回结果
+客户端 NUMA MIGRATE STATS ──► numa_get_migration_statistics ──► 返回结果
 ```
+
+> **注意**：bw_benchmark 采集脚本使用 `NUMA MIGRATE STATS`（而非 `NUMA CONFIG GET`）获取 `successful_migrations` 计数。
 
 ## 线程安全分析
 

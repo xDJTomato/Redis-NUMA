@@ -6,6 +6,28 @@
 
 **版本**：v3.2-P2
 
+## 已知问题
+
+> 以下 BUG 已确认影响 RSS 膨胀（frag_ratio 从 1.59 飙升到 3.0），尚待修复。
+
+### BUG 1（CRITICAL）：`numa_pool_try_compact` free_list 清理内存泄漏
+
+**位置**：`numa_pool.c:495-502`
+
+`numa_pool_try_compact()` 在清空 free_list 时只调用 `free(free_block)` 释放链表节点结构体，但**未调用 `numa_free(free_block->ptr, free_block->size)` 归还指针指向的实际内存块**。迁移释放的旧 SDS（来自 Pool 路径）进入 free_list 后永不归还 OS，导致 RSS 持续膨胀。
+
+### BUG 2（MODERATE）：`chunk->used_bytes` 在释放时永不递减
+
+**位置**：`numa_pool.c:323-377`
+
+`numa_pool_alloc()` 中 `chunk->used_bytes += size`，但 `numa_pool_free()` 无法反推释放块属于哪个 chunk，故 `used_bytes` 永不递减。这导致 `numa_pool_try_compact` 的低利用率检测（`< COMPACT_THRESHOLD 0.3`）永远不触发，实际已空的 chunk 也无法被回收。
+
+### BUG 3（MINOR）：`numa_pool_free` 节点错配
+
+**位置**：`numa_pool.c:356-358`
+
+释放时使用 `pool_ctx.current_node`（当前 CPU 所在节点）而非 PREFIX 中存储的分配节点 `node_id`，free_block 被挂到错误节点的 free_list。
+
 ## 解决的核心问题
 
 1. **系统调用开销**：每次 `numa_alloc_onnode` 都是昂贵系统调用，高频分配场景性能差

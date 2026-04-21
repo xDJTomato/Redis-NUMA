@@ -47,13 +47,13 @@ SKIP_FILL=false
 NO_RESTART=false
 
 # Phase 参数
-PHASE1_RECORDS=3000000
-PHASE1_FIELD_LENGTH=1800    # 原值 2048，避开 size_class 2048→3072 间隙
+PHASE1_RECORDS=800000
+PHASE1_FIELD_LENGTH=5000
 PHASE1_THREADS=8
-PHASE2_OPS=2000000
-PHASE2_THREADS=16
-PHASE3_OPS=3000000
-PHASE3_THREADS=24
+PHASE2_OPS=5000000
+PHASE2_THREADS=64
+PHASE3_OPS=2500000
+PHASE3_THREADS=64
 
 # YCSB 客户端超时（CXL 高延迟环境需要更长超时）
 YCSB_TIMEOUT_MS=30000
@@ -266,6 +266,7 @@ start_redis() {
     "${numa_cmd[@]}" "$REDIS_SERVER" \
         --port "$REDIS_PORT" \
         --bind "$REDIS_HOST" \
+        --maxmemory "$MAX_MEMORY" \
         --maxmemory-policy allkeys-lru \
         --save "" \
         --appendonly no \
@@ -293,8 +294,8 @@ start_redis() {
 start_collector() {
     local csv_file="$1"
     
-    # 写入 CSV header（含分配路径统计列）
-    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys,slab_bytes,pool_bytes,direct_bytes,slab_count,pool_count,direct_count,chunk_total,chunk_used" > "$csv_file"
+    # 写入 CSV header
+    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys" > "$csv_file"
     
     local prev_ops=0
     local prev_migrate=0
@@ -326,11 +327,15 @@ start_collector() {
             rss_mb=$((${rss_mem:-0} / 1048576))
         fi
         
-        # 采集迁移统计 (尝试从 NUMA CONFIG GET 获取)
+        # 采集迁移统计（从 NUMA MIGRATE STATS 获取）
         local migrate_total=0
-        local numa_info=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG GET 2>/dev/null || echo "")
-        if [[ -n "$numa_info" ]]; then
-            migrate_total=$(echo "$numa_info" | grep -iE "migrations_completed|migration" | head -1 | grep -oP '\d+' | head -1 || echo "0")
+        local migrate_stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" --raw NUMA MIGRATE STATS 2>/dev/null || echo "")
+        if [[ -n "$migrate_stats" ]]; then
+            migrate_total=$(awk '
+                BEGIN { found = 0 }
+                /^successful_migrations$/ { found = 1; next }
+                found { print; exit }
+            ' <<< "$migrate_stats")
         fi
         [[ -z "$migrate_total" ]] && migrate_total=0
         
@@ -354,25 +359,9 @@ start_collector() {
         [[ "${migrate_sec:-0}" -lt 0 ]] 2>/dev/null && migrate_sec=0
         [[ "${n0_delta:-0}" -lt 0 ]] 2>/dev/null && n0_delta=0
         [[ "${n1_delta:-0}" -lt 0 ]] 2>/dev/null && n1_delta=0
-
-        # 采集分配路径统计（NUMA CONFIG STATS 的 alloc_paths 子字段）
-        local alloc_stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG STATS 2>/dev/null || echo "")
-        local slab_bytes=0 pool_bytes=0 direct_bytes=0
-        local slab_count=0 pool_count=0 direct_count=0
-        local chunk_total=0 chunk_used=0
-        if echo "$alloc_stats" | grep -q "alloc_slab_bytes"; then
-            slab_bytes=$(echo "$alloc_stats" | grep -A1 "alloc_slab_bytes" | tail -1 | grep -oP '\d+' || echo "0")
-            pool_bytes=$(echo "$alloc_stats" | grep -A1 "alloc_pool_bytes" | tail -1 | grep -oP '\d+' || echo "0")
-            direct_bytes=$(echo "$alloc_stats" | grep -A1 "alloc_direct_bytes" | tail -1 | grep -oP '\d+' || echo "0")
-            slab_count=$(echo "$alloc_stats" | grep -A1 "alloc_slab_count" | tail -1 | grep -oP '\d+' || echo "0")
-            pool_count=$(echo "$alloc_stats" | grep -A1 "alloc_pool_count" | tail -1 | grep -oP '\d+' || echo "0")
-            direct_count=$(echo "$alloc_stats" | grep -A1 "alloc_direct_count" | tail -1 | grep -oP '\d+' || echo "0")
-            chunk_total=$(echo "$alloc_stats" | grep -A1 "chunk_total_bytes" | tail -1 | grep -oP '\d+' || echo "0")
-            chunk_used=$(echo "$alloc_stats" | grep -A1 "chunk_used_bytes" | tail -1 | grep -oP '\d+' || echo "0")
-        fi
-
+        
         # 写入 CSV
-        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0},${slab_bytes},${pool_bytes},${direct_bytes},${slab_count},${pool_count},${direct_count},${chunk_total},${chunk_used}" >> "$csv_file"
+        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0}" >> "$csv_file"
         
         # 更新前值
         prev_ops=${ops_total:-0}
