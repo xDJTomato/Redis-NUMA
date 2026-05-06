@@ -81,21 +81,16 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
             }
         }
 
-        /* NUMA Composite LRU 热度追踪：记录每次键访问 */
+        /* NUMA Composite LRU 热度追踪：记录每次键访问。
+         * 优化：直接使用 server.lruclock 缓存，避免 gettimeofday() 系统调用；
+         * db 绑定为快速赋值，不作比较/日志。 */
 #ifdef HAVE_NUMA
         {
             numa_strategy_t *clru = numa_strategy_slot_get(1);
-            if (clru && clru->enabled) {
-                if (clru->private_data) {
-                    composite_lru_data_t *data = clru->private_data;
-                    if (data->db != db) {
-                        data->db = db;
-                        serverLog(LL_NOTICE,
-                            "[Composite LRU][debug] bind db id=%d ptr=%p from lookupKey",
-                            db->id, (void *)db);
-                    }
-                }
-                composite_lru_record_access(clru, key->ptr, val);
+            if (clru && clru->enabled && clru->private_data) {
+                ((composite_lru_data_t *)clru->private_data)->db = db;
+                composite_lru_record_access(clru, key->ptr, val,
+                                            (uint16_t)(server.lruclock & 0xFFFF));
             }
         }
 #endif

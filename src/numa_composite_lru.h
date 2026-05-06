@@ -117,7 +117,7 @@ int  composite_lru_execute(numa_strategy_t *strategy);
 void composite_lru_cleanup(numa_strategy_t *strategy);
 
 /* 热度管理 */
-void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val);
+void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, uint16_t lru_clock);
 void composite_lru_decay_heat(composite_lru_data_t *data);
 
 /* JSON 配置加载与应用 */

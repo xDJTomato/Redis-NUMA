@@ -59,9 +59,18 @@ static uint8_t compute_lazy_decay_steps(uint16_t elapsed_secs) {
     return COMPOSITE_LRU_HOTNESS_MAX;
 }
 
+/* CPU NUMA 节点缓存：避免每次 key 访问都调用 sched_getcpu()+numa_node_of_cpu()。
+ * Redis 单线程事件循环中 CPU 绑定不会频繁变化，每 64 次调用刷新一次即可。 */
+#define CACHED_NODE_REFRESH_CALLS 64
 static int get_current_numa_node(void) {
     if (numa_available() < 0) return 0;
-    return numa_node_of_cpu(sched_getcpu());
+    static __thread int  cached_node  = -1;
+    static __thread int  call_counter = 0;
+    if (cached_node >= 0 && (++call_counter & (CACHED_NODE_REFRESH_CALLS - 1)) != 0) {
+        return cached_node;
+    }
+    cached_node = numa_node_of_cpu(sched_getcpu());
+    return cached_node;
 }
 
 /* ========== 热度图字典回调 ========== */
@@ -301,12 +310,14 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
  * 设计原则：只更新热度，不入队。
  * 若本次访问使热度恰好越过阈值，且内存在远程节点，则写入候选池（快速通道）。
  */
-void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val) {
+void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, uint16_t current_time) {
     if (!strategy || !strategy->private_data || !key) return;
+
+    /* 单节点快速短路：无 NUMA 远端访问可能，PREFIX 热度追踪无意义 */
+    if (numa_pool_num_nodes() <= 1) return;
 
     composite_lru_data_t *data = strategy->private_data;
     int current_node = get_current_numa_node();
-    uint16_t current_time = get_lru_clock();
 
     if (val) {
         /* ---- PREFIX 路径（主路径）---- */
@@ -335,8 +346,18 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             numa_set_hotness(val, hotness);
         }
 
-        /* 更新 PREFIX 访问统计 */
-        numa_increment_access_count(val);
+        /* 更新 PREFIX 访问统计。
+         * 优化：本地访问且热度已达 MAX 时，跳过 access_count 累加，
+         * 仅更新 last_access 供衰减结算使用。 */
+        uint8_t is_local = (mem_node == current_node);
+        if (is_local && hotness >= COMPOSITE_LRU_HOTNESS_MAX) {
+            uint8_t ac = numa_get_access_count(val);
+            if (ac < UINT8_MAX) {
+                numa_increment_access_count(val);
+            }
+        } else {
+            numa_increment_access_count(val);
+        }
         numa_set_last_access(val, current_time);
         data->heat_updates++;
 

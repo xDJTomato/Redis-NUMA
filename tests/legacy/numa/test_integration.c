@@ -45,7 +45,7 @@ void test_composite_lru_with_prefix() {
     printf("\nSimulating 5 local accesses per key...\n");
     for (int round = 0; round < 5; round++) {
         for (int i = 0; i < 5; i++) {
-            composite_lru_record_access(strategy, &keys[i], keys[i].val);
+            composite_lru_record_access(strategy, &keys[i], keys[i].val, 0);
         }
     }
     
@@ -101,7 +101,7 @@ void test_migration_trigger() {
     
     /* Access from "remote" node simulation - should trigger migration consideration */
     printf("Simulating remote access...\n");
-    composite_lru_record_access(strategy, &hot_key, hot_key.val);
+    composite_lru_record_access(strategy, &hot_key, hot_key.val, 0);
     
     /* Check if pending migration was created */
     printf("Hotness after access: %d\n", numa_get_hotness(hot_key.val));
@@ -134,7 +134,7 @@ void test_legacy_fallback() {
     printf("Recording accesses with val=NULL (legacy mode)...\n");
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) {
-            composite_lru_record_access(strategy, &keys[i], keys[i].val);
+            composite_lru_record_access(strategy, &keys[i], keys[i].val, 0);
         }
     }
     
