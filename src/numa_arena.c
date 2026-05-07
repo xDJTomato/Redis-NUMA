@@ -300,6 +300,7 @@ static int bin_refill(numa_bin_t *bin, int node, int class_idx,
         if (!ptr) break;
         tcache_bin->stack[i] = ptr;
     }
+    tcache_bin->count = i;  /* 设置缓存计数 */
     pthread_mutex_unlock(&bin->lock);
     return i; /* 实际填充数 */
 }
