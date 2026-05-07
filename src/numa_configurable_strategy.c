@@ -63,10 +63,11 @@ static int init_runtime_state(int num_nodes) {
     g_runtime_state.config.auto_rebalance = 1;
     g_runtime_state.config.rebalance_interval_us = 5000000; /* 5秒 */
     
-    /* 分配权重数组 */
+    /* 分配权重数组（权重不需要原子性，仅 WEIGHTED 策略持锁读取） */
     g_runtime_state.config.node_weights = zcalloc(num_nodes * sizeof(int));
-    g_runtime_state.allocation_counters = zcalloc(num_nodes * sizeof(int));
-    g_runtime_state.bytes_allocated_per_node = zcalloc(num_nodes * sizeof(size_t));
+    /* 原子计数器数组：元素类型为 redisAtomic int/size_t */
+    g_runtime_state.allocation_counters = zcalloc(num_nodes * sizeof(redisAtomic int));
+    g_runtime_state.bytes_allocated_per_node = zcalloc(num_nodes * sizeof(redisAtomic size_t));
     
     if (!g_runtime_state.config.node_weights || 
         !g_runtime_state.allocation_counters || 
@@ -87,13 +88,12 @@ static int init_runtime_state(int num_nodes) {
  *   - LOCAL_FIRST / INTERLEAVE / ROUND_ROBIN / CXL_OPTIMIZED: 完全无锁
  *   - WEIGHTED: 短暂持锁复制权重数组，计算在锁外完成
  *   - PRESSURE_AWARE: 无锁（读取外部节点利用率数据）
- * 统计计数器使用 __atomic_fetch_add 无锁更新。 */
+ * 统计计数器使用 Redis atomicIncr/atomicGet（atomicvar.h）无锁更新。
+ * 配置字段（strategy_type/num_nodes）极少变更，读取时不加锁——即使读到过渡值
+ * 也仅影响瞬时分配的目标节点选择，无正确性风险。 */
 static int select_best_node(size_t size) {
-    /* 无锁读取热路径配置字段（策略类型极少变化，读到过渡值无害） */
-    int strategy_type = __atomic_load_n(&g_runtime_state.config.strategy_type,
-                                        __ATOMIC_RELAXED);
-    int num_nodes = __atomic_load_n(&g_runtime_state.config.num_nodes,
-                                    __ATOMIC_RELAXED);
+    int strategy_type = g_runtime_state.config.strategy_type;
+    int num_nodes     = g_runtime_state.config.num_nodes;
     int selected_node = 0;
 
     switch (strategy_type) {
@@ -155,8 +155,7 @@ static int select_best_node(size_t size) {
         }
 
         case NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED: {
-            size_t min_sz = __atomic_load_n(
-                &g_runtime_state.config.min_allocation_size, __ATOMIC_RELAXED);
+            size_t min_sz = g_runtime_state.config.min_allocation_size;
             if (size < min_sz) {
                 selected_node = 0;
             } else {
@@ -170,11 +169,9 @@ static int select_best_node(size_t size) {
             break;
     }
 
-    /* 无锁原子更新统计计数器 */
-    __atomic_fetch_add(&g_runtime_state.allocation_counters[selected_node],
-                       1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_runtime_state.bytes_allocated_per_node[selected_node],
-                       size, __ATOMIC_RELAXED);
+    /* 无锁原子更新统计计数器 —— 使用 Redis atomicvar.h API */
+    atomicIncr(g_runtime_state.allocation_counters[selected_node], 1);
+    atomicIncr(g_runtime_state.bytes_allocated_per_node[selected_node], size);
 
     return selected_node;
 }
@@ -445,8 +442,8 @@ void *numa_config_malloc_onnode(size_t size, int node) {
     
     pthread_mutex_lock(&g_config_mutex);
     if (node >= 0 && node < g_runtime_state.config.num_nodes) {
-        g_runtime_state.allocation_counters[node]++;
-        g_runtime_state.bytes_allocated_per_node[node] += size;
+        atomicIncr(g_runtime_state.allocation_counters[node], 1);
+        atomicIncr(g_runtime_state.bytes_allocated_per_node[node], size);
     }
     pthread_mutex_unlock(&g_config_mutex);
     
@@ -467,8 +464,8 @@ void numa_config_get_statistics(uint64_t *allocations_per_node,
                      num_nodes : g_runtime_state.config.num_nodes;
     
     for (int i = 0; i < copy_nodes; i++) {
-        allocations_per_node[i] = g_runtime_state.allocation_counters[i];
-        bytes_per_node[i] = g_runtime_state.bytes_allocated_per_node[i];
+        atomicGet(g_runtime_state.allocation_counters[i], allocations_per_node[i]);
+        atomicGet(g_runtime_state.bytes_allocated_per_node[i], bytes_per_node[i]);
     }
     
     pthread_mutex_unlock(&g_config_mutex);
@@ -483,9 +480,11 @@ double numa_config_get_node_utilization(int node_id) {
     pthread_mutex_lock(&g_config_mutex);
     
     double utilization = 0.0;
-    if (g_runtime_state.bytes_allocated_per_node[node_id] > 0) {
+    size_t node_bytes;
+    atomicGet(g_runtime_state.bytes_allocated_per_node[node_id], node_bytes);
+    if (node_bytes > 0) {
         /* 简化的利用率计算 */
-        utilization = (double)g_runtime_state.bytes_allocated_per_node[node_id] / 
+        utilization = (double)node_bytes /
                       (1024.0 * 1024.0 * 1024.0); /* 转换为GB作为示例 */
     }
     
@@ -563,10 +562,12 @@ int numa_config_handle_command(int argc, char **argv) {
         /* 显示统计信息 */
         serverLog(LL_NOTICE, "[NUMA Config] Allocation Statistics:");
         for (int i = 0; i < g_runtime_state.config.num_nodes; i++) {
-            serverLog(LL_NOTICE, "  Node %d: %llu allocations, %zu bytes", 
-                     i, 
-                     (unsigned long long)g_runtime_state.allocation_counters[i],
-                     g_runtime_state.bytes_allocated_per_node[i]);
+            int alloc_count;
+            size_t alloc_bytes;
+            atomicGet(g_runtime_state.allocation_counters[i], alloc_count);
+            atomicGet(g_runtime_state.bytes_allocated_per_node[i], alloc_bytes);
+            serverLog(LL_NOTICE, "  Node %d: %d allocations, %zu bytes",
+                     i, alloc_count, alloc_bytes);
         }
         return C_OK;
     }

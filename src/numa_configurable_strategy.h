@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "zmalloc.h"
+#include "atomicvar.h"
 #include <stddef.h>
 
 /* 可配置的NUMA策略类型 */
@@ -38,8 +39,8 @@ typedef struct {
     numa_strategy_config_t config;
     int current_strategy;                       /* 当前使用的策略 */
     uint64_t last_rebalance_time;               /* 上次重新平衡时间 */
-    int *allocation_counters;                   /* 各节点分配计数器 */
-    size_t *bytes_allocated_per_node;           /* 各节点已分配字节数 */
+    redisAtomic int *allocation_counters;        /* 各节点分配计数器（原子，无锁更新） */
+    redisAtomic size_t *bytes_allocated_per_node; /* 各节点已分配字节数（原子，无锁更新） */
 } numa_runtime_state_t;
 
 /* ========== 配置管理API ========== */
