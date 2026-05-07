@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #include "numa_composite_lru.h"
 #include "zmalloc.h"
+#include "numa_pool.h"        /* numa_pool_num_nodes() */
 #include "numa_bw_monitor.h"
 #include "evict.h"        /* numaGetNodePressure() */
 #include "numa_key_migrate.h"  /* numa_migrate_single_key() */

@@ -82,58 +82,67 @@ static int init_runtime_state(int num_nodes) {
     return C_OK;
 }
 
-/* 选择最佳分配节点 */
+/* 选择最佳分配节点。
+ * 优化：多数策略不再持 g_config_mutex 全局锁。
+ *   - LOCAL_FIRST / INTERLEAVE / ROUND_ROBIN / CXL_OPTIMIZED: 完全无锁
+ *   - WEIGHTED: 短暂持锁复制权重数组，计算在锁外完成
+ *   - PRESSURE_AWARE: 无锁（读取外部节点利用率数据）
+ * 统计计数器使用 __atomic_fetch_add 无锁更新。 */
 static int select_best_node(size_t size) {
-    int num_nodes = g_runtime_state.config.num_nodes;
+    /* 无锁读取热路径配置字段（策略类型极少变化，读到过渡值无害） */
+    int strategy_type = __atomic_load_n(&g_runtime_state.config.strategy_type,
+                                        __ATOMIC_RELAXED);
+    int num_nodes = __atomic_load_n(&g_runtime_state.config.num_nodes,
+                                    __ATOMIC_RELAXED);
     int selected_node = 0;
-    
-    pthread_mutex_lock(&g_config_mutex);
-    
-    switch (g_runtime_state.config.strategy_type) {
+
+    switch (strategy_type) {
         case NUMA_STRATEGY_CONFIG_LOCAL_FIRST:
-            selected_node = 0; /* 总是选择节点0 */
+            selected_node = 0;
             break;
-            
+
         case NUMA_STRATEGY_CONFIG_INTERLEAVE: {
             static __thread unsigned int seed = 0;
             if (seed == 0) seed = getpid() ^ pthread_self();
             selected_node = rand_r(&seed) % num_nodes;
             break;
         }
-            
+
         case NUMA_STRATEGY_CONFIG_ROUND_ROBIN: {
             static __thread int rr_index = 0;
             selected_node = rr_index % num_nodes;
             rr_index++;
             break;
         }
-            
+
         case NUMA_STRATEGY_CONFIG_WEIGHTED: {
-            /* 加权随机选择 */
+            /* 仅此策略需要读权重数组，短暂持锁复制 */
+            pthread_mutex_lock(&g_config_mutex);
             int total_weight = 0;
             for (int i = 0; i < num_nodes; i++) {
-                total_weight += g_runtime_state.config.node_weights[i];
+                if (g_runtime_state.config.node_weights)
+                    total_weight += g_runtime_state.config.node_weights[i];
             }
-            
+
             if (total_weight > 0) {
                 static __thread unsigned int seed = 0;
                 if (seed == 0) seed = getpid() ^ pthread_self();
                 int random_value = rand_r(&seed) % total_weight;
-                
                 int cumulative_weight = 0;
                 for (int i = 0; i < num_nodes; i++) {
-                    cumulative_weight += g_runtime_state.config.node_weights[i];
+                    if (g_runtime_state.config.node_weights)
+                        cumulative_weight += g_runtime_state.config.node_weights[i];
                     if (random_value < cumulative_weight) {
                         selected_node = i;
                         break;
                     }
                 }
             }
+            pthread_mutex_unlock(&g_config_mutex);
             break;
         }
-            
+
         case NUMA_STRATEGY_CONFIG_PRESSURE_AWARE: {
-            /* 选择负载最轻的节点 */
             double min_utilization = 1.0;
             for (int i = 0; i < num_nodes; i++) {
                 double utilization = numa_config_get_node_utilization(i);
@@ -144,28 +153,29 @@ static int select_best_node(size_t size) {
             }
             break;
         }
-            
-        case NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED:
-            /* CXL优化：小对象本地分配，大对象远端分配 */
-            if (size < g_runtime_state.config.min_allocation_size) {
-                selected_node = 0; /* 小对象分配到本地 */
+
+        case NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED: {
+            size_t min_sz = __atomic_load_n(
+                &g_runtime_state.config.min_allocation_size, __ATOMIC_RELAXED);
+            if (size < min_sz) {
+                selected_node = 0;
             } else {
-                /* 大对象分配到CXL节点 */
                 selected_node = (num_nodes > 1) ? 1 : 0;
             }
             break;
-            
+        }
+
         default:
             selected_node = 0;
             break;
     }
-    
-    /* 更新统计 */
-    g_runtime_state.allocation_counters[selected_node]++;
-    g_runtime_state.bytes_allocated_per_node[selected_node] += size;
-    
-    pthread_mutex_unlock(&g_config_mutex);
-    
+
+    /* 无锁原子更新统计计数器 */
+    __atomic_fetch_add(&g_runtime_state.allocation_counters[selected_node],
+                       1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_runtime_state.bytes_allocated_per_node[selected_node],
+                       size, __ATOMIC_RELAXED);
+
     return selected_node;
 }
 
