@@ -137,20 +137,20 @@ int numa_arena_init(void) {
     /* 计算每个 size-class 的 bin 配置 */
     for (int c = 0; c < NUMA_ARENA_SIZE_CLASSES; c++) {
         size_t reg_size = numa_arena_size_classes[c];
-        /* slab_size: 与 pool chunk 同级——降低 extent 分配频率 */
+        /* slab_size: 必须为2的幂，ptr_to_extent依赖位掩码定位extent基址 */
         size_t slab_size = (reg_size <= 256)  ? (256 * 1024)  :
                            (reg_size <= 1024) ? (512 * 1024)  :
                                                 (1024 * 1024);
-        int nregs = (int)((slab_size - sizeof(numa_extent_t) - bitmap_bytes(1024))
-                          / reg_size);
+        size_t usable = slab_size - sizeof(numa_extent_t);
+        int nregs = (int)(usable / reg_size);
         if (nregs < 1) nregs = 1;
-        if (nregs > 4096) nregs = 4096; /* 位图过大也没意义 */
+        if (nregs > 32768) nregs = 32768; /* 位图不超过4KB */
 
-        /* 调整 slab_size 为精确的 extent 大小 */
+        /* 位图紧接extent头部 */
         size_t bitmap_sz = bitmap_bytes(nregs);
-        slab_size = sizeof(numa_extent_t) + bitmap_sz + nregs * reg_size;
-
-        g_bin_configs[c].slab_size = slab_size;
+        usable = slab_size - sizeof(numa_extent_t) - bitmap_sz;
+        nregs  = (int)(usable / reg_size);
+        g_bin_configs[c].slab_size      = slab_size;  /* 2的幂，用于ptr_to_extent */
         g_bin_configs[c].nregs_per_slab = nregs;
 
         /* 初始化每个节点的 bin */
