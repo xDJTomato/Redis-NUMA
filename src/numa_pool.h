@@ -73,7 +73,7 @@ void numa_pool_cleanup(void);
 /* 从指定NUMA节点的内存池分配内存
  * 若池分配失败，回退至直接NUMA分配
  * 返回含PREFIX元数据的指针，失败返回NULL */
-void *numa_pool_alloc(size_t size, int node, size_t *total_size);
+void *numa_pool_alloc(size_t size, int node, size_t *total_size, int *from_pool_out);
 
 /* 释放通过numa_pool_alloc分配的内存
  * P1优化：将释放的块加入free_list以供复用

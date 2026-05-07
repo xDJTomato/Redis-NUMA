@@ -219,8 +219,9 @@ static numa_pool_chunk_t *alloc_new_chunk(int node, size_t obj_size)
     return chunk;
 }
 
-/* 从内存池分配 - 优化快速路径 */
-void *numa_pool_alloc(size_t size, int node, size_t *total_size)
+/* 从内存池分配 - 优化快速路径。
+ * from_pool_out: 输出参数，1=实际从Pool分配，0=回退到direct numa_alloc_onnode */
+void *numa_pool_alloc(size_t size, int node, size_t *total_size, int *from_pool_out)
 {
     if (!pool_ctx.initialized) {
         return NULL;
@@ -316,7 +317,10 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size)
     if (total_size) {
         *total_size = alloc_size;
     }
-    
+    if (from_pool_out) {
+        *from_pool_out = from_pool;  /* 0=direct fallback, 1=genuine pool */
+    }
+
     return result;
 }
 

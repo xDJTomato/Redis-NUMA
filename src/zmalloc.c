@@ -294,8 +294,9 @@ static void *numa_alloc_with_size(size_t size)
     }
 
     /* 回退：大对象或Slab分配失败时走Pool路径 */
+    int pool_from_pool = 0;  /* 实际是否从Pool分配（非内部回退） */
     if (!raw_ptr) {
-        raw_ptr = numa_pool_alloc(total_size, target_node, &alloc_size);
+        raw_ptr = numa_pool_alloc(total_size, target_node, &alloc_size, &pool_from_pool);
         if (raw_ptr) used_pool = 1;
     }
 
@@ -314,9 +315,10 @@ static void *numa_alloc_with_size(size_t size)
         atomicIncr(numa_alloc_direct_count, 1);
     }
 
-    /* P1修复：用实际分配路径标记（used_pool）代替按大小猜测，
-     * 避免池内回退到 direct 分配时被错误标记为 from_pool。 */
-    int from_pool = used_pool ? 1 : 0;
+    /* 标记是否来自内存池（用于释放时路由到 Pool 或 direct）。
+     * 使用 numa_pool_alloc 返回的实际标记，而非按大小猜测。
+     * pool_from_pool=0 表示 >4KB 或 Pool 内部分配失败回退到 direct。 */
+    int from_pool = (used_pool && pool_from_pool) ? 1 : 0;
 
     numa_init_prefix(raw_ptr, size, from_pool, target_node);  /* P2修复：传入node_id写入PREFIX */
     update_zmalloc_stat_alloc(total_size);
