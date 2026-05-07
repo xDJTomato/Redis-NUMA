@@ -13,7 +13,14 @@
 #include "numa_arena.h"
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <numa.h>
+
+/* 日志：redis-server 优先使用 server.o 的强定义，cli/benchmark 用弱回退 */
+__attribute__((weak)) void _serverLog(int level, const char *fmt, ...) {
+    (void)level; (void)fmt;  /* no-op for redis-cli/benchmark */
+}
+#define ARENA_LOG(fmt, ...) _serverLog(2 /*LL_NOTICE*/, "[Arena] " fmt, ##__VA_ARGS__)
 #include <sched.h>
 #include <unistd.h>
 
@@ -166,6 +173,9 @@ int numa_arena_init(void) {
     }
 
     g_arena_ctx.initialized = 1;
+    ARENA_LOG("init OK: %d nodes, %d classes. class0 slab=%zu nregs=%d",
+              g_arena_ctx.num_nodes, NUMA_ARENA_SIZE_CLASSES,
+              g_bin_configs[0].slab_size, g_bin_configs[0].nregs_per_slab);
     return 0;
 }
 
@@ -368,6 +378,11 @@ void *numa_arena_alloc(size_t size, int node, size_t *total_size,
     if (g_arena_ctx.num_nodes == 0) return NULL;
     if (node < 0 || node >= g_arena_ctx.num_nodes)
         node = 0;
+
+    static int alloc_count = 0;
+    if (++alloc_count <= 5) {
+        ARENA_LOG("alloc #%d: size=%zu node=%d", alloc_count, size, node);
+    }
 
     size_t alloc_size = size;
     int class_idx = size_to_class(size);
