@@ -137,10 +137,10 @@ int numa_arena_init(void) {
     /* 计算每个 size-class 的 bin 配置 */
     for (int c = 0; c < NUMA_ARENA_SIZE_CLASSES; c++) {
         size_t reg_size = numa_arena_size_classes[c];
-        /* slab_size: tiny class 用 16KB，small 用 64KB，medium 用 256KB */
-        size_t slab_size = (reg_size <= 64)   ? (16 * 1024)  :
-                           (reg_size <= 512)  ? (64 * 1024)  :
-                                                (256 * 1024);
+        /* slab_size: 与 pool chunk 同级——降低 extent 分配频率 */
+        size_t slab_size = (reg_size <= 256)  ? (256 * 1024)  :
+                           (reg_size <= 1024) ? (512 * 1024)  :
+                                                (1024 * 1024);
         int nregs = (int)((slab_size - sizeof(numa_extent_t) - bitmap_bytes(1024))
                           / reg_size);
         if (nregs < 1) nregs = 1;
@@ -294,15 +294,32 @@ static void *bin_alloc_locked(numa_bin_t *bin, int node, int class_idx) {
 static int bin_refill(numa_bin_t *bin, int node, int class_idx,
                       tcache_bin_t *tcache_bin, int n) {
     pthread_mutex_lock(&bin->lock);
-    int i = 0;
-    for (; i < n; i++) {
+    int filled = 0;
+    while (filled < n) {
         void *ptr = bin_alloc_locked(bin, node, class_idx);
         if (!ptr) break;
-        tcache_bin->stack[i] = ptr;
+        tcache_bin->stack[filled++] = ptr;
     }
-    tcache_bin->count = i;  /* 设置缓存计数 */
     pthread_mutex_unlock(&bin->lock);
-    return i; /* 实际填充数 */
+
+    /* extent 分配在锁外完成（含 numa_alloc_onnode 系统调用） */
+    while (filled < n) {
+        numa_extent_t *new_ext = extent_alloc(node, class_idx);
+        if (!new_ext) break;
+        pthread_mutex_lock(&bin->lock);
+        new_ext->next = bin->slabs_head;
+        bin->slabs_head = new_ext;
+        bin->slabcur    = new_ext;
+        while (filled < n) {
+            int idx = bitmap_sfu(new_ext->bitmap, new_ext->nregs);
+            if (idx < 0) break;
+            new_ext->nfree--;
+            tcache_bin->stack[filled++] = region_ptr(new_ext, idx, class_idx);
+        }
+        pthread_mutex_unlock(&bin->lock);
+    }
+    tcache_bin->count = filled;
+    return filled; /* 实际填充数 */
 }
 
 /* bin batch flush: 持锁归还一批 region */
