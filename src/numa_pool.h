@@ -78,7 +78,7 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size);
 /* 释放通过numa_pool_alloc分配的内存
  * P1优化：将释放的块加入free_list以供复用
  * 仅直接分配（from_pool=0）的内存才真正归还系统 */
-void numa_pool_free(void *ptr, size_t total_size, int from_pool);
+void numa_pool_free(void *ptr, size_t total_size, int from_pool, int node_id);
 
 /* 设置当前线程的目标NUMA节点 */
 void numa_pool_set_node(int node);

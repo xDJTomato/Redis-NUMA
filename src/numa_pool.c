@@ -47,6 +47,7 @@ struct free_block {
     void *ptr;                     /* 已释放内存指针 */
     size_t size;                   /* 已释放块的大小 */
     struct free_block *next;       /* 列表中的下一个空闲块 */
+    struct numa_pool_chunk *owner_chunk; /* 所属chunk（用于递减used_bytes+compaction） */
 };
 
 /* 内存池chunk结构 */
@@ -319,60 +320,76 @@ void *numa_pool_alloc(size_t size, int node, size_t *total_size)
     return result;
 }
 
-/* 释放内存 - P1：将已释放块添加到空闲列表 */
-void numa_pool_free(void *ptr, size_t total_size, int from_pool)
+/* 释放内存 - P1：将已释放块添加到空闲列表
+ * P1修复：node_id 从 PREFIX 传入，避免跨节点错配。
+ * P1修复：递减 owner_chunk->used_bytes，使 compaction 准确检测低利用率。 */
+void numa_pool_free(void *ptr, size_t total_size, int from_pool, int node_id)
 {
     if (!ptr) {
         return;
     }
-    
+
     if (!from_pool) {
         /* 只释放直接NUMA分配 */
         numa_free(ptr, total_size);
         return;
     }
-    
+
     /* P1：对于池内分配，添加到空闲列表 */
     if (!pool_ctx.initialized || !pool_ctx.node_pools) {
         return;  /* 内存池未初始化，默认泄漏 */
     }
-    
+
     /* 找到此大小对应的大小分类 */
     size_t aligned_size = (total_size + 15) & ~15;
     int class_idx = -1;
-    
+
     for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
         if (aligned_size <= numa_pool_size_classes[i]) {
             class_idx = i;
             break;
         }
     }
-    
+
     if (class_idx < 0) {
         return;  /* 大小不匹配任何分类，跳过 */
     }
-    
-    /* 不知道属于哪个节点，尝试查找或直接使用节点0（现有局限，当前可接受） */
-    int node = 0;
-    if (pool_ctx.current_node >= 0 && pool_ctx.current_node < pool_ctx.num_nodes) {
-        node = pool_ctx.current_node;
+
+    /* P1修复：使用 PREFIX 记录的分配节点，而非 pool_ctx.current_node */
+    if (node_id < 0 || node_id >= pool_ctx.num_nodes) {
+        node_id = pool_ctx.current_node;  /* 回退 */
     }
-    
-    /* 创建空闲块 */
+
+    /* 在持锁前分配 free_block 元数据，缩短锁区间 */
     free_block_t *free_block = malloc(sizeof(free_block_t));
     if (!free_block) {
-        return;  /* 无法记录空闲块，默认泄漏 */
+        return;
     }
-    
-    free_block->ptr = ptr;
-    free_block->size = aligned_size;
-    
-    /* 添加到池的空闲列表 */
-    numa_size_class_pool_t *pool = &pool_ctx.node_pools[node].pools[class_idx];
-    
+
+    numa_size_class_pool_t *pool = &pool_ctx.node_pools[node_id].pools[class_idx];
     pthread_mutex_lock(&pool->lock);
-    free_block->next = pool->free_list;
-    pool->free_list = free_block;
+
+    /* P1修复：扫描chunk链表找到归属chunk，递减used_bytes */
+    numa_pool_chunk_t *owner = NULL;
+    numa_pool_chunk_t *chunk = pool->chunks;
+    while (chunk) {
+        if (ptr >= chunk->memory &&
+            ptr < (char *)chunk->memory + chunk->size) {
+            owner = chunk;
+            break;
+        }
+        chunk = chunk->next;
+    }
+    if (owner && owner->used_bytes >= aligned_size) {
+        owner->used_bytes -= aligned_size;
+    }
+
+    free_block->ptr         = ptr;
+    free_block->size        = aligned_size;
+    free_block->owner_chunk = owner;
+    free_block->next        = pool->free_list;
+    pool->free_list         = free_block;
+
     pthread_mutex_unlock(&pool->lock);
 }
 
@@ -465,80 +482,77 @@ float numa_pool_get_utilization(int node, int size_class_idx)
     return (float)used_bytes / (float)total_size;
 }
 
-/* P1优化：尝试压缩低利用率chunk */
+/* P1优化：尝试压缩低利用率chunk。
+ * P1修复：
+ *   1. used_bytes 现在在释放时递减，利用率计算准确
+ *   2. 释放 chunk 前清理其 free_list 条目（只 free 元数据节点，ptr 随 chunk 整体释放）
+ *   3. 移除原有的 free_count>10 清空 free_list 逻辑（该操作泄漏 NUMA 内存） */
 int numa_pool_try_compact(void)
 {
     if (!pool_ctx.initialized || !pool_ctx.node_pools) {
         return 0;
     }
-    
+
     int compacted_count = 0;
-    
+
     /* 遍历所有节点和大小分类 */
     for (int node = 0; node < pool_ctx.num_nodes; node++) {
         for (int class_idx = 0; class_idx < NUMA_POOL_SIZE_CLASSES; class_idx++) {
             numa_size_class_pool_t *pool = &pool_ctx.node_pools[node].pools[class_idx];
-            
+
             pthread_mutex_lock(&pool->lock);
-            
-            /* 清理可能来自已压缩chunk的空闲列表条目 */
-            /* 简化处理：直接释放空闲列表 */
-            free_block_t *free_block = pool->free_list;
-            int free_count = 0;
-            while (free_block) {
-                free_block_t *next = free_block->next;
-                free_count++;
-                free_block = next;
-            }
-            
-            /* 仅当空闲块数量较多时执行压缩 */
-            if (free_count > 10) {
-                /* 清空空闲列表 */
-                free_block = pool->free_list;
-                while (free_block) {
-                    free_block_t *next = free_block->next;
-                    free(free_block);
-                    free_block = next;
-                }
-                pool->free_list = NULL;
-                compacted_count++;
-            }
-            
+
             /* 查找并释放低利用率chunk */
             numa_pool_chunk_t **prev_ptr = &pool->chunks;
             numa_pool_chunk_t *chunk = pool->chunks;
-            
+
             while (chunk) {
                 float utilization = 0.0f;
                 if (chunk->size > 0) {
                     utilization = (float)chunk->used_bytes / (float)chunk->size;
                 }
-                
+
                 /* 如果chunk低于阈值且有较大空闲空间 */
-                if (utilization < COMPACT_THRESHOLD && 
+                if (utilization < COMPACT_THRESHOLD &&
                     (1.0f - utilization) >= COMPACT_MIN_FREE_RATIO) {
-                    
+
+                    /* P1修复：先清理 free_list 中属于此 chunk 的条目。
+                     * 只释放 free_block 元数据节点，实际内存 ptr 随 chunk 整体释放。 */
+                    free_block_t **fb_prev = &pool->free_list;
+                    free_block_t *fb = pool->free_list;
+                    while (fb) {
+                        if (fb->owner_chunk == chunk) {
+                            *fb_prev = fb->next;
+                            free_block_t *to_free = fb;
+                            fb = fb->next;
+                            free(to_free);
+                        } else {
+                            fb_prev = &fb->next;
+                            fb = fb->next;
+                        }
+                    }
+
                     /* 从链表移除chunk并释放 */
                     *prev_ptr = chunk->next;
                     numa_free(chunk->memory, chunk->size);
                     free(chunk);
                     pool->chunks_count--;
                     compacted_count++;
-                    
+
                     /* 不推进prev_ptr，直接移到下一个 */
                     chunk = *prev_ptr;
                     continue;
                 }
-                
+
                 /* 移到下一个chunk */
                 prev_ptr = &chunk->next;
                 chunk = chunk->next;
             }
-            
+
             pthread_mutex_unlock(&pool->lock);
         }
     }
-    
+
     return compacted_count;
 }
 

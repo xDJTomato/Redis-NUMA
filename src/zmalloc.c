@@ -314,8 +314,9 @@ static void *numa_alloc_with_size(size_t size)
         atomicIncr(numa_alloc_direct_count, 1);
     }
 
-    /* 根据大小判断是否来自内存池（用于free路由） */
-    int from_pool = (total_size <= NUMA_POOL_MAX_ALLOC) ? 1 : 0;
+    /* P1修复：用实际分配路径标记（used_pool）代替按大小猜测，
+     * 避免池内回退到 direct 分配时被错误标记为 from_pool。 */
+    int from_pool = used_pool ? 1 : 0;
 
     numa_init_prefix(raw_ptr, size, from_pool, target_node);  /* P2修复：传入node_id写入PREFIX */
     update_zmalloc_stat_alloc(total_size);
@@ -344,8 +345,8 @@ static void numa_free_with_size(void *user_ptr)
         atomicDecr(numa_alloc_slab_bytes, total_size);
         atomicDecr(numa_alloc_slab_count, 1);
     } else {
-        /* 大对象归还Pool */
-        numa_pool_free(raw_ptr, total_size, prefix->from_pool);
+        /* 大对象归还Pool：传入PREFIX记录的分配节点 */
+        numa_pool_free(raw_ptr, total_size, prefix->from_pool, node_id);
         if (total_size <= NUMA_POOL_MAX_ALLOC) {
             atomicDecr(numa_alloc_pool_bytes, total_size);
             atomicDecr(numa_alloc_pool_count, 1);

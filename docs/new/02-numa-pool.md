@@ -8,25 +8,32 @@
 
 ## 已知问题
 
-> 以下 BUG 已确认影响 RSS 膨胀（frag_ratio 从 1.59 飙升到 3.0），尚待修复。
+> 以下 BUG 曾在 commit f229ecf 之前的版本中影响 RSS 膨胀（frag_ratio 从 1.59 飙升到 3.0+），
+> **已于 2026-05-07 修复**。详情见 `docs/new/13-lockfree-alloc-design.md` 和对应提交。
 
-### BUG 1（CRITICAL）：`numa_pool_try_compact` free_list 清理内存泄漏
+### BUG 1（CRITICAL）✅ 已修复：`numa_pool_try_compact` free_list 清理内存泄漏
 
-**位置**：`numa_pool.c:495-502`
+**位置**：`numa_pool.c` — `numa_pool_try_compact()`
 
-`numa_pool_try_compact()` 在清空 free_list 时只调用 `free(free_block)` 释放链表节点结构体，但**未调用 `numa_free(free_block->ptr, free_block->size)` 归还指针指向的实际内存块**。迁移释放的旧 SDS（来自 Pool 路径）进入 free_list 后永不归还 OS，导致 RSS 持续膨胀。
+**旧行为**：`numa_pool_try_compact()` 清空 free_list 时只 `free(free_block)` 释放链表节点，不处理 `free_block->ptr`。
 
-### BUG 2（MODERATE）：`chunk->used_bytes` 在释放时永不递减
+**修复**：重写 compaction 流程——释放 chunk 前先清理 free_list 中属于该 chunk 的条目（只 free 元数据节点，ptr 随 chunk 的 `numa_free` 整体释放）。移除原有的 free_count>10 清空逻辑。
 
-**位置**：`numa_pool.c:323-377`
+### BUG 2（MODERATE）✅ 已修复：`chunk->used_bytes` 在释放时永不递减
 
-`numa_pool_alloc()` 中 `chunk->used_bytes += size`，但 `numa_pool_free()` 无法反推释放块属于哪个 chunk，故 `used_bytes` 永不递减。这导致 `numa_pool_try_compact` 的低利用率检测（`< COMPACT_THRESHOLD 0.3`）永远不触发，实际已空的 chunk 也无法被回收。
+**位置**：`numa_pool.c` — `numa_pool_free()`
 
-### BUG 3（MINOR）：`numa_pool_free` 节点错配
+**旧行为**：`numa_pool_alloc()` 中 `chunk->used_bytes += size`，但 `numa_pool_free()` 无法反推释放块属于哪个 chunk，故 `used_bytes` 永不递减。
 
-**位置**：`numa_pool.c:356-358`
+**修复**：`free_block_t` 增加 `owner_chunk` 字段。`numa_pool_free()` 中扫描 chunk 链表定位 ptr 所属 chunk，持锁递减 `owner->used_bytes`。
 
-释放时使用 `pool_ctx.current_node`（当前 CPU 所在节点）而非 PREFIX 中存储的分配节点 `node_id`，free_block 被挂到错误节点的 free_list。
+### BUG 3（MINOR）✅ 已修复：`numa_pool_free` 节点错配
+
+**位置**：`numa_pool.c` — `numa_pool_free()`
+
+**旧行为**：释放时使用 `pool_ctx.current_node` 而非 PREFIX 中存储的分配节点 `node_id`。
+
+**修复**：`numa_pool_free()` 增加第 4 参数 `node_id`，由 `zmalloc.c:numa_free_with_size()` 从 PREFIX 传入实际的分配节点。
 
 ## 解决的核心问题
 
