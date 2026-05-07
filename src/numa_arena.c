@@ -224,12 +224,18 @@ static void extent_free(numa_extent_t *ext) {
     if (ext) numa_free(ext->memory, ext->size);
 }
 
-/* ptr_to_extent: 从 region 指针找回 extent。
-   由于 extent 固定在 slab_size 对齐的基址上起始，用掩码定位。 */
-static numa_extent_t *ptr_to_extent(void *ptr, int class_idx) {
-    size_t slab_size = g_bin_configs[class_idx].slab_size;
-    uintptr_t base = (uintptr_t)ptr & ~(slab_size - 1);
-    return (numa_extent_t *)base;
+/* ptr_to_extent: 扫描bin的slab链表定位ptr所属extent。
+   不使用位掩码（不依赖numa_alloc_onnode对齐到slab_size）。 */
+static numa_extent_t *ptr_to_extent(numa_bin_t *bin, void *ptr) {
+    numa_extent_t *ext = bin->slabs_head;
+    while (ext) {
+        if ((uintptr_t)ptr >= (uintptr_t)ext->memory &&
+            (uintptr_t)ptr < (uintptr_t)ext->memory + ext->size) {
+            return ext;
+        }
+        ext = ext->next;
+    }
+    return NULL;
 }
 
 /* 计算 region 在 extent 中的索引 */
@@ -327,7 +333,7 @@ static void bin_flush(numa_bin_t *bin, int class_idx,
                       void **ptrs, int n) {
     pthread_mutex_lock(&bin->lock);
     for (int i = 0; i < n; i++) {
-        numa_extent_t *ext = ptr_to_extent(ptrs[i], class_idx);
+        numa_extent_t *ext = ptr_to_extent(bin, ptrs[i]);
         int idx = ptr_region_idx(ext, ptrs[i], class_idx);
         if (idx >= 0 && idx < ext->nregs) {
             if (bitmap_test(ext->bitmap, idx)) {

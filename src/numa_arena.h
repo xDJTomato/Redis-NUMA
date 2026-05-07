@@ -20,6 +20,7 @@
 #define NUMA_ARENA_SIZE_CLASSES   20
 #define NUMA_ARENA_MAX_ALLOC      4096      /* bin 路径上限 */
 #define TCACHE_MAX_OBJECTS        1024      /* 每 bin 容量：匹配 slab nregs，减少 refill 频率 */
+#define TCACHE_FLUSH_BATCH        512       /* flush 时一次归还量 */
 
 /* 20 级 size class（16B–4KB，覆盖 Redis 常见对象大小） */
 extern const size_t numa_arena_size_classes[NUMA_ARENA_SIZE_CLASSES];
