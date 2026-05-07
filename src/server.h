@@ -1662,6 +1662,8 @@ struct redisServer {
 #ifdef HAVE_NUMA
     /* NUMA composite-LRU 配置文件路径（可选，对应 redis.conf 中的 numa-migrate-config 项）*/
     char *numa_migrate_config_file;
+    /* NUMA 分配器类型: "pool"=现有混合分配器, "arena"=jemalloc风格arena分配器 */
+    char *numa_allocator_type;
 #endif
 };
 

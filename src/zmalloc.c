@@ -55,6 +55,7 @@ void zlibc_free(void *ptr)
 #include <sched.h>
 #include <unistd.h>
 #include "numa_pool.h"
+#include "numa_arena.h"
 #include "numa_configurable_strategy.h"
 /* numaGetNodePressure() 声明：弱符号回退供 redis-benchmark/cli 使用 */
 __attribute__((weak)) double numaGetNodePressure(int node_id) {
@@ -76,24 +77,50 @@ static struct {
     int *node_distance_order;
 } numa_ctx = {0};
 
+/* 由 server.c 在配置解析后设置，numa_init() 据此选择分配器 */
+const char *numa_allocator_type = "pool";
+static int g_use_arena = 0;
+
 /* 线程局部存储：当前线程绑定的NUMA节点 */
 static __thread int tls_current_node = -1;
 
-/* 初始化NUMA支持：初始化内存池、Slab分配器并按距离排序节点 */
+/* 初始化NUMA支持：根据 numa-allocator-type 配置选择分配器 */
 void numa_init(void)
 {
-    /* 初始化内存池模块 */
+    /* 检查是否启用arena分配器 */
+    if (numa_allocator_type && !strcmp(numa_allocator_type, "arena")) {
+        if (numa_arena_init() == 0) {
+            g_use_arena = 1;
+            numa_ctx.numa_available = 1;
+            numa_ctx.num_nodes = numa_arena_num_nodes();
+            numa_ctx.current_node = 0;
+            tls_current_node = 0;
+            numa_ctx.allocation_strategy = NUMA_STRATEGY_INTERLEAVE;
+
+            /* 分配 node_distance_order（arena不依赖pool，但其他模块需要） */
+            numa_ctx.node_distance_order = malloc(numa_ctx.num_nodes * sizeof(int));
+            if (numa_ctx.node_distance_order) {
+                for (int i = 0; i < numa_ctx.num_nodes; i++)
+                    numa_ctx.node_distance_order[i] = i;
+            }
+            return;
+        }
+        /* arena初始化失败，回退到pool */
+    }
+
+    /* 默认：Pool分配器 */
+    g_use_arena = 0;
+
     if (numa_pool_init() != 0) {
         numa_ctx.numa_available = 0;
         return;
     }
-    
-    /* P2 Optimization: Initialize Slab allocator */
+
     if (numa_slab_init() != 0) {
         numa_ctx.numa_available = 0;
         return;
     }
-    
+
     numa_ctx.numa_available = numa_pool_available();
     if (!numa_ctx.numa_available) {
         return;
@@ -102,10 +129,8 @@ void numa_init(void)
     numa_ctx.num_nodes = numa_pool_num_nodes();
     numa_ctx.current_node = numa_pool_get_node();
     tls_current_node = numa_ctx.current_node;
-    /* 改为交错分配策略，实现跨节点负载均衡 */
     numa_ctx.allocation_strategy = NUMA_STRATEGY_INTERLEAVE;
 
-    /* 初始化节点距离顺序 */
     numa_ctx.node_distance_order = malloc(numa_ctx.num_nodes * sizeof(int));
     if (!numa_ctx.node_distance_order) {
         numa_ctx.numa_available = 0;
@@ -116,7 +141,6 @@ void numa_init(void)
         numa_ctx.node_distance_order[i] = i;
     }
 
-    /* 按距离排序 */
     for (int i = 0; i < numa_ctx.num_nodes - 1; i++) {
         for (int j = 0; j < numa_ctx.num_nodes - i - 1; j++) {
             int dist1 = numa_distance(numa_ctx.current_node, numa_ctx.node_distance_order[j]);
@@ -130,11 +154,14 @@ void numa_init(void)
     }
 }
 
-/* 清理NUMA资源：释放内存池和节点距离排序数组 */
+/* 清理NUMA资源 */
 void numa_cleanup(void)
 {
-    numa_pool_cleanup();
-    
+    if (g_use_arena) {
+        numa_arena_cleanup();
+    } else {
+        numa_pool_cleanup();
+    }
     if (numa_ctx.node_distance_order) {
         free(numa_ctx.node_distance_order);
         numa_ctx.node_distance_order = NULL;
@@ -275,7 +302,7 @@ static void *numa_alloc_with_size(size_t size)
 
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
-    
+
     /* 由 numa_configurable_strategy 模块决定目标节点 */
     int target_node;
     if (numa_ctx.num_nodes <= 1) {
@@ -283,7 +310,25 @@ static void *numa_alloc_with_size(size_t size)
     } else {
         target_node = numa_config_get_best_node(size);
     }
-    
+
+    /* ── Arena allocator 快速路径 ── */
+    if (g_use_arena) {
+        int arena_from_pool;
+        size_t arena_total;
+        /* arena_alloc 需要 total_size（含PREFIX），与pool同语义 */
+        void *raw_ptr = numa_arena_alloc(total_size, target_node, &arena_total, &arena_from_pool);
+        if (!raw_ptr) return NULL;
+
+        numa_init_prefix(raw_ptr, size, arena_from_pool, target_node);
+        update_zmalloc_stat_alloc(total_size);
+
+        atomicIncr(numa_alloc_pool_bytes, total_size);
+        atomicIncr(numa_alloc_pool_count, 1);
+
+        return numa_to_user_ptr(raw_ptr);
+    }
+
+    /* ── Pool allocator 路径 ── */
     void *raw_ptr = NULL;
     
     /* P2优化：≤128B的小对象走Slab快速路径 */
@@ -339,6 +384,14 @@ static void numa_free_with_size(void *user_ptr)
     update_zmalloc_stat_free(total_size);
 
     void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
+
+    /* ── Arena allocator 快速路径 ── */
+    if (g_use_arena) {
+        numa_arena_free(raw_ptr, total_size, prefix->from_pool, node_id);
+        atomicDecr(numa_alloc_pool_bytes, total_size);
+        atomicDecr(numa_alloc_pool_count, 1);
+        return;
+    }
 
     /* P2优化：小对象归还Slab */
     if (should_use_slab(size) && prefix->from_pool) {
@@ -428,13 +481,14 @@ void numa_set_current_node(int node)
 {
     if (node >= 0 && node < numa_ctx.num_nodes) {
         numa_ctx.current_node = node;
-        numa_pool_set_node(node);
+        if (!g_use_arena) numa_pool_set_node(node);
     }
 }
 
 /* 获取当前NUMA节点 */
 int numa_get_current_node(void)
 {
+    if (g_use_arena) return numa_ctx.current_node;
     return numa_pool_get_node();
 }
 

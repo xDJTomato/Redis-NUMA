@@ -6293,11 +6293,6 @@ int main(int argc, char **argv) {
     char config_from_stdin = 0;
 
     printf("DEBUG: main() 开始\n");
-#ifdef HAVE_NUMA
-    printf("DEBUG: 调用numa_init()\n");
-    numa_init();
-    printf("DEBUG: numa_init()完成\n");
-#endif
 
     printf("DEBUG: 检查REDIS_TEST\n");
 #ifdef REDIS_TEST
@@ -6471,6 +6466,18 @@ int main(int argc, char **argv) {
         sdsfree(options);
     }
     if (server.sentinel_mode) sentinelCheckConfigFile();
+
+#ifdef HAVE_NUMA
+    /* 将配置传递给zmalloc：必须在numa_init之前设置 */
+    extern const char *numa_allocator_type;
+    *(const char **)&numa_allocator_type = server.numa_allocator_type;
+
+    /* NUMA初始化必须放在配置解析之后：numa-allocator-type决定用pool还是arena */
+    printf("DEBUG: 调用numa_init()\n");
+    numa_init();
+    printf("DEBUG: numa_init()完成\n");
+#endif
+
     server.supervised = redisIsSupervised(server.supervised_mode);
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();

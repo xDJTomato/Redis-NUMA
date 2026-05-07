@@ -2460,6 +2460,7 @@ standardConfig configs[] = {
     createStringConfig("proc-title-template", NULL, MODIFIABLE_CONFIG, ALLOW_EMPTY_STRING, server.proc_title_template, CONFIG_DEFAULT_PROC_TITLE_TEMPLATE, isValidProcTitleTemplate, updateProcTitleTemplate),
     #ifdef HAVE_NUMA
     createStringConfig("numa-migrate-config", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.numa_migrate_config_file, NULL, NULL, NULL),
+    createStringConfig("numa-allocator-type", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.numa_allocator_type, "pool", NULL, NULL),
     #endif
 
     /* SDS Configs */
