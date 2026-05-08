@@ -1,47 +1,46 @@
-This README covers the NUMA extensions added to Redis 6.2.21. For the
-original Redis documentation, see [REDIS_ORIGINAL_README.md](docs/devlog/original/REDIS_ORIGINAL_README.md).
+本文档介绍 Redis 6.2.21 上新增的 NUMA 扩展功能。原版 Redis 文档见
+[REDIS_ORIGINAL_README.md](docs/devlog/original/REDIS_ORIGINAL_README.md)。
 
-What is this?
--------------
-
-This is a modified version of Redis 6.2.21 with transparent NUMA-aware
-memory allocation and CXL (Compute Express Link) memory tiering support.
-All standard Redis commands and APIs work unchanged. The extensions run
-behind the scenes: every `zmalloc` call automatically picks the best NUMA
-node, a 16-byte metadata prefix tracks per-object heat, and a background
-migration engine moves hot data to local DRAM and cold data to CXL memory.
-
-The project targets dual-socket servers and CXL-attached memory expanders
-where Node 0 is low-latency DRAM and Node 1 is high-capacity CXL memory.
-
-Building
+项目简介
 --------
 
-You need `libnuma-dev` (Debian/Ubuntu) or `numactl-devel` (CentOS/RHEL):
+本项目是 Redis 6.2.21 的修改版本，增加了透明的 NUMA 感知内存分配与 CXL
+（Compute Express Link）内存分层功能。所有标准 Redis 命令和 API 保持不变。
+扩展在后台运行：每次 `zmalloc` 调用会自动选择最优 NUMA 节点，16 字节的
+元数据前缀追踪每个对象的访问热度，后台迁移引擎将热数据迁回本地 DRAM，
+冷数据推至 CXL 内存。
+
+项目面向双路服务器和 CXL 内存扩展设备，其中 Node 0 为低延迟 DRAM，
+Node 1 为大容量 CXL 内存。
+
+编译
+----
+
+需要安装 `libnuma-dev`（Debian/Ubuntu）或 `numactl-devel`（CentOS/RHEL）：
 
     % cd src
     % make clean && make -j$(nproc)
 
-The build forces `MALLOC=libc` and links `-lnuma`. jemalloc is not
-compatible with the NUMA allocator and must not be used.
+编译强制使用 `MALLOC=libc` 并链接 `-lnuma`。jemalloc 与 NUMA 分配器不兼容，
+不可使用。
 
-Running
--------
+运行
+----
 
-Start the server as usual:
+按常规方式启动服务器：
 
     % ./src/redis-server redis.conf
 
-To enable NUMA migration, add these lines to `redis.conf`:
+在 `redis.conf` 中添加以下配置以启用 NUMA 迁移：
 
     numa-enabled yes
     numa-migrate-config /path/to/composite_lru.json
 
-Verify that NUMA is active:
+验证 NUMA 是否已激活：
 
     % ./src/redis-cli NUMA CONFIG GET
 
-An example `composite_lru.json`:
+`composite_lru.json` 配置示例：
 
     {
         "migrate_hotness_threshold": 3,
@@ -58,207 +57,193 @@ An example `composite_lru.json`:
         "max_bandwidth_node1_mbps": 12000
     }
 
-How it works
-------------
+工作原理
+--------
 
-Every allocation goes through a two-tier path:
+所有内存分配经过两层路径：
 
-* Objects up to 4 KB are served by a **Slab allocator**: 64 KB slabs,
-  24 jemalloc-style size classes (16 B to 4096 B), 3072-bit bitmaps,
-  atomic CAS — completely lock-free.
+* 4 KB 以内的对象由 **Slab 分配器** 处理：64 KB 的 slab，24 级
+  jemalloc 风格的 size class（16 B 到 4096 B），3072 位位图管理，
+  原子 CAS 操作——完全无锁。
 
-* Objects larger than 4 KB fall through to `numa_alloc_onnode()`, a
-  direct system call.
+* 超过 4 KB 的对象直接走 `numa_alloc_onnode()` 系统调用。
 
-Before returning the pointer, `zmalloc` prepends a 16-byte prefix
-(`numa_alloc_prefix_t`) that records the allocation size, source slab
-flag, NUMA node ID, hotness level (0–7), access count, and last-access
-timestamp. The caller never sees this prefix; it sits behind the
-returned pointer and is recovered by `zfree` via a simple offset.
+在返回指针之前，`zmalloc` 在对象头部前置 16 字节的前缀
+（`numa_alloc_prefix_t`），记录分配大小、Slab 来源标记、NUMA 节点 ID、
+热度等级（0–7）、访问计数和最近访问时间戳。调用者看不到这个前缀——
+它位于返回指针的前方，`zfree` 通过简单的偏移量回溯即可找到。
 
-The node to allocate on is chosen by a configurable strategy. The
-default is **weighted interleave**: every second, `serverCron` reads
-each node's memory pressure from `/sys/devices/system/node/nodeN/meminfo`,
-converts it to a weight (`max(1, (1 − pressure) × 100)`), and publishes
-it via `atomicSet`. The allocation path reads these weights with
-`atomicGet` and does a weighted random selection — no locks on the hot
-path.
+分配目标节点由可配置的策略决定。默认策略是**压力感知权重交错**
+（weighted interleave）：每秒 `serverCron` 从
+`/sys/devices/system/node/nodeN/meminfo` 读取各节点内存压力，转换为
+权重（`max(1, (1 − pressure) × 100)`），通过 `atomicSet` 发布。分配路径
+通过 `atomicGet` 读取权重，做加权随机选择——热路径上没有任何锁。
 
-Ten strategies are available:
+共有十种策略可用：
 
-    local_first         Always node 0
-    interleaved         Random (per-thread seed)
-    round_robin         Thread-local counter
-    weighted            Static weights, short lock
-    pressure_aware      Lowest utilization
-    cxl_optimized       Small objects local, large objects remote
-    weighted_interleave Pressure-aware weighted random (default, lock-free)
-    adaptive            Not yet implemented (falls back to node 0)
-    latency_aware       Not yet implemented (falls back to node 0)
+    local_first         始终选择 node 0
+    interleaved         随机选择（每线程独立种子）
+    round_robin         线程本地计数器轮询
+    weighted            静态权重，短暂持锁
+    pressure_aware      选择利用率最低的节点
+    cxl_optimized       小对象分配到本地，大对象分配到远端
+    weighted_interleave 压力感知权重随机（默认策略，无锁）
+    adaptive            尚未实现（回退到 node 0）
+    latency_aware       尚未实现（回退到 node 0）
 
-Heat tracking and migration
----------------------------
+热度追踪与迁移
+--------------
 
-Every time `lookupKey` finds a key, it calls
-`composite_lru_record_access()`. This function:
+每次 `lookupKey` 命中 Key 时，都会调用 `composite_lru_record_access()`。
+该函数执行以下操作：
 
-1. Reads the hotness from the object's prefix.
-2. Applies a stepped lazy decay based on idle time:
-   less than 10 s → no decay; less than 60 s → −1; less than 5 min → −2;
-   less than 30 min → −3; 30 min or more → reset to zero.
-3. Increments hotness by one (capped at 7).
-4. Writes the new hotness, access count, and timestamp back to the prefix.
-5. Syncs the key into a dictionary (`key_heat_map`) so the scan channel
-   can iterate over it.
-6. If the hotness just crossed the migration threshold *and* the key
-   lives on a remote node, inserts an SDS copy of the key name into a
-   ring-buffer candidate pool.
+1. 从对象前缀中读取当前热度。
+2. 根据空闲时间执行阶梯式惰性衰减：小于 10 秒不衰减；小于 60 秒衰减 1；
+   小于 5 分钟衰减 2；小于 30 分钟衰减 3；30 分钟及以上清零。
+3. 热度加 1（上限 7）。
+4. 将新热度、访问计数和时间戳写回前缀。
+5. 将 Key 同步写入字典（`key_heat_map`），供扫描通道迭代。
+6. 若热度刚越过迁移阈值，且 Key 位于远程节点，则将 Key 名称的 SDS
+   副本插入环形候选池。
 
-Migration runs every second from `serverCron` through two channels:
+迁移由 `serverCron` 每秒触发，通过两个通道执行：
 
-* **Fast channel** — drains the candidate pool. For each entry it
-  re-reads the current hotness from the prefix, checks the target node's
-  memory pressure and bandwidth, and if conditions are met calls
-  `numa_migrate_key_by_name()`.
+* **快速通道** ——处理候选池。对每个条目重新读取前缀中的当前热度，
+  检查目标节点的内存压力和带宽，条件满足则调用
+  `numa_migrate_key_by_name()`。
 
-* **Scan channel** — progressively iterates `key_heat_map` in batches.
-  Hot keys on remote nodes are pulled back to local DRAM. Under memory
-  pressure, cold keys on the local node are pushed out to the remote
-  node (CXL).
+* **扫描通道** ——分批渐进遍历 `key_heat_map`。远程节点上的热 Key
+  被拉回本地 DRAM；当本地节点内存压力过高时，本地冷 Key 被推到
+  远程节点（CXL）。
 
-The actual migration allocates new memory on the target node via
-`numa_zmalloc_onnode`, copies the data with `memcpy`, atomically swaps
-`val->ptr`, and frees the old allocation. Only the STRING type adapter
-is fully implemented; HASH, LIST, SET, and ZSET adapters are stubs.
+实际迁移过程：在目标节点通过 `numa_zmalloc_onnode` 分配新内存，
+`memcpy` 复制数据，原子替换 `val->ptr`，释放旧内存。目前仅 STRING
+类型适配器完整实现，HASH、LIST、SET、ZSET 适配器为存根。
 
-NUMA commands
--------------
+NUMA 命令
+---------
 
-All operations are exposed through a single `NUMA` command with three
-sub-domains:
+所有操作通过统一的 `NUMA` 命令暴露，分为三个子域：
 
-    NUMA MIGRATE KEY <key> <node>     Migrate one key
-    NUMA MIGRATE DB <node>            Migrate entire database
-    NUMA MIGRATE SCAN [COUNT <n>]     Trigger incremental scan
-    NUMA MIGRATE STATS                Show migration statistics
-    NUMA MIGRATE RESET                Reset statistics
-    NUMA MIGRATE INFO <key>           Show key's NUMA metadata
+    NUMA MIGRATE KEY <key> <node>     迁移单个 Key
+    NUMA MIGRATE DB <node>            迁移整个数据库
+    NUMA MIGRATE SCAN [COUNT <n>]     触发渐进扫描
+    NUMA MIGRATE STATS                显示迁移统计
+    NUMA MIGRATE RESET                重置统计
+    NUMA MIGRATE INFO <key>           显示 Key 的 NUMA 元数据
 
-    NUMA CONFIG GET                   Show current configuration
-    NUMA CONFIG SET <param> <value>   Set a parameter
-    NUMA CONFIG LOAD [path]           Load JSON config file
-    NUMA CONFIG STATS                 Show per-node allocation stats
-    NUMA CONFIG REBALANCE             Trigger manual rebalance
+    NUMA CONFIG GET                   查看当前配置
+    NUMA CONFIG SET <param> <value>   设置参数
+    NUMA CONFIG LOAD [path]           加载 JSON 配置文件
+    NUMA CONFIG STATS                 显示各节点分配统计
+    NUMA CONFIG REBALANCE             手动触发重新平衡
 
-    NUMA STRATEGY LIST                List all 16 strategy slots
-    NUMA STRATEGY SLOT <id> <name>    Insert strategy into a slot
+    NUMA STRATEGY LIST                列出全部 16 个策略插槽
+    NUMA STRATEGY SLOT <id> <name>    将策略插入指定插槽
 
-    NUMA HELP                         Print command reference
+    NUMA HELP                         显示命令帮助
 
-The strategy slots framework supports up to 16 pluggable strategies,
-dispatched by priority (HIGH → NORMAL → LOW). Slot 0 is a no-op
-placeholder (LOW priority), slot 1 is the Composite LRU migration engine
-(HIGH priority), and slots 2–15 are available for custom strategies.
+策略插槽框架支持最多 16 个可插拔策略，按优先级调度（HIGH → NORMAL → LOW）。
+Slot 0 是空操作占位策略（LOW 优先级），Slot 1 是 Composite LRU 迁移引擎
+（HIGH 优先级），Slot 2–15 可供自定义策略使用。
 
-Source layout
--------------
+源码结构
+--------
 
-The NUMA modules live in `src/`, all guarded by `#ifdef HAVE_NUMA`:
+NUMA 模块位于 `src/` 目录，均由 `#ifdef HAVE_NUMA` 保护：
 
-    numa_pool.c/h                  Slab allocator
-    numa_migrate.c/h               Block-level migration
-    numa_key_migrate.c/h           Key-level migration, type adapters
-    numa_strategy_slots.c/h        Strategy slot framework
-    numa_composite_lru.c/h         Composite LRU (default strategy)
-    numa_configurable_strategy.c/h Allocation strategy selection
-    numa_command.c                 Unified NUMA command
-    numa_bw_monitor.c/h            Per-node bandwidth monitoring
-    evict_numa.c/h                 NUMA-aware eviction
+    numa_pool.c/h                  Slab 分配器
+    numa_migrate.c/h               块级内存迁移
+    numa_key_migrate.c/h           Key 级别迁移，类型适配器
+    numa_strategy_slots.c/h        策略插槽框架
+    numa_composite_lru.c/h         Composite LRU（默认策略）
+    numa_configurable_strategy.c/h 分配策略选择
+    numa_command.c                 统一命令接口
+    numa_bw_monitor.c/h            节点带宽监控
+    evict_numa.c/h                 NUMA 感知驱逐
 
-Integration points in the Redis core:
+在 Redis 核心中的集成点：
 
-* `zmalloc.c/h` — all allocations route through the NUMA allocator when
-  available; the 16-byte prefix is prepended here.
-* `server.c` — `numa_init()` runs before `initServer()`; strategy and
-  migration modules initialize after; `serverCron` drives periodic
-  pressure-weight updates and strategy execution every second.
-* `db.c` — `lookupKey()` calls `composite_lru_record_access()`.
+* `zmalloc.c/h` —— NUMA 可用时，所有分配经由 NUMA 分配器路由，
+  16 字节前缀在此写入。
+* `server.c` —— `numa_init()` 在 `initServer()` 之前执行；策略和迁移
+  模块在其后初始化；`serverCron` 每秒驱动压力权重更新和策略执行。
+* `db.c` —— `lookupKey()` 调用 `composite_lru_record_access()`。
 
-Testing
--------
+测试
+----
 
-Standard Redis tests:
+标准 Redis 测试：
 
     % cd src && make test
 
-NUMA benchmarks (YCSB-based, three phases: fill → hotspot → sustain):
+NUMA 基准测试（基于 YCSB，三阶段：填充 → 热点 → 持续）：
 
     % cd tests/ycsb && ./run_bw_benchmark.sh
 
-Environment check:
+环境检查：
 
     % ./check_numa_config.sh
     % ./diagnose_numa.sh
 
-Performance
------------
+性能数据
+--------
 
-Measured on a QEMU dual-node VM (Node 0 = 4 GB DRAM, Node 1 = 8 GB CXL):
+在 QEMU 双节点虚拟机上测量（Node 0 = 4 GB DRAM，Node 1 = 8 GB CXL）：
 
-* Fill phase throughput: ~53 K ops/s (weighted interleave)
-* Sustained migration throughput: ~45 K ops/s
-* Migration rate: ~1 524 keys/s, zero overload stalls
-* Memory fragmentation ratio: 1.04–1.17
+* 填充阶段吞吐量：约 53K ops/s（weighted interleave 策略）
+* 持续迁移吞吐量：约 45K ops/s
+* 迁移速率：约 1524 keys/s，零过载阻断
+* 内存碎片率：1.04–1.17
 
-The allocation hot path is entirely lock-free: node selection uses
-`atomicGet`, slab allocation uses atomic CAS on bitmaps, and statistics
-counters use `atomicIncr`.
+分配热路径完全无锁：节点选择使用 `atomicGet`，Slab 分配使用位图上的
+原子 CAS，统计计数器使用 `atomicIncr`。
 
-Documentation
--------------
+详细文档
+--------
 
-Detailed design documents are in `docs/new/`:
+设计文档位于 `docs/new/` 目录：
 
-    00-design-proposal.md          Project proposal
-    01-overview.md                 Architecture overview
-    02-numa-pool.md                Slab allocator internals
-    03-zmalloc-numa.md             zmalloc integration, PREFIX layout
-    04-numa-migrate.md             Block-level migration
-    05-numa-strategy-slots.md      Strategy slot framework
-    06-numa-composite-lru.md       Composite LRU dual-channel design
-    07-numa-key-migrate.md         Key-level migration, type adapters
-    08-numa-configurable.md        Allocation strategy framework
-    09-numa-command.md             Command reference
-    10-call-chain.md               Full call-chain trace
-    11-alloc-path-instrumentation.md  RSS investigation
-    12-perf-root-cause-analysis.md    Throughput root-cause analysis
-    13-lockfree-alloc-design.md       Lock-free allocation design
+    00-design-proposal.md          项目方案设计
+    01-overview.md                 架构概览
+    02-numa-pool.md                Slab 分配器内部实现
+    03-zmalloc-numa.md             zmalloc 集成与 PREFIX 布局
+    04-numa-migrate.md             块级内存迁移
+    05-numa-strategy-slots.md      策略插槽框架
+    06-numa-composite-lru.md       Composite LRU 双通道设计
+    07-numa-key-migrate.md         Key 级别迁移与类型适配器
+    08-numa-configurable.md        分配策略框架
+    09-numa-command.md             命令参考
+    10-call-chain.md               完整调用链路
+    11-alloc-path-instrumentation.md  RSS 差异调查
+    12-perf-root-cause-analysis.md    吞吐量根因分析
+    13-lockfree-alloc-design.md       无锁分配设计
 
-Project status
---------------
+项目状态
+--------
 
-Implemented:
+已实现：
 
-* Slab allocator (24 size classes, atomic CAS, lock-free)
-* Weighted-interleave default allocation strategy (lock-free)
-* Composite LRU dual-channel migration
-* 16-byte PREFIX inline metadata
-* Strategy slot framework (16 slots, priority dispatch)
-* STRING type migration adapter
-* Unified NUMA command interface
-* JSON hot-reload configuration
-* Bandwidth monitoring
-* Lock-free allocation path
-* NUMA-aware eviction
+* Slab 分配器（24 级 size class，原子 CAS，无锁）
+* 压力感知权重交错默认分配策略（无锁）
+* Composite LRU 双通道迁移
+* 16 字节 PREFIX 内联元数据
+* 策略插槽框架（16 槽，优先级调度）
+* STRING 类型迁移适配器
+* 统一 NUMA 命令接口
+* JSON 配置热加载
+* 带宽监控
+* 分配路径无锁化
+* NUMA 感知驱逐
 
-Not yet implemented:
+尚未实现：
 
-* HASH, LIST, SET, ZSET type migration adapters
-* Adaptive allocation strategy
-* Latency-aware allocation strategy
-* ML-based migration prediction
+* HASH、LIST、SET、ZSET 类型迁移适配器
+* 自适应分配策略
+* 延迟感知分配策略
+* 基于机器学习的迁移预测
 
-License
--------
+许可证
+------
 
-BSD 3-Clause. See [COPYING](COPYING). Built on Redis 6.2.21.
+BSD 3-Clause 许可证。详见 [COPYING](COPYING)。基于 Redis 6.2.21 开发。
