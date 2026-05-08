@@ -2264,6 +2264,11 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         numa_bw_monitor_sample();
     }
 
+    /* NUMA 压力权重更新（每秒） */
+    run_with_period(1000) {
+        numa_config_update_pressure_weights();
+    }
+
     /* Run NUMA strategy slot framework */
     run_with_period(1000) {
         numa_strategy_run_all();
@@ -6499,10 +6504,10 @@ int main(int argc, char **argv) {
     numa_strategy_init();
     printf("DEBUG: numa_strategy_init()完成\n");
 
-    /* 初始化可配置分配策略并设置为 CXL 优先（大对象发 node1，小元数据留 node0） */
+    /* 初始化可配置分配策略，使用 INTERLEAVE（跨节点轮询分配） */
     if (numa_config_strategy_init() == C_OK) {
-        numa_config_set_strategy(NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED);
-        serverLog(LL_NOTICE, "NUMA configurable strategy initialized (cxl_optimized)");
+        numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE);
+        serverLog(LL_NOTICE, "NUMA configurable strategy initialized (weighted_interleave)");
     }
 
     /* 初始化NUMA Key迁移模块 */

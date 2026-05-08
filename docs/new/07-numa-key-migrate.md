@@ -180,7 +180,7 @@ int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
     sds new_str = (char *)new_base + str_offset;
     val_obj->ptr = new_str;
 
-    // 4. 释放旧内存（sdsfree -> zfree -> 根据 PREFIX 路由到 Pool/Slab/Direct）
+    // 4. 释放旧内存（sdsfree -> zfree -> 根据 PREFIX 路由到 Slab 或 Direct）
     sdsfree(old_str);
 
     // 5. 更新 PREFIX 中的 node_id
@@ -308,37 +308,55 @@ numa_migrate_single_key(db, key, target_node)
 
 ## 热度追踪
 
-### 记录访问
+### 主路径：PREFIX 内联
+
+热度追踪的主路径通过 `composite_lru_record_access()` 实现，直接读写分配对象头部的 PREFIX 元数据：
 
 ```c
-void numa_record_key_access(robj *key, robj *val) {
-    // 调用 Composite LRU 的 record_access
-    composite_lru_record_access(strategy, key, val);
-
-    // 同时更新元数据字典（兼容路径）
-    key_numa_metadata_t *meta = get_metadata(key);
-    if (meta) {
-        meta->access_count++;
-        meta->last_access_time = LRU_CLOCK();
-    }
-}
+// composite_lru_record_access 签名（4 参数）
+void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, uint16_t current_time);
 ```
 
-### 周期性衰减
+调用链：
+```
+lookupKey() 命中
+    │
+    ├── composite_lru_record_access(strategy, key->ptr, val, lru_clock)
+    │     │
+    │     ├── 1. numa_get_hotness(val)           // 读 PREFIX 热度
+    │     ├── 2. 计算空闲时间 + 阶梯衰减
+    │     ├── 3. 热度 +1（上限 7）
+    │     ├── 4. 写回 PREFIX (hotness, access_count, last_access)
+    │     ├── 5. 同步 key_heat_map 字典（扫描通道数据源）
+    │     └── 6. 热度首次越过阈值 且 在远程 → 写入候选池
+    │
+    └── 返回 Value
+```
+
+**PREFIX 字段**（16 字节，详见 [03-zmalloc-numa.md](03-zmalloc-numa.md)）：
+- `hotness`（1B）：热度级别 0-7
+- `access_count`（1B）：循环计数
+- `last_access`（2B）：LRU 时钟低 16 位
+
+### 兼容回退：key_numa_metadata_t
+
+当 Value 指针不可用时（如 val==NULL 的特殊场景），回退到字典路径：
 
 ```c
-void numa_perform_heat_decay(void) {
-    // 遍历元数据字典，对长时间未访问的 Key 衰减热度
-    dictIterator *iter = dictGetIterator(key_metadata);
-    dictEntry *entry;
-    while ((entry = dictNext(iter)) != NULL) {
-        key_numa_metadata_t *meta = dictGetVal(entry);
-        // 应用衰减逻辑
-        // ...
-    }
-    dictReleaseIterator(iter);
-}
+typedef struct {
+    int current_node;               // 当前所在 NUMA 节点
+    uint8_t hotness_level;          // 热度级别（0-7）
+    uint16_t last_access_time;      // 上次访问时间（LRU 时钟）
+    size_t memory_footprint;        // 内存占用大小（字节）
+    uint64_t access_count;          // 累计访问次数
+} key_numa_metadata_t;
 ```
+
+> **设计说明**：PREFIX 路径（主路径）零额外内存、O(1) 访问，是所有正常 Key 访问的热度追踪入口。`key_numa_metadata_t` 字典路径仅作兼容保留。
+
+### 热度衰减
+
+衰减逻辑集成在 `composite_lru_record_access()` 内部（阶梯式惰性衰减），不作为独立函数存在。详见 [06-numa-composite-lru.md](06-numa-composite-lru.md) 的衰减规则。
 
 ## 元数据管理
 

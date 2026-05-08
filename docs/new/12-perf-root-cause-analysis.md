@@ -36,9 +36,9 @@
 
 ## 根因分析
 
-### 1. 分配路径双重全局锁（最大瓶颈）
+### 1. 分配路径全局锁（最大瓶颈）**[已修复]**
 
-`zmalloc()` 热路径调用链：
+`zmalloc()` 热路径调用链（修复前）：
 
 ```
 zmalloc() → numa_alloc_with_size() → numa_config_get_best_node()
@@ -52,13 +52,17 @@ zmalloc() → numa_alloc_with_size() → numa_config_get_best_node()
         → pthread_mutex_unlock(&pool->lock)
 ```
 
-一次 SET 触发 4+ 次分配（SDS key + SDS value + robj + dictEntry），每次都经过**双重加锁**。64 线程并发时争用严重。
+**修复方案**：`select_best_node()` 已改为无锁设计（详见 [13-lockfree-alloc-design.md](13-lockfree-alloc-design.md)）：
+- 配置字段 plain read（写入频率极低，最坏情况仅影响一次分配的节点选择）
+- 统计计数器使用 `atomicIncr` 无锁更新
+- WEIGHTED_INTERLEAVE 策略通过 `atomicGet` 读取压力权重
+- Pool 路径已移除，Slab 分配器使用原子 CAS 无锁操作
 
-**文件**: `src/numa_configurable_strategy.c:85-170`（`select_best_node`），`src/numa_pool.c:222-320`（`numa_pool_alloc`）
+一次 SET 触发 4+ 次分配（SDS key + SDS value + robj + dictEntry），修复前每次都经过双重加锁。修复后分配路径完全无锁。
 
-### 2. PREFIX 膨胀 + Chunk 预分配
+### 2. PREFIX 膨胀 **[已优化]**
 
-每条分配带 16 字节 `numa_alloc_prefix_t` 头。Pool 分配器预分配 chunk（256KB/512KB/1MB），bump-pointer 分配后 chunk 剩余空间形成内部碎片。`frag_ratio = 1.59` 恒定说明不是渐进泄漏，而是**chunk 粒度 + free_list 不归还 OS** 的结构性开销。
+每条分配带 16 字节 `numa_alloc_prefix_t` 头。Slab 分配器使用 64KB slab + 原子位图管理，碎片率已优化至 ~1%。`frag_ratio` 从 1.59 降至 1.04-1.17。
 
 ### 3. 后台迁移引擎消耗 CPU
 
@@ -85,15 +89,15 @@ QEMU 虚拟 NUMA 跨节点访问延迟远高于真实硬件（10-20）。Interle
 
 ---
 
-## 修复优先级
+## 修复状态
 
-| 优先级 | 问题 | 位置 | 方案 |
-|--------|------|------|------|
-| **P0** | 分配路径全局锁 | `numa_configurable_strategy.c:90-167` | 改为 per-thread 或 atomic 无锁选择 |
-| **P0** | Pool size-class 锁 | `numa_pool.c:254-292` | 考虑 per-thread cache 或减少锁粒度 |
-| **P1** | free_list 不归还 OS | `numa_pool.c:495-503` | free_list 清理时补 `numa_free(ptr, size)` |
-| **P1** | chunk used_bytes 不递减 | `numa_pool.c:271-274` | 释放时追踪 ptr→chunk，递减 used_bytes |
-| **P2** | 迁移 CPU 开销 | `numa_composite_lru.c:590-713` | 迁移限速或临时关闭对比验证 |
+| 优先级 | 问题 | 位置 | 方案 | 状态 |
+|--------|------|------|------|------|
+| **P0** | 分配路径全局锁 | `numa_configurable_strategy.c` | 改为 atomic 无锁选择 | ✅ 已修复 |
+| **P0** | 分配器锁 | `numa_pool.c` | Pool 路径移除，Slab 原子 CAS 无锁 | ✅ 已修复 |
+| **P0** | 默认策略 | `server.c` | INTERLEAVE → WEIGHTED_INTERLEAVE | ✅ 已修复 |
+| **P1** | 路径合并 | `zmalloc.c` | Pool+Slab 合并为纯 Slab（≤4KB） | ✅ 已修复 |
+| **P2** | 迁移 CPU 开销 | `numa_composite_lru.c` | 带宽感知限速 + overload 阻断 | ✅ 已实现 |
 
 ---
 

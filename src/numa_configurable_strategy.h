@@ -19,7 +19,11 @@ typedef enum {
     NUMA_STRATEGY_CONFIG_ROUND_ROBIN,        /* 轮询分配策略 */
     NUMA_STRATEGY_CONFIG_WEIGHTED,           /* 加权分配策略 */
     NUMA_STRATEGY_CONFIG_PRESSURE_AWARE,     /* 压力感知策略 */
-    NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED       /* CXL优化策略 */
+    NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED,      /* CXL优化策略 */
+    NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE,/* 压力感知权重交错策略 */
+    NUMA_STRATEGY_CONFIG_ADAPTIVE,           /* 自适应策略（待实现） */
+    NUMA_STRATEGY_CONFIG_LATENCY_AWARE,      /* 延迟感知策略（待实现） */
+    NUMA_STRATEGY_CONFIG_COUNT               /* 策略总数哨兵 */
 } numa_config_strategy_type_t;
 
 /* 策略配置参数 */
@@ -41,6 +45,7 @@ typedef struct {
     uint64_t last_rebalance_time;               /* 上次重新平衡时间 */
     redisAtomic int *allocation_counters;        /* 各节点分配计数器（原子，无锁更新） */
     redisAtomic size_t *bytes_allocated_per_node; /* 各节点已分配字节数（原子，无锁更新） */
+    redisAtomic int *pressure_weights;           /* 压力权重数组（原子更新，分配路径无锁读取） */
 } numa_runtime_state_t;
 
 /* ========== 配置管理API ========== */
@@ -76,6 +81,9 @@ int numa_config_set_balance_threshold(double threshold);
 
 /* 手动触发重新平衡 */
 int numa_config_trigger_rebalance(void);
+
+/* 更新压力权重（serverCron 每秒调用） */
+void numa_config_update_pressure_weights(void);
 
 /* ========== 内存分配API ========== */
 

@@ -147,8 +147,14 @@ numa_migrate_single_key(db, key, target_node)
     │     ├── migrate_hash_type()
     │     └── ...
     │
-    └── 3. 适配器内部调用 numa_migrate_memory()
+    └── 3. 适配器内部直接分配+复制+释放
+          ├── numa_zmalloc_onnode(total, target_node)  // 在目标节点分配
+          ├── memcpy(new_base, old_base, total)         // 完整复制
+          ├── val_obj->ptr = new_str                    // 原子指针切换
+          └── sdsfree(old_str)                          // 释放旧内存
 ```
+
+> **注意**：String 类型适配器（`migrate_string_type`）不直接调用 `numa_migrate_memory()`，而是通过 `numa_zmalloc_onnode` + `memcpy` + `sdsfree` 完成迁移，以精确控制 SDS 内存布局和 PREFIX 处理。`numa_migrate_memory()` 作为底层块级迁移接口仍然可用，供其他场景使用。
 
 ### 被 Composite LRU 调用
 

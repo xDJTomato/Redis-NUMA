@@ -190,44 +190,46 @@ int numa_strategy_run_slot(int slot_id);
 
 ## 执行流程
 
-### numa_strategy_run_all()
+### numa_strategy_run_all() 优先级调度
+
+`numa_strategy_run_all()` 按优先级从高到低遍历所有插槽，确保高优先级策略（如 Composite LRU）优先执行：
 
 ```c
 void numa_strategy_run_all(void) {
-    pthread_mutex_lock(&manager.lock);
+    // 按优先级从高到低遍历：HIGH → NORMAL → LOW
+    for (int priority = STRATEGY_PRIORITY_HIGH;
+         priority >= STRATEGY_PRIORITY_LOW;
+         priority--) {
 
-    for (int i = 0; i < NUMA_MAX_STRATEGY_SLOTS; i++) {
-        numa_strategy_t *strategy = manager.slots[i];
+        for (int slot_id = 0; slot_id < NUMA_MAX_STRATEGY_SLOTS; slot_id++) {
+            numa_strategy_t *strategy = manager.slots[slot_id];
 
-        // 跳过空插槽和未启用的策略
-        if (!strategy || !strategy->enabled) continue;
+            // 跳过空插槽、未启用、优先级不匹配的策略
+            if (!strategy || !strategy->enabled) continue;
+            if (strategy->priority != priority) continue;
 
-        // 检查执行间隔
-        uint64_t now = get_time_us();
-        if (now - strategy->last_execute_time < strategy->execute_interval_us) {
-            continue;
+            // 检查执行间隔
+            uint64_t now = get_time_us();
+            if (now - strategy->last_execute_time < strategy->execute_interval_us)
+                continue;
+
+            // 执行策略
+            uint64_t start = get_time_us();
+            int ret = strategy->vtable->execute(strategy);
+            uint64_t elapsed = get_time_us() - start;
+
+            // 更新统计
+            strategy->total_executions++;
+            strategy->last_execute_time = now;
+            strategy->total_execution_time_us += elapsed;
+            if (ret != NUMA_STRATEGY_OK) strategy->total_failures++;
         }
-
-        // 执行策略
-        uint64_t start = get_time_us();
-        int ret = strategy->vtable->execute(strategy);
-        uint64_t elapsed = get_time_us() - start;
-
-        // 更新统计
-        strategy->total_executions++;
-        strategy->last_execute_time = now;
-        strategy->total_execution_time_us += elapsed;
-        if (ret != NUMA_STRATEGY_OK) {
-            strategy->total_failures++;
-        }
-
-        manager.total_strategy_executions++;
     }
-
     manager.total_runs++;
-    pthread_mutex_unlock(&manager.lock);
 }
 ```
+
+**调度顺序**：当前内置策略中，Composite LRU（Slot 1）优先级为 HIGH，No-op（Slot 0）优先级为 LOW，因此 Composite LRU 总是优先于 No-op 执行。
 
 ## 内置策略
 

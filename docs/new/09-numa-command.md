@@ -268,7 +268,7 @@ NUMA CONFIG GET
 **返回**（16 个字段）：
 ```
  1) "strategy"
- 2) "local-first"
+ 2) "weighted-interleave"
  3) "nodes"
  4) (integer) 2
  5) "balance_threshold"
@@ -298,10 +298,10 @@ NUMA CONFIG SET <param> <value>
 
 | 参数 | 值类型 | 示例 |
 |------|-------|------|
-| `strategy` | 策略名称 | `local-first`, `interleave`, `weighted` |
+| `strategy` | 策略名称 | `local_first`, `interleaved`, `weighted_interleave`, `pressure_aware`, `cxl_optimized` 等 |
 | `weight` | `<node> <value>` | `0 2` |
 | `cxl_optimization` | `on`/`off` | `on` |
-| `balance_threshold` | 浮点数 | `0.5` |
+| `balance_threshold` | 百分比 (0-100) | `50` |
 
 **示例**：
 ```bash
@@ -339,8 +339,8 @@ redis-cli NUMA CONFIG LOAD /etc/redis/composite_lru.json
 **JSON 文件格式**：
 ```json
 {
-    "migrate_hotness_threshold": 5,
-    "hot_candidates_size": 512,
+    "migrate_hotness_threshold": 3,
+    "hot_candidates_size": 1024,
     "scan_batch_size": 500,
     "decay_threshold_sec": 10,
     "auto_migrate_enabled": 1,

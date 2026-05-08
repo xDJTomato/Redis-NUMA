@@ -366,6 +366,9 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
          * 快速通道写入条件：
          *   1. 内存在远程节点（mem_node != current_node）
          *   2. 本次访问恰好越过阈值（before < threshold <= after）
+         *
+         * 同时写入 key_heat_map 供扫描通道兜底重试（仅在越过阈值时，
+         * 不在每次访问时同步，避免热路径字典查找开销）。
          */
         uint8_t thr = data->config.migrate_hotness_threshold;
         if (data->config.debug_logging_enabled) {
@@ -385,9 +388,28 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             if (data->candidates_count < data->config.hot_candidates_size)
                 data->candidates_count++;
             data->candidates_written++;
-            _serverLog(LL_VERBOSE,
+            _serverLog(LL_DEBUG,
                 "[Composite LRU] Candidate written: val=%p mem_node=%d cpu_node=%d hotness=%d",
                 val, mem_node, current_node, hotness);
+
+            /* 同步写入 key_heat_map：扫描通道兜底（快速通道候选被丢弃时可重试） */
+            composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
+            if (!info) {
+                info = zmalloc(sizeof(*info));
+                if (info) {
+                    info->hotness           = hotness;
+                    info->stability_counter = 0;
+                    info->last_access       = current_time;
+                    info->access_count      = 1;
+                    info->current_node      = mem_node;
+                    info->preferred_node    = current_node;
+                    dictAdd(data->key_heat_map, sdsdup((sds)key), info);
+                }
+            } else {
+                info->hotness        = hotness;
+                info->current_node   = mem_node;
+                info->preferred_node = current_node;
+            }
         }
     } else {
         /* ---- 字典回退路径（val 为 NULL 时） ---- */
@@ -520,9 +542,11 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
             int status = check_resource_status(data, info->preferred_node);
             if (status == RESOURCE_BANDWIDTH_SATURATED) {
                 data->migrations_bw_blocked++;
+            } else if (status == RESOURCE_OVERLOADED || status == RESOURCE_MIGRATION_PRESSURE) {
+                data->migrations_overloaded++;
             }
             if (status == RESOURCE_AVAILABLE) {
-                _serverLog(LL_VERBOSE,
+                _serverLog(LL_DEBUG,
                     "[Composite LRU] Scan migrate (dict): key=%p node=%d->%d hotness=%d",
                     dictGetKey(de), info->current_node, info->preferred_node, info->hotness);
                 int rc = -1;
@@ -626,13 +650,14 @@ int composite_lru_execute(numa_strategy_t *strategy) {
             _serverLog(LL_VERBOSE,
                 "[NUMA Strategy Slot 1] Composite LRU executed "
                 "(count: %llu, candidates: %u, heat_updates: %llu, "
-                "migrations: %llu, bw_blocked: %llu, "
+                "migrations: %llu, bw_blocked: %llu, overloaded: %llu, "
                 "candidates_written: %llu, scan_checked: %llu, heat_map_size: %lu)",
                 (unsigned long long)exec_count,
                 data->candidates_count,
                 (unsigned long long)data->heat_updates,
                 (unsigned long long)data->migrations_triggered,
                 (unsigned long long)data->migrations_bw_blocked,
+                (unsigned long long)data->migrations_overloaded,
                 (unsigned long long)data->candidates_written,
                 (unsigned long long)data->scan_keys_checked,
                 (unsigned long)dictSize(data->key_heat_map));
@@ -685,9 +710,11 @@ int composite_lru_execute(numa_strategy_t *strategy) {
             int status = check_resource_status(data, cand->target_node);
             if (status == RESOURCE_BANDWIDTH_SATURATED) {
                 data->migrations_bw_blocked++;
+            } else if (status == RESOURCE_OVERLOADED || status == RESOURCE_MIGRATION_PRESSURE) {
+                data->migrations_overloaded++;
             }
             if (status == RESOURCE_AVAILABLE) {
-                _serverLog(LL_VERBOSE,
+                _serverLog(LL_DEBUG,
                     "[Composite LRU] Fast-path migrate: key=%p node=%d->%d hotness=%d",
                     cand->key, mem_node, cand->target_node, cur_hotness);
                 if (data->db && cand->key) {

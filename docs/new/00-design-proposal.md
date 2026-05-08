@@ -40,13 +40,18 @@
 
 初步拟定的方案如下：针对双 NUMA 节点环境（Node 0 = DRAM, Node 1 = CXL），问题规模大小为 1GB~64GB（间隔 2GB，总计 32 种），线程数量为 4~32（间隔 4，总计 7 种），分别应用本地优先分配、交错分配、Composite LRU 自动迁移、手动静态迁移四种策略，测试系统在执行 YCSB 工作负载时的吞吐量（ops/s）和 p99 延迟（3 次测量取平均），性能最优的即为最优策略。
 
-由于目前标准 Redis 不支持 NUMA 感知分配，故本项目设计在 Redis 6.2.21 基础上人工实现四种策略：
+由于目前标准 Redis 不支持 NUMA 感知分配，故本项目设计在 Redis 6.2.21 基础上实现了以下策略：
 
 | 策略编号 | 策略名称 | 实现方式 |
 |---------|---------|---------|
 | Slot 0 | No-Op | 不做任何 NUMA 优化，使用标准 malloc |
 | 本地优先 | Local-First | 所有分配强制使用当前 CPU 所在节点 |
 | 交错分配 | Interleave | 跨节点轮询分配内存 |
+| 轮询分配 | Round-Robin | thread-local 计数器递增取模 |
+| 静态加权 | Weighted | 持锁读权重数组，锁外加权随机 |
+| 压力感知 | Pressure-Aware | 选择利用率最低的节点 |
+| CXL 优化 | CXL-Optimized | 小对象本地、大对象远端 |
+| 压力权重交错 | Weighted-Interleave | **默认策略**，atomicGet 读压力权重，分配路径无锁 |
 | Slot 1 | Composite LRU | 双通道热冷识别 + 自动迁移 |
 
 此外，考虑到内存碎片对性能的影响较大，因此选择固定内存分配大小进行测试。由于不同的分块策略，其内存占用和碎片率不同，无法保证每种策略的内存开销完全相同。因此，本项目设计对碎片率的测量如表 1 所示。
@@ -102,7 +107,7 @@
 
 此外，本项目设计已取得的初步进展还包括：
 
-1. **NUMA 内存池模块**：实现 Slab/Pool/Direct 三层分配器，16 级 size 分类
+1. **NUMA Slab 分配器**：实现 Slab + Direct 两层分配器，24 级 jemalloc 风格 size class
 2. **Composite LRU 策略**：实现双通道热冷识别架构（快速通道 + 渐进扫描）
 3. **Key 级别迁移模块**：实现 5 种数据类型的专用迁移适配器
 4. **统一命令接口**：实现 NUMA MIGRATE/CONFIG/STRATEGY 命令集
@@ -128,9 +133,11 @@
 │       ▼              ▼             ▼               ▼         │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              NUMA 模块层                              │   │
+│  │  ┌──────────────────────────────────────────────────────┐  │   │
+│  │  │              NUMA 模块层                              │  │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  │   │
-│  │  │ numa_pool    │  │  zmalloc-    │  │  PREFIX    │  │   │
-│  │  │ (Slab/Pool)  │  │  numa        │  │ (16B 元数据)│  │   │
+│  │  │ numa_slab    │  │  zmalloc-    │  │  PREFIX    │  │   │
+│  │  │ (64KB slab)  │  │  numa        │  │ (16B 元数据)│  │   │
 │  │  └──────────────┘  └──────────────┘  └────────────┘  │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐  │   │
 │  │  │composite_lru │  │key_migrate   │  │   command  │  │   │
@@ -151,12 +158,11 @@
 
 ## 6 关键设计决策
 
-### 6.1 三层内存分配策略
+### 6.1 两层内存分配策略
 
 | 层级 | 对象大小 | 分配器 | 碎片率 | 性能 |
 |-----|---------|-------|-------|------|
-| Slab | ≤ 128B | 16KB slab + 位图管理 | ~1% | O(1) 原子操作 |
-| Pool | ≤ 4KB | 动态 chunk + Free List | ~2.4% | O(1) Bump Pointer |
+| Slab | ≤ 4KB | 64KB slab + 3072bit 位图 + 原子 CAS | ~1% | O(1) 无锁操作 |
 | Direct | > 4KB | numa_alloc_onnode | - | 系统调用 |
 
 ### 6.2 PREFIX 元数据内联设计
@@ -197,7 +203,7 @@
 ## 8 文档导航
 
 - [项目概览](01-overview.md) - 整体架构与核心模块
-- [NUMA 内存池](02-numa-pool.md) - Slab/Pool 分配器实现
+- [NUMA Slab 分配器](02-numa-pool.md) - jemalloc 风格 Slab 分配器
 - [zmalloc 适配](03-zmalloc-numa.md) - PREFIX 元数据设计
 - [内存迁移](04-numa-migrate.md) - 块级内存迁移
 - [策略插槽框架](05-numa-strategy-slots.md) - 16 插槽插件系统
@@ -207,3 +213,5 @@
 - [统一命令接口](09-numa-command.md) - NUMA 命令详解
 - [调用链与模块交互](10-call-chain.md) - 完整调用链路
 - [分配路径埋点](11-alloc-path-instrumentation.md) - RSS 差异调查
+- [性能根因分析](12-perf-root-cause-analysis.md) - 吞吐腰斩与 RSS 膨胀
+- [无锁分配设计](13-lockfree-alloc-design.md) - 分配路径无锁化
