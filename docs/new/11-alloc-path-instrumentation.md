@@ -10,11 +10,12 @@ QEMU 双 NUMA 节点环境下 Redis-CXL 实例 RSS 超过 9GB，而理论数据�
 
 ### 方法
 
-在 `zmalloc.c` 的 NUMA 分配入口新增 6 个全局原子计数器，按分配路径分别记录：
+在 `zmalloc.c` 的 NUMA 分配入口新增 4 个全局原子计数器，按分配路径分别记录：
 
-- `numa_alloc_slab_bytes/count` — Slab 路径（≤128B 小对象）
-- `numa_alloc_pool_bytes/count` — Pool 路径（129B–4KB）
+- `numa_alloc_slab_bytes/count` — Slab 路径（≤4KB 小对象）
 - `numa_alloc_direct_bytes/count` — Direct 路径（>4KB）
+
+> **v3.1 变更**：原 Pool 路径（129B–4KB 动态 chunk）已移除，合并入 Slab 路径（≤4KB 统一使用 64KB slab + 原子 CAS）。原 `numa_alloc_pool_bytes/count` 计数器已废弃，始终返回 0。
 
 通过 `NUMA CONFIG STATS` 命令暴露，采集脚本每秒写入 CSV。
 
@@ -27,8 +28,7 @@ QEMU 双 NUMA 节点环境下 Redis-CXL 实例 RSS 超过 9GB，而理论数据�
 | used_memory | 6624 MB | 6656 MB | 6656 MB |
 | RSS | 6813 MB | 6846 MB | 6846 MB |
 | RSS - used | **189 MB** | **190 MB** | **190 MB** |
-| Slab | 1.37 GB | 1.44 GB | 1.44 GB |
-| Pool | 5.54 GB | 5.85 GB | 5.92 GB |
+| Slab | 6.91 GB | 7.29 GB | 7.36 GB |
 | Direct | 260 MB | 312 MB | 380 MB |
 
 #### QEMU（双 NUMA 节点，distance=50）— 原始 libc 基线
@@ -38,19 +38,18 @@ QEMU 双 NUMA 节点环境下 Redis-CXL 实例 RSS 超过 9GB，而理论数据�
 | used_memory | 6649 MB | 6656 MB | - |
 | RSS | 9574 MB | 9481 MB | - |
 | RSS - used | **2925 MB** | **2825 MB** | - |
-| Slab | 1.37 GB | 1.44 GB | - |
-| Pool | 5.80 GB | 6.30 GB | - |
+| Slab | 6.91 GB | 7.29 GB | - |
 | Direct | 522 MB | 732 MB | - |
 
-两侧 used_memory 几乎一致（~6.6GB），slab/pool/direct 占比也一致。
+两侧 used_memory 几乎一致（~6.6GB），slab/direct 占比也一致。
 
 ---
 
-## Phase 2：Pool+Slab 预分配
+## Phase 2：Slab 预分配
 
 ### 方案
 
-将 Pool chunk（256KB/512KB/1MB）和 Slab（16KB）改为单次大 mmap 预分配，内部用 bump-pointer 切片。
+将 Slab（64KB）改为单次大 mmap 预分配，内部用 bump-pointer 切片。
 
 - `numa_pool_prealloc()`: 为每个 NUMA 节点预分配 512MB 大块
 - `numa_pool_alloc_from_prealloc()`: 从预分配块中 bump-pointer 切片

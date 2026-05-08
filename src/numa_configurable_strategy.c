@@ -4,6 +4,7 @@
 #include "numa_configurable_strategy.h"
 #include "zmalloc.h"
 #include "server.h"
+#include "evict.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,11 +19,14 @@ static int g_initialized = 0;
 /* 策略名称映射 */
 static const char* strategy_names[] = {
     "local_first",
-    "interleaved", 
+    "interleaved",
     "round_robin",
     "weighted",
     "pressure_aware",
-    "cxl_optimized"
+    "cxl_optimized",
+    "weighted_interleave",
+    "adaptive",
+    "latency_aware"
 };
 
 /* 获取策略名称 */
@@ -54,6 +58,9 @@ static int init_runtime_state(int num_nodes) {
     if (g_runtime_state.bytes_allocated_per_node) {
         zfree(g_runtime_state.bytes_allocated_per_node);
     }
+    if (g_runtime_state.pressure_weights) {
+        zfree(g_runtime_state.pressure_weights);
+    }
     
     memset(&g_runtime_state, 0, sizeof(g_runtime_state));
     
@@ -68,16 +75,19 @@ static int init_runtime_state(int num_nodes) {
     /* 原子计数器数组：元素类型为 redisAtomic int/size_t */
     g_runtime_state.allocation_counters = zcalloc(num_nodes * sizeof(redisAtomic int));
     g_runtime_state.bytes_allocated_per_node = zcalloc(num_nodes * sizeof(redisAtomic size_t));
-    
-    if (!g_runtime_state.config.node_weights || 
-        !g_runtime_state.allocation_counters || 
-        !g_runtime_state.bytes_allocated_per_node) {
+    g_runtime_state.pressure_weights = zcalloc(num_nodes * sizeof(redisAtomic int));
+
+    if (!g_runtime_state.config.node_weights ||
+        !g_runtime_state.allocation_counters ||
+        !g_runtime_state.bytes_allocated_per_node ||
+        !g_runtime_state.pressure_weights) {
         return C_ERR;
     }
     
     /* 初始化默认权重 */
     for (int i = 0; i < num_nodes; i++) {
-        g_runtime_state.config.node_weights[i] = 100; /* 默认权重100 */
+        g_runtime_state.config.node_weights[i] = 100; /* 默认静态权重100 */
+        atomicSet(g_runtime_state.pressure_weights[i], 100); /* 默认压力权重100 */
     }
     
     return C_OK;
@@ -164,6 +174,32 @@ static int select_best_node(size_t size) {
             break;
         }
 
+        case NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE: {
+            int total_weight = 0;
+            int w[16];
+            int n = (num_nodes <= 16) ? num_nodes : 16;
+            for (int i = 0; i < n; i++) {
+                atomicGet(g_runtime_state.pressure_weights[i], w[i]);
+                total_weight += w[i];
+            }
+            if (total_weight > 0) {
+                static __thread unsigned int seed = 0;
+                if (seed == 0) seed = (unsigned int)(getpid() ^ (uintptr_t)pthread_self());
+                int r = rand_r(&seed) % total_weight;
+                int cum = 0;
+                for (int i = 0; i < n; i++) {
+                    cum += w[i];
+                    if (r < cum) { selected_node = i; break; }
+                }
+            }
+            break;
+        }
+
+        case NUMA_STRATEGY_CONFIG_ADAPTIVE:
+        case NUMA_STRATEGY_CONFIG_LATENCY_AWARE:
+            selected_node = 0;
+            break;
+
         default:
             selected_node = 0;
             break;
@@ -222,10 +258,13 @@ void numa_config_strategy_cleanup(void) {
     if (g_runtime_state.bytes_allocated_per_node) {
         zfree(g_runtime_state.bytes_allocated_per_node);
     }
-    
+    if (g_runtime_state.pressure_weights) {
+        zfree(g_runtime_state.pressure_weights);
+    }
+
     memset(&g_runtime_state, 0, sizeof(g_runtime_state));
     g_initialized = 0;
-    
+
     pthread_mutex_unlock(&g_config_mutex);
 }
 
@@ -618,5 +657,18 @@ void numa_config_show_help(void) {
     serverLog(LL_NOTICE, "Available Strategies:");
     for (size_t i = 0; i < sizeof(strategy_names)/sizeof(strategy_names[0]); i++) {
         serverLog(LL_NOTICE, "  %s", strategy_names[i]);
+    }
+}
+
+/* ========== 压力权重更新 ========== */
+
+void numa_config_update_pressure_weights(void) {
+    if (!g_initialized || !g_runtime_state.pressure_weights) return;
+    int n = g_runtime_state.config.num_nodes;
+    for (int i = 0; i < n; i++) {
+        double p = numaGetNodePressure(i);
+        int w = (int)((1.0 - p) * 100);
+        if (w < 1) w = 1;
+        atomicSet(g_runtime_state.pressure_weights[i], w);
     }
 }

@@ -2,445 +2,157 @@
 
 ## 模块概述
 
-`numa_configurable_strategy.c/h` 提供运行时可配置的 NUMA 内存分配策略。支持通过配置文件和命令行指令动态调整分配策略，无需重启服务。
+`numa_configurable_strategy.c/h` 提供运行时可配置的 NUMA 内存分配策略框架。支持 10 种分配策略，通过原子操作实现无锁分配路径，每秒由 serverCron 更新压力权重。
 
-## 支持的策略类型
+**版本**：v3.0（WEIGHTED_INTERLEAVE 策略，无锁分配）
+
+## 策略枚举
 
 ```c
 typedef enum {
-    NUMA_STRATEGY_CONFIG_LOCAL_FIRST = 0,    // 本地节点优先
-    NUMA_STRATEGY_CONFIG_INTERLEAVE,         // 交错分配（负载均衡）
-    NUMA_STRATEGY_CONFIG_ROUND_ROBIN,        // 轮询分配
-    NUMA_STRATEGY_CONFIG_WEIGHTED,           // 加权分配
-    NUMA_STRATEGY_CONFIG_PRESSURE_AWARE,     // 压力感知
-    NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED       // CXL 优化
+    NUMA_STRATEGY_CONFIG_LOCAL_FIRST = 0,      // 本地优先：固定返回 node 0
+    NUMA_STRATEGY_CONFIG_INTERLEAVE,           // 交错分配：rand_r 随机选择
+    NUMA_STRATEGY_CONFIG_ROUND_ROBIN,          // 轮询分配：thread-local 计数器
+    NUMA_STRATEGY_CONFIG_WEIGHTED,             // 静态加权：持锁读权重数组
+    NUMA_STRATEGY_CONFIG_PRESSURE_AWARE,       // 压力感知：选择利用率最低的节点
+    NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED,        // CXL 优化：小对象本地、大对象远端
+    NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE,  // 压力感知权重交错（默认策略）
+    NUMA_STRATEGY_CONFIG_ADAPTIVE,             // 自适应策略（待实现，fallback node 0）
+    NUMA_STRATEGY_CONFIG_LATENCY_AWARE,        // 延迟感知策略（待实现，fallback node 0）
+    NUMA_STRATEGY_CONFIG_COUNT                 // 策略总数哨兵
 } numa_config_strategy_type_t;
 ```
 
-### 策略说明
+| 策略 | 实现状态 | 锁依赖 | 选择逻辑 |
+|------|---------|--------|---------|
+| `local_first` | 完整 | 无锁 | 固定返回 node 0 |
+| `interleaved` | 完整 | 无锁 | `rand_r(&seed) % num_nodes` |
+| `round_robin` | 完整 | 无锁 | thread-local 计数器递增取模 |
+| `weighted` | 完整 | **短锁** | 持锁复制权重数组，锁外计算加权随机 |
+| `pressure_aware` | 完整 | 无锁 | 遍历节点，选择利用率最低的 |
+| `cxl_optimized` | 完整 | 无锁 | size < threshold → node 0，否则 node 1 |
+| `weighted_interleave` | 完整（默认） | 无锁 | `atomicGet` 读压力权重，加权随机 |
+| `adaptive` | 待实现 | — | fallback 返回 node 0 |
+| `latency_aware` | 待实现 | — | fallback 返回 node 0 |
 
-| 策略 | 适用场景 | 行为 |
-|------|---------|------|
-| **Local First** | 通用场景 | 优先在当前 CPU 所在节点分配 |
-| **Interleave** | 负载均衡 | 轮流在各节点分配，均匀分布 |
-| **Round Robin** | 均匀分布 | 严格轮询，不感知 CPU 位置 |
-| **Weighted** | 异构系统 | 按权重分配（节点内存大小不同） |
-| **Pressure Aware** | 高负载 | 根据节点内存压力动态调整 |
-| **CXL Optimized** | CXL 环境 | 热数据 DRAM，冷数据 CXL |
+## WEIGHTED_INTERLEAVE 策略详解
 
-## 核心数据结构
+### 核心设计
 
-### 策略配置
+压力越大的节点分配概率越低，权重更新与分配路径完全解耦：
 
-```c
-typedef struct {
-    numa_config_strategy_type_t strategy_type;  // 策略类型
-    int *node_weights;                          // 各节点权重数组
-    int num_nodes;                              // 节点数量
-    double balance_threshold;                   // 平衡阈值
-    int enable_cxl_optimization;                // 是否启用 CXL 优化
-    size_t min_allocation_size;                 // 最小分配大小
-    int auto_rebalance;                         // 是否自动重新平衡
-    uint64_t rebalance_interval_us;             // 重新平衡间隔（微秒）
-} numa_strategy_config_t;
+```
+serverCron (每秒)                    分配路径 (每次 zmalloc)
+        │                                    │
+        ▼                                    ▼
+读取 numaGetNodePressure()          atomicGet(pressure_weights[i])
+        │                                    │
+        ▼                                    ▼
+weight = (1 - pressure) * 100       加权随机选择节点
+        │
+        ▼
+atomicSet(pressure_weights[i], w)
 ```
 
-### 运行时状态
+### 权重计算公式
+
+```c
+// 每秒由 serverCron 调用
+void numa_config_update_pressure_weights(void) {
+    for (int i = 0; i < num_nodes; i++) {
+        double p = numaGetNodePressure(i);  // 读取 /sys/devices/system/node/nodeX/meminfo
+        int w = (int)((1.0 - p) * 100);
+        if (w < 1) w = 1;  // 最低权重 1，保证所有节点都有分配机会
+        atomicSet(g_runtime_state.pressure_weights[i], w);
+    }
+}
+```
+
+### 分配路径（无锁）
+
+```c
+case NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE: {
+    int total_weight = 0;
+    int w[16];
+    int n = (num_nodes <= 16) ? num_nodes : 16;
+    for (int i = 0; i < n; i++) {
+        atomicGet(g_runtime_state.pressure_weights[i], w[i]);
+        total_weight += w[i];
+    }
+    if (total_weight > 0) {
+        static __thread unsigned int seed = 0;
+        if (seed == 0) seed = (unsigned int)(getpid() ^ (uintptr_t)pthread_self());
+        int r = rand_r(&seed) % total_weight;
+        int cum = 0;
+        for (int i = 0; i < n; i++) {
+            cum += w[i];
+            if (r < cum) { selected_node = i; break; }
+        }
+    }
+    break;
+}
+```
+
+### 示例：双节点 QEMU 环境
+
+| 场景 | Node 0 压力 | Node 1 压力 | Node 0 权重 | Node 1 权重 | Node 0 分配概率 |
+|------|------------|------------|------------|------------|---------------|
+| 初始状态 | 0% | 0% | 100 | 100 | 50% |
+| 数据填充中 | 60% | 30% | 40 | 70 | 36% |
+| Node 0 过载 | 90% | 40% | 10 | 60 | 14% |
+| 均衡状态 | 50% | 50% | 50 | 50 | 50% |
+
+## 运行时状态
 
 ```c
 typedef struct {
-    numa_strategy_config_t config;              // 当前配置
-    int current_strategy;                       // 当前使用的策略
-    uint64_t last_rebalance_time;               // 上次重新平衡时间
-    int *allocation_counters;                   // 各节点分配计数器
-    size_t *bytes_allocated_per_node;           // 各节点已分配字节数
+    numa_strategy_config_t config;
+    int current_strategy;
+    uint64_t last_rebalance_time;
+    redisAtomic int *allocation_counters;        // 各节点分配计数器（原子）
+    redisAtomic size_t *bytes_allocated_per_node; // 各节点已分配字节数（原子）
+    redisAtomic int *pressure_weights;            // 压力权重数组（原子）
 } numa_runtime_state_t;
 ```
 
-## 配置管理 API
-
-### 初始化
+## 默认配置
 
 ```c
-int numa_config_strategy_init(void);
-void numa_config_strategy_cleanup(void);
+// init_runtime_state() 中设置
+config.strategy_type = NUMA_STRATEGY_CONFIG_LOCAL_FIRST;  // 初始默认
+config.balance_threshold = 0.3;
+config.auto_rebalance = 1;
+config.rebalance_interval_us = 5000000;  // 5秒
+
+// server.c 中覆盖为 WEIGHTED_INTERLEAVE
+numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE);
 ```
 
-### 从文件加载
+## 核心 API
 
-```c
-int numa_config_load_from_file(const char *config_file);
-```
-
-支持 JSON 格式配置文件。
-
-### 应用配置
-
-```c
-int numa_config_apply_strategy(const numa_strategy_config_t *config);
-```
-
-### 获取当前配置
-
-```c
-const numa_strategy_config_t* numa_config_get_current(void);
-```
-
-## 运行时控制 API
-
-### 设置策略
-
-```c
-int numa_config_set_strategy(numa_config_strategy_type_t strategy);
-```
-
-立即生效，后续分配使用新策略。
-
-### 设置节点权重
-
-```c
-int numa_config_set_node_weights(int *weights, int num_nodes);
-```
-
-用于 Weighted 策略。
-
-### CXL 优化开关
-
-```c
-int numa_config_set_cxl_optimization(int enable);
-```
-
-### 设置平衡阈值
-
-```c
-int numa_config_set_balance_threshold(double threshold);
-```
-
-当节点间内存差异超过阈值时触发重新平衡。
-
-### 手动触发重新平衡
-
-```c
-int numa_config_trigger_rebalance(void);
-```
-
-## 内存分配 API
-
-### 智能分配
-
-```c
-void *numa_config_malloc(size_t size);
-void *numa_config_calloc(size_t nmemb, size_t size);
-```
-
-根据当前配置自动选择最优节点。
-
-### 指定节点分配
-
-```c
-void *numa_config_malloc_onnode(size_t size, int node);
-```
-
-## 查询和统计 API
-
-### 获取分配统计
-
-```c
-void numa_config_get_statistics(uint64_t *allocations_per_node,
-                               size_t *bytes_per_node,
-                               int num_nodes);
-```
-
-### 获取节点利用率
-
-```c
-double numa_config_get_node_utilization(int node_id);
-```
-
-### 检查是否需要重新平衡
-
-```c
-int numa_config_needs_rebalance(void);
-```
-
-### 获取最佳分配节点
-
-```c
-int numa_config_get_best_node(size_t size);
-```
-
-## 策略实现细节
-
-### Local First
-
-```c
-int numa_config_get_best_node(size_t size) {
-    // 1. 获取当前线程绑定的 CPU
-    int cpu = sched_getcpu();
-
-    // 2. 查找 CPU 所属的 NUMA 节点
-    int node = cpu_to_node(cpu);
-
-    // 3. 检查节点是否可用
-    if (is_node_available(node)) {
-        return node;
-    }
-
-    // 4. 回退：选择负载最低的节点
-    return find_least_loaded_node();
-}
-```
-
-### Interleave
-
-```c
-static __thread int interleave_index = 0;
-
-int numa_config_get_best_node(size_t size) {
-    int node = interleave_index % num_nodes;
-    interleave_index++;
-    return node;
-}
-```
-
-### Weighted
-
-```c
-int numa_config_get_best_node(size_t size) {
-    // 1. 计算总权重
-    int total_weight = 0;
-    for (int i = 0; i < num_nodes; i++) {
-        total_weight += node_weights[i];
-    }
-
-    // 2. 根据权重选择节点
-    int target = random() % total_weight;
-    int cumulative = 0;
-    for (int i = 0; i < num_nodes; i++) {
-        cumulative += node_weights[i];
-        if (target < cumulative) return i;
-    }
-    return 0;
-}
-```
-
-### Pressure Aware
-
-```c
-int numa_config_get_best_node(size_t size) {
-    double min_pressure = 1.0;
-    int best_node = 0;
-
-    for (int i = 0; i < num_nodes; i++) {
-        double pressure = calculate_node_pressure(i);
-        if (pressure < min_pressure) {
-            min_pressure = pressure;
-            best_node = i;
-        }
-    }
-    return best_node;
-}
-```
-
-## 重新平衡机制
-
-### 触发条件
-
-```c
-int numa_config_needs_rebalance(void) {
-    if (!auto_rebalance) return 0;
-
-    // 1. 检查间隔
-    uint64_t now = get_time_us();
-    if (now - last_rebalance_time < rebalance_interval_us) return 0;
-
-    // 2. 检查节点间差异
-    double max_diff = 0;
-    for (int i = 0; i < num_nodes; i++) {
-        for (int j = i + 1; j < num_nodes; j++) {
-            double diff = abs(bytes_allocated[i] - bytes_allocated[j]);
-            double ratio = diff / max(bytes_allocated[i], bytes_allocated[j]);
-            if (ratio > balance_threshold) return 1;
-        }
-    }
-    return 0;
-}
-```
-
-### 重新平衡执行
-
-```c
-int numa_config_trigger_rebalance(void) {
-    // 1. 找出负载最高的节点
-    int source = find_most_loaded_node();
-    int target = find_least_loaded_node();
-
-    // 2. 计算需要迁移的量
-    size_t to_migrate = calculate_migration_size(source, target);
-
-    // 3. 执行迁移
-    migrate_keys(source, target, to_migrate);
-
-    // 4. 更新统计
-    last_rebalance_time = get_time_us();
-    return 0;
-}
-```
+| 函数 | 功能 | 锁依赖 |
+|------|------|--------|
+| `numa_config_strategy_init()` | 初始化策略系统，分配计数器数组 | 全局锁（仅初始化） |
+| `numa_config_strategy_cleanup()` | 清理策略系统，释放内存 | 全局锁 |
+| `numa_config_set_strategy(type)` | 设置当前分配策略 | 全局锁 |
+| `numa_config_get_best_node(size)` | 根据当前策略选择最优节点 | 视策略而定 |
+| `numa_config_update_pressure_weights()` | 更新压力权重（serverCron 调用） | 无锁 |
+| `numa_config_set_node_weights(w, n)` | 设置静态权重（WEIGHTED 策略） | 全局锁 |
+| `numa_config_get_statistics(...)` | 获取各节点分配统计 | 无锁（atomicGet） |
+| `numa_config_load_from_file(path)` | 从 key=value 文件加载配置 | 全局锁 |
 
 ## 命令行接口
 
-### 处理命令
+通过 `NUMA CONFIG` 命令（在 `numa_command.c` 中实现）：
 
-```c
-int numa_config_handle_command(int argc, char **argv);
 ```
-
-支持的子命令：
-- `GET`: 查询当前配置
-- `SET strategy <name>`: 设置策略
-- `SET weight <node> <value>`: 设置节点权重
-- `SET cxl_optimization <on|off>`: CXL 优化开关
-- `SET balance_threshold <value>`: 平衡阈值
-- `REBALANCE`: 手动触发重新平衡
-- `STATS`: 显示统计信息
-
-### 显示状态
-
-```c
-void numa_config_show_status(void);
-```
-
-输出示例：
-```
-Current Strategy: local-first
-Nodes: 2
-Balance Threshold: 0.3
-Auto Rebalance: enabled
-CXL Optimization: disabled
-Rebalance Interval: 60000000 us
-Min Allocation Size: 16 bytes
-Node Weights: [1, 1]
+NUMA CONFIG SET strategy weighted_interleave
+NUMA CONFIG GET
+NUMA CONFIG HELP
 ```
 
 ## 与其他模块的关系
 
-### 被统一命令接口调用
-
-```
-numa_command.c
-    │
-    ├── NUMA CONFIG GET ──► numa_config_get_current()
-    ├── NUMA CONFIG SET ──► numa_config_set_*()
-    ├── NUMA CONFIG LOAD ──► numa_config_load_from_file()
-    └── NUMA CONFIG REBALANCE ──► numa_config_trigger_rebalance()
-```
-
-### 与内存池的关系
-
-分配策略影响 `numa_pool_alloc()` 的节点选择：
-
-```c
-void *numa_pool_alloc(size_t size, int node, size_t *total_size) {
-    // node 参数由配置策略决定
-    int target_node = numa_config_get_best_node(size);
-    // ...
-}
-```
-
-### 与 Composite LRU 的关系
-
-Composite LRU 的 JSON 配置通过此模块加载：
-
-```c
-// 启动时
-if (server.numa_migrate_config_file) {
-    composite_lru_config_t cfg;
-    composite_lru_load_config(server.numa_migrate_config_file, &cfg);
-    composite_lru_apply_config(strategy, &cfg);
-}
-```
-
-## JSON 配置文件
-
-### 格式示例
-
-```json
-{
-    "strategy_type": "local-first",
-    "node_weights": [1, 1],
-    "balance_threshold": 0.3,
-    "auto_rebalance": true,
-    "cxl_optimization": false,
-    "rebalance_interval_us": 60000000,
-    "min_allocation_size": 16
-}
-```
-
-### 加载流程
-
-```
-numa_config_load_from_file(path)
-    │
-    ├── 打开 JSON 文件
-    ├── 逐行解析键值对
-    ├── 验证参数范围
-    ├── 构建 numa_strategy_config_t
-    └── 调用 numa_config_apply_strategy()
-```
-
-## 错误处理
-
-所有 API 返回整数状态码：
-- `0`: 成功
-- `-1`: 一般错误
-- `-2`: 参数无效
-- `-3`: 内存不足
-
-## 统计信息
-
-```c
-typedef struct {
-    uint64_t *allocations_per_node;     // 各节点分配次数
-    size_t *bytes_allocated_per_node;   // 各节点分配字节数
-    uint64_t total_rebalances;          // 总重新平衡次数
-    uint64_t total_migrations;          // 总迁移次数
-} numa_config_stats_t;
-```
-
-查询：
-```c
-void numa_config_get_statistics(allocations, bytes, num_nodes);
-```
-
-## 使用场景
-
-### 场景 1：双路 NUMA 服务器
-
-```bash
-# 设置本地优先策略
-redis-cli NUMA CONFIG SET strategy local-first
-
-# 设置权重（节点 0 内存更多）
-redis-cli NUMA CONFIG SET weight 0 2
-redis-cli NUMA CONFIG SET weight 1 1
-```
-
-### 场景 2：CXL 内存扩展
-
-```bash
-# 启用 CXL 优化
-redis-cli NUMA CONFIG SET cxl_optimization on
-
-# 热数据阈值（热数据保留在 DRAM）
-redis-cli NUMA CONFIG SET balance_threshold 0.5
-```
-
-### 场景 3：负载均衡测试
-
-```bash
-# 切换到交错分配
-redis-cli NUMA CONFIG SET strategy interleave
-
-# 观察各节点内存分布
-redis-cli NUMA CONFIG STATS
-```
+- **zmalloc.c**：调用 `numa_config_get_best_node(size)` 确定分配目标节点
+- **server.c**：初始化时调用 `numa_config_strategy_init()`，每秒调用 `numa_config_update_pressure_weights()`
+- **numa_composite_lru.c**：通过 `numaGetNodePressure()` 读取节点压力，影响迁移决策

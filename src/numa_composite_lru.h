@@ -100,6 +100,7 @@ typedef struct {
     uint64_t candidates_written;        /* 写入候选池的次数 */
     uint64_t scan_keys_checked;         /* 渐进扫描累计检查 key 数 */
     uint64_t migrations_bw_blocked;     /* 因带宽饱和被阻止的迁移次数 */
+    uint64_t migrations_overloaded;     /* 因节点内存过载被阻止的迁移次数 */
 } composite_lru_data_t;
 
 /* ========== 公共接口 ========== */

@@ -21,6 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 YCSB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_BASE="$YCSB_DIR/results"
 VISUALIZE_SCRIPT="$SCRIPT_DIR/visualize_bw_benchmark.py"
+VENV_DIR="$SCRIPT_DIR/.venv"
 
 # ============ 颜色输出 ============
 RED='\033[0;31m'
@@ -54,8 +55,8 @@ usage() {
   $(basename "$0") results/bw_bench_20260416_232722  # 指定结果目录
 
 依赖:
-  python3 + matplotlib (宿主机需安装)
-  pip3 install matplotlib
+  python3 + python3-venv (宿主机需安装)
+  matplotlib 和 pandas 会自动安装到脚本目录下的 .venv 中
 EOF
     exit 0
 }
@@ -102,17 +103,34 @@ if [[ ! -f "$VISUALIZE_SCRIPT" ]]; then
     exit 1
 fi
 
-# 检查 python3 + matplotlib
+# 检查 python3
 if ! command -v python3 &>/dev/null; then
     log_err "python3 未安装"
-    log "请安装: apt install python3 或使用其他包管理器"
+    log "请安装: apt install python3"
     exit 1
 fi
 
-if ! python3 -c "import matplotlib" 2>/dev/null; then
-    log_err "matplotlib 未安装"
-    log "请安装: pip3 install matplotlib"
-    exit 1
+# 自动初始化 venv 并安装依赖
+PYTHON="$VENV_DIR/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+    log "首次运行，创建 Python 虚拟环境..."
+    python3 -m venv "$VENV_DIR" || {
+        log_err "创建 venv 失败，请确认已安装 python3-venv"
+        log "  sudo apt install python3-venv"
+        exit 1
+    }
+    log "安装可视化依赖 (matplotlib, pandas)..."
+    "$VENV_DIR/bin/pip" install --quiet matplotlib pandas || {
+        log_err "依赖安装失败"
+        exit 1
+    }
+    log_ok "虚拟环境就绪: $VENV_DIR"
+else
+    # venv 已存在，检查依赖是否完整
+    if ! "$PYTHON" -c "import matplotlib, pandas" 2>/dev/null; then
+        log "补装缺失依赖..."
+        "$VENV_DIR/bin/pip" install --quiet matplotlib pandas
+    fi
 fi
 
 # 输出路径（与 run_bw_benchmark.sh 一致）
@@ -123,7 +141,7 @@ log "生成可视化报告..."
 log "  数据源: $METRICS_CSV"
 log "  输出至: $OUTPUT_PNG"
 
-python3 "$VISUALIZE_SCRIPT" \
+"$PYTHON" "$VISUALIZE_SCRIPT" \
     --input "$METRICS_CSV" \
     --output "$OUTPUT_PNG" \
     --dpi 150

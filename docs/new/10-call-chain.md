@@ -55,9 +55,8 @@
 │  ┌────────┼──────────────┼───────────────────────────────────┐   │   │
 │  │        ▼              ▼                                   │   │   │
 │  │  ┌─────────────────────────────┐                          │   │   │
-│  │  │    NUMA 内存池 (numa_pool)   │                          │   │   │
-│  │  │  ├─ Slab 分配器 (≤128B)     │                          │   │   │
-│  │  │  ├─ Pool 分配器 (≤4KB)      │                          │   │   │
+│  │  │    NUMA Slab 分配器          │                          │   │   │
+│  │  │  ├─ Slab 分配器 (≤4KB)      │                          │   │   │
 │  │  │  └─ Direct 分配 (>4KB)      │                          │   │   │
 │  │  └──────────────┬──────────────┘                          │   │   │
 │  │                 │                                         │   │   │
@@ -83,28 +82,20 @@ main()
     │     │     │
     │     │     └── 解析 numa-enabled, numa-migrate-config 等参数
     │     │
-    │     ├── zmalloc_init()
-    │     │
-    │     └── #ifdef HAVE_NUMA
-    │             │
-    │             ├── numa_pool_init()              // 初始化内存池
-    │             ├── numa_slab_init()              // 初始化 Slab 分配器
-    │             ├── numa_migrate_init()           // 初始化迁移模块
-    │             ├── numa_key_migrate_init()       // 初始化 Key 迁移
-    │             ├── numa_config_strategy_init()   // 初始化可配置策略
-    │             │
-    │             └── numa_strategy_init()          // 初始化策略插槽
-    │                     │
-    │                     ├── numa_strategy_register_noop()
-    │                     │       └── 注册 Slot 0
-    │                     │
-    │                     ├── numa_strategy_register_composite_lru()
-    │                     │       └── 注册 Slot 1
-    │                     │
-    │                     ├── numa_strategy_slot_insert(0, "noop")
-    │                     └── numa_strategy_slot_insert(1, "composite-lru")
+    │     └── zmalloc_init()
     │
-    ├── #ifdef HAVE_NUMA
+    ├── #ifdef HAVE_NUMA  (initServer 之后)
+    │     │
+    │     ├── numa_strategy_init()                // 初始化策略插槽框架
+    │     │     ├── numa_strategy_register_noop()  // 注册 Slot 0
+    │     │     └── numa_composite_lru_register()  // 注册 Slot 1
+    │     │
+    │     ├── numa_config_strategy_init()          // 初始化可配置分配策略
+    │     │     └── numa_config_set_strategy(WEIGHTED_INTERLEAVE)  // 设为默认
+    │     │
+    │     ├── numa_key_migrate_init()              // 初始化 Key 迁移模块
+    │     │
+    │     ├── numa_bw_monitor_init()               // 初始化带宽监控
     │     │
     │     └── if (server.numa_migrate_config_file)
     │             │
@@ -113,6 +104,8 @@ main()
     │
     └── aeMain()  // 进入事件循环
 ```
+
+> **注意**：`numa_slab_init()` 由 `zmalloc.c:zmalloc_init()` → `numa_init()` 调用，不在 `server.c` 中。
 
 ## serverCron 调用链
 
@@ -123,9 +116,16 @@ serverCron()  // 每 100ms 执行一次
     │     │
     │     ├── run_with_period(1000)  // 每秒
     │     │     │
-    │     │     └── numa_strategy_run_all()
-    │     │             │
-    │     │             ├── Slot 0: Noop (跳过)
+    │     │     ├── numa_bw_monitor_sample()           // 带宽采样
+    │     │     │
+    │     │     ├── numa_config_update_pressure_weights()  // 更新压力权重
+    │     │     │     │
+    │     │     │     └── for each node:
+    │     │     │           p = numaGetNodePressure(i)  // 读 /sys/.../meminfo
+    │     │     │           w = max(1, (1 - p) * 100)
+    │     │     │           atomicSet(pressure_weights[i], w)
+    │     │     │
+    │     │     └── numa_strategy_run_all()            // 运行所有策略
     │     │             │
     │     │             └── Slot 1: Composite LRU
     │     │                     │
@@ -135,17 +135,15 @@ serverCron()  // 每 100ms 执行一次
     │     │                     │       │
     │     │                     │       ├── 快速通道：处理候选池
     │     │                     │       │       │
-    │     │                     │       │       └── numa_migrate_single_key()
+    │     │                     │       │       └── numa_migrate_key_by_name()
     │     │                     │       │
     │     │                     │       └── 兜底通道：渐进扫描
     │     │                     │               │
-    │     │                     │               └── numa_migrate_single_key()
+    │     │                     │               └── numa_migrate_key_by_name()
     │     │                     │
     │     │                     └── 更新统计
     │     │
-    │     └── run_with_period(10000)  // 每 10 秒
-    │             │
-    │             └── numa_pool_try_compact()  // 压缩低利用率 Chunk
+    │     └── (无 10 秒 compact 任务 — 旧版 numa_pool_try_compact 已移除)
     │
     └── 其他 Redis 内部任务
 ```
@@ -169,13 +167,11 @@ lookupKeyRead(c->db, c->argv[1], flags)
     │     │
     │     └── #ifdef HAVE_NUMA
     │             │
-    │             ├── 绑定 db 到 Composite LRU（首次或 db 变化时）
+    │             ├── 绑定 db 到 Composite LRU（无条件赋值）
     │             │     composite_lru_data_t *data = clru->private_data;
-    │             │     if (data->db != db) {
-    │             │         data->db = db;  // 动态绑定
-    │             │     }
+    │             │     data->db = db;
     │             │
-    │             └── composite_lru_record_access(strategy, key->ptr, val)
+    │             └── composite_lru_record_access(strategy, key->ptr, val, lru_clock)
     │                     │                             ↑ SDS string
     │                     │
     │                     ├── 1. 读取 PREFIX 热度
@@ -192,9 +188,9 @@ lookupKeyRead(c->db, c->argv[1], flags)
     │                     ├── 4. 热度 +1
     │                     │     if (hotness < 7) hotness++
     │                     │
-    │                     ├── 5. 写回 PREFIX
+    │                     ├── 5. 写回 PREFIX + 同步 key_heat_map
     │                     │     numa_set_hotness(val, hotness)
-    │                     │     numa_set_last_access(val, now)
+    │                     │     numa_set_last_access(val, lru_clock)
     │                     │
     │                     └── 6. 判断是否写入候选池
     │                           if (首次越过阈值 && Key 在远程节点)
@@ -218,28 +214,24 @@ setCommand(c)
     │     │
     │     ├── zmalloc(size)  // 分配新内存
     │     │     │
-    │     │     ├── node = get_current_numa_node()
+    │     │     ├── node = numa_config_get_best_node(size)
     │     │     │
-    │     │     ├── if (should_use_slab(size))
+    │     │     ├── if (should_use_slab(size))  // size ≤ 4KB
     │     │     │       └── numa_slab_alloc(size, node, &total_size)
     │     │     │
-    │     │     ├── else if (size <= NUMA_POOL_MAX_ALLOC)
-    │     │     │       └── numa_pool_alloc(size, node, &total_size)
-    │     │     │
-    │     │     └── else
+    │     │     └── else  // size > 4KB
     │     │             └── numa_alloc_onnode(size + PREFIX, node)
     │     │
     │     ├── 写入 PREFIX
     │     │     prefix->size = size
+    │     │     prefix->from_slab = (size <= 4096) ? 1 : 0
     │     │     prefix->node_id = node
     │     │     prefix->hotness = 0
     │     │
     │     └── 设置 Key-Value
     │           dbAdd(db, key, val)
     │
-    └── #ifdef HAVE_NUMA
-            │
-            └── numa_record_key_access(key, val)  // 记录访问
+    └── (热度在首次 GET 时由 composite_lru_record_access 初始化)
 ```
 
 ## Key 迁移调用链
@@ -278,7 +270,7 @@ numaCommand(c)
     │                     │     }
     │                     │
     │                     ├── 4. 执行迁移
-    │                     │     ├── 目标节点分配新内存
+    │                     │     ├── 目标节点分配新内存（直接调用适配器）
     │                     │     ├── 复制数据
     │                     │     ├── 原子指针切换
     │                     │     └── 释放旧内存
@@ -318,18 +310,9 @@ numa_strategy_run_all()
             │             │
             │             ├── 满足条件 ──► 迁移
             │             │     numa_migrate_key_by_name(data->db, cand->key, cand->target_node)
-            │             │         │        ↑ SDS 副本         ↑ lookupKey 中绑定的 db
-            │             │         │
-            │             │         ├── dictFind(db->dict, keyname)  // 用 SDS 直接查字典
-            │             │         ├── val = dictGetVal(de)
-            │             │         ├── switch (val->type)
-            │             │         │     ├── OBJ_STRING → migrate_string_type(NULL, val, target)
-            │             │         │     ├── OBJ_HASH   → migrate_hash_type(NULL, val, target)
-            │             │         │     ├── OBJ_LIST   → migrate_list_type(NULL, val, target)
-            │             │         │     ├── OBJ_SET    → migrate_set_type(NULL, val, target)
-            │             │         │     └── OBJ_ZSET   → migrate_zset_type(NULL, val, target)
-            │             │         │
-            │             │         └── 更新 global_ctx.stats
+            │             │
+            │             ├── 带宽饱和 ──► data->migrations_bw_blocked++
+            │             ├── 过载/压力 ──► data->migrations_overloaded++
             │             │
             │             └── 释放 SDS 副本
             │                   sdsfree(cand->key)
@@ -363,9 +346,10 @@ migrate_string_type(NULL, val_obj, target_node)
     │
     ├── 2. 在目标节点分配新内存
     │     new_base = numa_zmalloc_onnode(total, target_node)
-    │         └── 走 Direct 分配路径（total 通常 > 4KB）
-    │             └── numa_alloc_onnode(total + PREFIX_SIZE, target_node)
-    │                 └── 写入新 PREFIX: from_pool=0, node_id=target_node
+    │         └── if (should_use_slab(total))
+    │                 └── numa_slab_alloc(total, target_node)
+    │             else
+    │                 └── numa_alloc_onnode(total + PREFIX_SIZE, target_node)
     │
     ├── 3. 完整复制
     │     memcpy(new_base, old_base, total)
@@ -377,7 +361,7 @@ migrate_string_type(NULL, val_obj, target_node)
     ├── 5. 释放旧内存
     │     sdsfree(old_str)
     │         └── zfree → numa_free_with_size
-    │             └── 读 old PREFIX: from_pool → 路由到 Pool free_list 或 Direct numa_free
+    │             └── 读 old PREFIX: from_slab → 路由到 Slab 或 Direct
     │
     └── 6. 更新节点标记
           numa_set_node_id(val_obj, target_node)
@@ -390,35 +374,24 @@ zmalloc(size)
     │
     ├── #ifdef HAVE_NUMA
     │     │
-    │     ├── node = get_current_numa_node()
+    │     ├── node = numa_config_get_best_node(size)
     │     │     │
-    │     │     ├── t_numa_node (线程本地)
-    │     │     ├── sched_getcpu() → cpu_to_node()
-    │     │     └── numa_interleave_node()
+    │     │     └── 根据当前策略选择节点
+    │     │         (默认 WEIGHTED_INTERLEAVE，读 atomicGet(pressure_weights))
     │     │
-    │     ├── if (should_use_slab(size))
+    │     ├── if (should_use_slab(size))  // size ≤ 4KB
     │     │     │
     │     │     └── numa_slab_alloc(size, node, &total_size)
     │     │             │
-    │     │             ├── 计算 size_class
-    │     │             ├── 查找空闲 slab
-    │     │             ├── 原子位图分配
-    │     │             └── 写入 PREFIX
+    │     │             ├── 二分查找 size class (24 级)
+    │     │             ├── 遍历 partial_slabs，原子 CAS 分配
+    │     │             └── 写入 PREFIX (from_slab=1)
     │     │
-    │     ├── else if (size <= NUMA_POOL_MAX_ALLOC)
-    │     │     │
-    │     │     └── numa_pool_alloc(size, node, &total_size)
-    │     │             │
-    │     │             ├── 检查 Free List
-    │     │             ├── Bump Pointer 分配
-    │     │             ├── 或分配新 Chunk
-    │     │             └── 写入 PREFIX
-    │     │
-    │     └── else
+    │     └── else  // size > 4KB
     │             │
     │             └── numa_alloc_onnode(size + PREFIX, node)
     │                     │
-    │                     └── 写入 PREFIX
+    │                     └── 写入 PREFIX (from_slab=0)
     │
     └── #else
             │
@@ -434,60 +407,30 @@ zfree(ptr)
     │     prefix = (numa_alloc_prefix_t *)ptr - 1
     │
     ├── 读取元数据
-    │     from_pool = prefix->from_pool
+    │     from_slab = prefix->from_slab
     │     node_id = prefix->node_id
     │     size = prefix->size
     │
-    ├── switch (from_pool)
+    ├── switch (from_slab)
     │     │
-    │     ├── case 2 (Slab):
-    │     │     └── numa_slab_free(ptr, size, node_id)
+    │     ├── case 1 (Slab):
+    │     │     └── numa_slab_free(ptr, total_size, node_id)
     │     │             │
     │     │             └── 原子位图标记空闲
     │     │
-    │     ├── case 1 (Pool):
-    │     │     └── numa_pool_free(ptr, size, 1)
-    │     │             │
-    │     │             └── 加入 Free List
-    │     │
     │     └── case 0 (Direct):
     │             └── numa_free(prefix, size + PREFIX)
+    │                     │
+    │                     └── numa_free_onnode(prefix, size + PREFIX, node_id)
     │
     └── 更新统计
           update_zmalloc_stat_free(size + PREFIX)
 ```
 
-## Key 删除调用链
-
-```
-客户端: DEL user:100
-    │
-    ▼
-delCommand(c)
-    │
-    └── dbDelete(db, key)
-            │
-            ├── #ifdef HAVE_NUMA
-            │     │
-            │     └── numa_on_key_delete(key)
-            │             │
-            │             └── dictDelete(key_metadata, key)
-            │
-            ├── dbGenericDelete(db, key, 0)
-            │     │
-            │     └── dictDelete(db->dict, key)
-            │             │
-            │             └── dictFreeVal(val)  // 释放 value
-            │                     │
-            │                     └── zfree(val->ptr)
-            │
-            └── 通知从节点
-```
-
 ## 配置加载调用链
 
 ```
-redis-cli NUMA CONFIG LOAD /path/to/config.json
+redis-cli NUMA CONFIG LOAD /path/to/composite_lru.json
     │
     ▼
 numaCommand(c)
@@ -501,7 +444,7 @@ numaCommand(c)
     │             ├── composite_lru_load_config(path, &cfg)
     │             │     │
     │             │     ├── 打开 JSON 文件
-    │             │     ├── 逐行解析
+    │             │     ├── 逐行解析 key=value
     │             │     └── 验证参数范围
     │             │
     │             └── composite_lru_apply_config(strategy, &cfg)
@@ -523,17 +466,18 @@ numa_command.c
     │           └── numa_strategy_slots.c
     │
     ├── numa_configurable_strategy.c
-    │     └── numa_pool.c
+    │     └── numaGetNodePressure() (evict.h)
     │
     └── numa_strategy_slots.c
           ├── numa_composite_lru.c
           └── (自定义策略)
 
-numa_pool.c
+numa_pool.c  (Slab 分配器)
     └── libnuma (系统库)
 
 zmalloc.c
-    ├── numa_pool.c
+    ├── numa_pool.c (Slab 分配器)
+    ├── numa_configurable_strategy.c (节点选择)
     └── numa_composite_lru.c (热度接口)
 ```
 
@@ -542,13 +486,13 @@ zmalloc.c
 ### 写路径
 
 ```
-客户端 SET ──► zmalloc ──► 选择分配路径 ──► 写入 PREFIX ──► 存入 DB
+客户端 SET ──► zmalloc ──► numa_config_get_best_node() ──► Slab/Direct 分配 ──► 写入 PREFIX ──► 存入 DB
 ```
 
 ### 读路径
 
 ```
-客户端 GET ──► lookupKey ──► record_access ──► 更新热度 ──► 可能写入候选池
+客户端 GET ──► lookupKey ──► composite_lru_record_access() ──► 更新 PREFIX 热度 ──► 可能写入候选池
 ```
 
 ### 迁移路径
@@ -558,10 +502,12 @@ serverCron ──► Composite LRU ──► 选择候选 Key (SDS name)
     ──► numa_migrate_key_by_name ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
 ```
 
-### 监控路径
+### 压力权重更新路径
 
 ```
-客户端 NUMA MIGRATE STATS ──► numa_get_migration_statistics ──► 返回结果
+serverCron (每秒) ──► numa_config_update_pressure_weights()
+    ──► numaGetNodePressure(i) ──► atomicSet(pressure_weights[i], w)
+    ──► 下次 zmalloc 时 atomicGet 读取，影响分配目标选择
 ```
 
 > **注意**：bw_benchmark 采集脚本使用 `NUMA MIGRATE STATS`（而非 `NUMA CONFIG GET`）获取 `successful_migrations` 计数。
@@ -574,11 +520,12 @@ serverCron ──► Composite LRU ──► 选择候选 Key (SDS name)
 - serverCron 调用
 - Key 迁移执行
 
-### 多线程部分
+### 原子操作保护
 
-- 内存池的每个 size_class 有独立锁
-- 策略管理器有全局锁
-- Key 元数据字典有独立锁
+- Slab 分配器：原子位图 CAS（无锁分配/释放）
+- 策略统计计数器：`atomicIncr` / `atomicGet`（无锁）
+- 压力权重：`atomicSet` 写入 / `atomicGet` 读取（无锁）
+- 仅 WEIGHTED 策略短暂持锁复制权重数组
 
 ### 并发安全
 

@@ -36,14 +36,14 @@
 │  │                                                      │   │
 │  │  ┌─────────────────────┐  ┌───────────────────────┐  │   │
 │  │  │  策略插槽框架        │  │  可配置策略框架        │  │   │
-│  │  │  (16 slots)         │  │  (JSON 热加载)        │  │   │
+│  │  │  (16 slots)         │  │  (10 种分配策略)      │  │   │
 │  │  │  ┌───────────────┐  │  └───────────────────────┘  │   │
 │  │  │  │ Slot 0: Noop  │  │                             │   │
 │  │  │  │ Slot 1: C-LRU │  │  ┌───────────────────────┐  │   │
-│  │  │  │ Slot 2-15:    │  │  │  内存池 (numa_pool)   │  │   │
-│  │  │  │   自定义扩展   │  │  │  ├─ Slab (≤128B)     │  │   │
-│  │  │  └───────────────┘  │  │  ├─ Pool (≤4KB)      │  │   │
-│  │  └─────────────────────┘  │  └─ Direct (>4KB)    │  │   │
+│  │  │  │ Slot 2-15:    │  │  │  NUMA Slab 分配器      │  │   │
+│  │  │  │   自定义扩展   │  │  │  ├─ Slab (≤4KB)      │  │   │
+│  │  │  └───────────────┘  │  │  └─ Direct (>4KB)    │  │   │
+│  │  └─────────────────────┘  └───────────────────────┘  │   │
 │  │                            └───────────────────────┘  │   │
 │  │                                                      │   │
 │  │  ┌─────────────────────┐  ┌───────────────────────┐  │   │
@@ -68,12 +68,12 @@
 
 | 模块 | 文件 | 功能描述 |
 |------|------|---------|
-| **NUMA 内存池** | `numa_pool.c/h` | 节点粒度内存分配，16 级 size 分类，Slab/Pool/Direct 三层分配 |
+| **NUMA Slab 分配器** | `numa_pool.c/h` | 节点粒度内存分配，24 级 jemalloc 风格大小 class，Slab（≤4KB）+ Direct（>4KB）两层分配 |
 | **NUMA 内存迁移** | `numa_migrate.c/h` | 块级内存跨节点迁移，统计追踪 |
 | **策略插槽框架** | `numa_strategy_slots.c/h` | 16 个策略插槽，工厂模式，虚函数表，支持动态扩展 |
 | **Composite LRU** | `numa_composite_lru.c/h` | 默认迁移策略，双通道架构（快速通道 + 兜底通道），阶梯式惰性衰减 |
 | **Key 级别迁移** | `numa_key_migrate.c/h` | 单 Key 迁移，5 种数据类型适配器，原子指针切换 |
-| **可配置策略** | `numa_configurable_strategy.c/h` | JSON 配置加载，运行时动态调整，多种分配策略 |
+| **可配置策略** | `numa_configurable_strategy.c/h` | 10 种分配策略（含 WEIGHTED_INTERLEAVE 默认策略），无锁分配路径，压力权重原子更新 |
 | **统一命令接口** | `numa_command.c` | NUMA MIGRATE / CONFIG / STRATEGY 三域路由 |
 | **zmalloc 适配** | `zmalloc.c/h` | NUMA 感知分配入口，PREFIX 元数据（16 字节） |
 
@@ -88,16 +88,15 @@
 zmalloc(size) ─────────────────────────────┐
     │                                       │
     ▼                                       ▼
-检查对象大小                            确定目标 NUMA 节点
-    │                                       │
-    ├── ≤ 128B ──► numa_slab_alloc()       │
-    ├── ≤ 4096B ─► numa_pool_alloc()       │
-    └── > 4096B ─► numa_alloc_direct()     │
+检查对象大小                            numa_config_get_best_node(size)
+    │                                  (默认 WEIGHTED_INTERLEAVE)
+    ├── ≤ 4KB ───► numa_slab_alloc()       │
+    └── > 4KB ───► numa_alloc_onnode()     │
                                             │
                                             ▼
                                    分配内存 + 写入 PREFIX
                                    ├─ size (8B)
-                                   ├─ from_pool (1B)
+                                   ├─ from_slab (1B)
                                    ├─ node_id (1B)
                                    ├─ hotness (1B)
                                    ├─ access_count (1B)
@@ -141,19 +140,18 @@ numa_strategy_run_all()
             │       └── 满足条件 → 触发 numa_migrate_single_key()
             │
             └── 兜底通道：渐进扫描 key_heat_map
-                    ├─ 每次扫描 scan_batch_size 个 Key（默认 200）
+                    ├─ 每次扫描 scan_batch_size 个 Key（默认 500）
                     ├─ 评估热度 ≥ 阈值？
                     └── 满足条件 → 触发迁移
 ```
 
 ## 关键设计决策
 
-### 1. 三层内存分配策略
+### 1. 两层内存分配策略
 
 | 层级 | 对象大小 | 分配器 | 碎片率 | 性能 |
 |------|---------|--------|-------|------|
-| Slab | ≤ 128B | 16KB slab + 位图管理 | ~1% | O(1) 原子操作 |
-| Pool | ≤ 4KB | 动态 chunk (256KB-1MB) + Free List | ~2.4% | O(1) Bump Pointer |
+| Slab | ≤ 4KB | 64KB slab + 3072bit 位图 + 原子 CAS | ~1% | O(1) 无锁操作 |
 | Direct | > 4KB | numa_alloc_onnode | - | 系统调用 |
 
 ### 2. PREFIX 元数据内联设计
@@ -219,19 +217,19 @@ redis-cli NUMA CONFIG GET
 
 | 指标 | 数值 | 说明 |
 |------|------|------|
-| 单线程 SET/GET 吞吐 | 169-188K req/s | P2 优化后 |
-| p50 延迟 | 0.031ms | 与标准 Redis 相当 |
-| 内存碎片率 | 1.02% | 从 27% 降低 96.2% |
-| 内存效率 | 98% | 提升 262% |
+| QEMU Phase 2 吞吐 | ~53K ops/s | WEIGHTED_INTERLEAVE 策略 |
+| QEMU Phase 3 吞吐 | ~45K ops/s | 持续迁移负载 |
+| 迁移速率 | ~1,524/sec | 恒定速率，零 overload 阻断 |
+| 内存碎片率 | 1.04-1.17 | Slab 分配器 + PREFIX 元数据 |
 
 ## 文档导航
 
-- [NUMA 内存池模块](02-numa-pool.md) - Slab/Pool 分配器实现
+- [NUMA Slab 分配器](02-numa-pool.md) - jemalloc 风格 Slab 分配器
 - [NUMA 内存分配](03-zmalloc-numa.md) - zmalloc 适配与 PREFIX 元数据
 - [NUMA 内存迁移](04-numa-migrate.md) - 块级内存迁移
 - [策略插槽框架](05-numa-strategy-slots.md) - 16 插槽插件系统
 - [Composite LRU 策略](06-numa-composite-lru.md) - 双通道迁移决策
 - [Key 级别迁移](07-numa-key-migrate.md) - 细粒度 Key 迁移
-- [可配置策略框架](08-numa-configurable.md) - JSON 热加载配置
+- [可配置策略框架](08-numa-configurable.md) - 10 种分配策略，WEIGHTED_INTERLEAVE 默认策略
 - [统一命令接口](09-numa-command.md) - NUMA 命令详解
 - [调用链与模块交互](10-call-chain.md) - 完整调用链路

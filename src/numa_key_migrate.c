@@ -211,7 +211,7 @@ void numa_on_key_delete(robj *key) {
     int ret = dictDelete(global_ctx.key_metadata, key);
     pthread_mutex_unlock(&global_ctx.mutex);
     if (ret == DICT_OK) {
-        KEY_MIGRATE_LOG(LL_VERBOSE,
+        KEY_MIGRATE_LOG(LL_DEBUG,
             "[NUMA Key Migrate] Metadata cleaned for deleted key=%p", (void*)key);
     }
 }
@@ -245,7 +245,7 @@ void numa_record_key_access(robj *key, robj *val) {
         uint8_t before = meta->hotness_level;
         meta->hotness_level = (decay >= meta->hotness_level) ? 0 : (meta->hotness_level - decay);
         if (meta->hotness_level != before) {
-            KEY_MIGRATE_LOG(LL_VERBOSE,
+            KEY_MIGRATE_LOG(LL_DEBUG,
                 "[NUMA Key Migrate] Lazy decay: key=%p, elapsed=%us, decay=%d, hotness %d->%d",
                 (void*)key, (unsigned)elapsed, decay, before, meta->hotness_level);
         }

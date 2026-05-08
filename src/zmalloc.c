@@ -79,29 +79,33 @@ static struct {
 /* 线程局部存储：当前线程绑定的NUMA节点 */
 static __thread int tls_current_node = -1;
 
-/* 初始化NUMA支持：初始化内存池、Slab分配器并按距离排序节点 */
+/* 初始化NUMA支持：初始化Slab分配器并按距离排序节点 */
 void numa_init(void)
 {
-    /* 初始化内存池模块 */
-    if (numa_pool_init() != 0) {
-        numa_ctx.numa_available = 0;
-        return;
-    }
-    
-    /* P2 Optimization: Initialize Slab allocator */
+    /* 初始化 Slab 分配器（统一覆盖 8B-4KB） */
     if (numa_slab_init() != 0) {
         numa_ctx.numa_available = 0;
         return;
     }
-    
-    numa_ctx.numa_available = numa_pool_available();
-    if (!numa_ctx.numa_available) {
+
+    /* 检查 NUMA 可用性 */
+    if (numa_available() < 0) {
+        numa_ctx.numa_available = 0;
         return;
     }
 
-    numa_ctx.num_nodes = numa_pool_num_nodes();
-    numa_ctx.current_node = numa_pool_get_node();
+    numa_ctx.numa_available = 1;
+    numa_ctx.num_nodes = numa_max_node() + 1;
+
+    /* 获取当前节点 */
+    int cpu = sched_getcpu();
+    if (cpu >= 0) {
+        numa_ctx.current_node = numa_node_of_cpu(cpu);
+    } else {
+        numa_ctx.current_node = 0;
+    }
     tls_current_node = numa_ctx.current_node;
+
     /* 改为交错分配策略，实现跨节点负载均衡 */
     numa_ctx.allocation_strategy = NUMA_STRATEGY_INTERLEAVE;
 
@@ -130,11 +134,11 @@ void numa_init(void)
     }
 }
 
-/* 清理NUMA资源：释放内存池和节点距离排序数组 */
+/* 清理NUMA资源：释放Slab分配器和节点距离排序数组 */
 void numa_cleanup(void)
 {
-    numa_pool_cleanup();
-    
+    numa_slab_cleanup();
+
     if (numa_ctx.node_distance_order) {
         free(numa_ctx.node_distance_order);
         numa_ctx.node_distance_order = NULL;
@@ -167,8 +171,8 @@ int numa_get_strategy(void)
 /* NUMA分配器需要PREFIX_SIZE追踪大小并记录分配来源标志 */
 typedef struct {
     size_t size;           /* 8字节 - 实际分配内存大小 */
-    char from_pool;        /* 1字节 - 分配来源：0=直接分配, 1=Pool, 2=Slab */
-    char node_id;          /* 1字节 - 分配所在NUMA节点ID（P2修复：确保归还到正确节点） */
+    char from_pool;        /* 1字节 - 分配来源：0=直接分配, 1=Slab（历史字段名保留兼容） */
+    char node_id;          /* 1字节 - 分配所在NUMA节点ID */
     /* Heat tracking fields (reused from padding) */
     uint8_t hotness;       /* 1字节 - 热度级别（0-7），0=冷，7=热 */
     uint8_t access_count;  /* 1字节 - 访问计数（循环计数器） */
@@ -186,10 +190,8 @@ typedef struct {
 
 /* 分配路径计数器：记录各路径的实时字节数和累计分配次数 */
 static redisAtomic size_t numa_alloc_slab_bytes   = 0;
-static redisAtomic size_t numa_alloc_pool_bytes   = 0;
 static redisAtomic size_t numa_alloc_direct_bytes = 0;
 static redisAtomic size_t numa_alloc_slab_count   = 0;
-static redisAtomic size_t numa_alloc_pool_count   = 0;
 static redisAtomic size_t numa_alloc_direct_count = 0;
 
 #else
@@ -244,12 +246,12 @@ static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
 #ifdef HAVE_NUMA
 /* 辅助函数：初始化分配内存的PREFIX元数据（大小、来源、节点ID、热度） */
-static inline void numa_init_prefix(void *ptr, size_t size, int from_pool, int node_id)
+static inline void numa_init_prefix(void *ptr, size_t size, int from_slab, int node_id)
 {
     numa_alloc_prefix_t *prefix = (numa_alloc_prefix_t *)ptr;
     prefix->size = size;
-    prefix->from_pool = from_pool;
-    prefix->node_id = (char)node_id;  /* P2修复：记录分配节点，确保释放时路由到正确节点 */
+    prefix->from_pool = from_slab;  /* 1=Slab, 0=Direct */
+    prefix->node_id = (char)node_id;
     /* 初始化热度追踪字段 */
     prefix->hotness = NUMA_HOTNESS_DEFAULT;  /* 设置默认热度 */
     prefix->access_count = 0;
@@ -268,14 +270,14 @@ static inline void *numa_to_user_ptr(void *raw_ptr)
     return (char *)raw_ptr + PREFIX_SIZE;
 }
 
-/* NUMA感知内存分配（含大小追踪）：优先走Slab（≤128B）或Pool路径 */
+/* NUMA感知内存分配（含大小追踪）：Slab（8B-4KB）→ Direct（>4KB） */
 static void *numa_alloc_with_size(size_t size)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
 
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
-    
+
     /* 由 numa_configurable_strategy 模块决定目标节点 */
     int target_node;
     if (numa_ctx.num_nodes <= 1) {
@@ -283,21 +285,20 @@ static void *numa_alloc_with_size(size_t size)
     } else {
         target_node = numa_config_get_best_node(size);
     }
-    
+
     void *raw_ptr = NULL;
-    
-    /* P2优化：≤128B的小对象走Slab快速路径 */
-    int used_slab = 0, used_pool = 0;
+    int used_slab = 0;
+
+    /* Slab 路径（8B-4KB）：统一走 Slab 分配器 */
     if (should_use_slab(size)) {
         raw_ptr = numa_slab_alloc(size, target_node, &alloc_size);
         if (raw_ptr) used_slab = 1;
     }
 
-    /* 回退：大对象或Slab分配失败时走Pool路径 */
-    int pool_from_pool = 0;  /* 实际是否从Pool分配（非内部回退） */
+    /* Direct 路径（>4KB 或 Slab 失败）：直接 NUMA 分配 */
     if (!raw_ptr) {
-        raw_ptr = numa_pool_alloc(total_size, target_node, &alloc_size, &pool_from_pool);
-        if (raw_ptr) used_pool = 1;
+        raw_ptr = numa_alloc_onnode(total_size, target_node);
+        alloc_size = total_size;
     }
 
     if (!raw_ptr)
@@ -307,25 +308,20 @@ static void *numa_alloc_with_size(size_t size)
     if (used_slab) {
         atomicIncr(numa_alloc_slab_bytes, total_size);
         atomicIncr(numa_alloc_slab_count, 1);
-    } else if (used_pool) {
-        atomicIncr(numa_alloc_pool_bytes, total_size);
-        atomicIncr(numa_alloc_pool_count, 1);
     } else {
         atomicIncr(numa_alloc_direct_bytes, total_size);
         atomicIncr(numa_alloc_direct_count, 1);
     }
 
-    /* 标记是否来自内存池（用于释放时路由到 Pool 或 direct）。
-     * 使用 numa_pool_alloc 返回的实际标记，而非按大小猜测。
-     * pool_from_pool=0 表示 >4KB 或 Pool 内部分配失败回退到 direct。 */
-    int from_pool = (used_pool && pool_from_pool) ? 1 : 0;
+    /* 记录是否来自 Slab（用于 free 路由） */
+    int from_slab = (should_use_slab(size) && used_slab) ? 1 : 0;
 
-    numa_init_prefix(raw_ptr, size, from_pool, target_node);  /* P2修复：传入node_id写入PREFIX */
+    numa_init_prefix(raw_ptr, size, from_slab, target_node);
     update_zmalloc_stat_alloc(total_size);
     return numa_to_user_ptr(raw_ptr);
 }
 
-/* NUMA感知内存释放（含大小追踪）：根据PREFIX路由到Slab或Pool */
+/* NUMA感知内存释放（含大小追踪）：根据PREFIX路由到Slab或Direct */
 static void numa_free_with_size(void *user_ptr)
 {
     if (user_ptr == NULL)
@@ -333,29 +329,22 @@ static void numa_free_with_size(void *user_ptr)
 
     numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
     size_t total_size = prefix->size + PREFIX_SIZE;
-    size_t size = prefix->size;
-    int node_id = (int)prefix->node_id;  /* P2修复：从PREFIX读取正确的分配节点ID */
+    int node_id = (int)prefix->node_id;
 
     update_zmalloc_stat_free(total_size);
 
     void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
 
-    /* P2优化：小对象归还Slab */
-    if (should_use_slab(size) && prefix->from_pool) {
-        /* P2修复：使用存储的node_id，而非轮询值 */
+    /* Slab 路径：归还到 Slab */
+    if (prefix->from_pool) {
         numa_slab_free(raw_ptr, total_size, node_id);
         atomicDecr(numa_alloc_slab_bytes, total_size);
         atomicDecr(numa_alloc_slab_count, 1);
     } else {
-        /* 大对象归还Pool：传入PREFIX记录的分配节点 */
-        numa_pool_free(raw_ptr, total_size, prefix->from_pool, node_id);
-        if (total_size <= NUMA_POOL_MAX_ALLOC) {
-            atomicDecr(numa_alloc_pool_bytes, total_size);
-            atomicDecr(numa_alloc_pool_count, 1);
-        } else {
-            atomicDecr(numa_alloc_direct_bytes, total_size);
-            atomicDecr(numa_alloc_direct_count, 1);
-        }
+        /* Direct 路径：直接 NUMA 释放 */
+        numa_free(raw_ptr, total_size);
+        atomicDecr(numa_alloc_direct_bytes, total_size);
+        atomicDecr(numa_alloc_direct_count, 1);
     }
 }
 
@@ -428,14 +417,17 @@ void numa_set_current_node(int node)
 {
     if (node >= 0 && node < numa_ctx.num_nodes) {
         numa_ctx.current_node = node;
-        numa_pool_set_node(node);
+        tls_current_node = node;
     }
 }
 
 /* 获取当前NUMA节点 */
 int numa_get_current_node(void)
 {
-    return numa_pool_get_node();
+    if (tls_current_node >= 0) {
+        return tls_current_node;
+    }
+    return numa_ctx.current_node;
 }
 
 /* 在指定NUMA节点上分配内存（用于Key迁移，绕过Pool/Slab直接分配） */
@@ -558,11 +550,12 @@ void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes,
                           size_t *direct_count)
 {
     atomicGet(numa_alloc_slab_bytes,   *slab_bytes);
-    atomicGet(numa_alloc_pool_bytes,   *pool_bytes);
     atomicGet(numa_alloc_direct_bytes, *direct_bytes);
     atomicGet(numa_alloc_slab_count,   *slab_count);
-    atomicGet(numa_alloc_pool_count,   *pool_count);
     atomicGet(numa_alloc_direct_count, *direct_count);
+    /* Pool 路径已移除，返回 0 */
+    *pool_bytes = 0;
+    *pool_count = 0;
 }
 
 #endif /* HAVE_NUMA */

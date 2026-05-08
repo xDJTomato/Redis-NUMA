@@ -40,19 +40,19 @@ WORKLOAD="$SAFE_LINK/tests/ycsb/workloads/workload_bw_saturate"
 # 默认参数
 REDIS_PORT=6379
 REDIS_HOST="127.0.0.1"
-MAX_MEMORY="8gb"
+MAX_MEMORY="11gb"
 OUTPUT_DIR=""
 RUN_PHASE="all"
 SKIP_FILL=false
 NO_RESTART=false
 
 # Phase 参数
-PHASE1_RECORDS=800000
-PHASE1_FIELD_LENGTH=5000
+PHASE1_RECORDS=1000000
+PHASE1_FIELD_LENGTH=1800
 PHASE1_THREADS=8
-PHASE2_OPS=5000000
+PHASE2_OPS=2000000
 PHASE2_THREADS=64
-PHASE3_OPS=2500000
+PHASE3_OPS=2000000
 PHASE3_THREADS=64
 
 # YCSB 客户端超时（CXL 高延迟环境需要更长超时）
@@ -180,13 +180,9 @@ check_prerequisites() {
         log_warn "bc 未安装，部分计算可能失败"
     fi
 
-    # 检查 python3 和 matplotlib
+    # 检查 python3（venv 会在可视化阶段自动创建）
     if command -v python3 &>/dev/null; then
-        if python3 -c "import matplotlib" 2>/dev/null; then
-            log_ok "python3 + matplotlib 可用"
-        else
-            log_warn "matplotlib 未安装，可视化将被跳过"
-        fi
+        log_ok "python3 可用（可视化依赖会自动安装到 .venv）"
     else
         log_warn "python3 未安装，可视化将被跳过"
     fi
@@ -244,24 +240,31 @@ save_system_info() {
 # ── Redis 启动 ──────────────────────────────────────────────────────────────
 start_redis() {
     log_step "启动 Redis"
+
+    # 关闭 Linux NUMA Balancing 和 Transparent Huge Pages
+    # 避免跨 NUMA 节点访问时内核自动迁移页面导致性能干扰
+    if [[ $EUID -eq 0 ]]; then
+        log "关闭 NUMA Balancing 和 THP..."
+        echo 0 > /proc/sys/kernel/numa_balancing 2>/dev/null || true
+        echo never > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+        echo never > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+        log_ok "NUMA Balancing 和 THP 已关闭"
+    else
+        log_warn "需要 root 权限才能关闭 NUMA Balancing 和 THP"
+        log "请执行：sudo bash -c 'echo 0 > /proc/sys/kernel/numa_balancing'"
+    fi
+
     log "停止已有 Redis 实例..."
-    
+
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" SHUTDOWN NOSAVE 2>/dev/null || true
     sleep 1
     pkill -f "redis-server.*:${REDIS_PORT}" 2>/dev/null || true
     sleep 1
-    
-    # 用 numactl 绑定到 Node0（如果可用）- 使用数组避免空格问题
-    local -a numa_cmd=()
-    if command -v numactl &>/dev/null && numactl --hardware &>/dev/null 2>&1; then
-        local num_nodes
-        num_nodes=$(numactl --hardware | grep "available:" | awk '{print $2}')
-        if [[ "$num_nodes" -ge 2 ]]; then
-            numa_cmd=(numactl --cpunodebind=0 --membind=0)
-            log "NUMA 可用，绑定 Redis 到 Node 0"
-        fi
-    fi
-    
+
+    # 强制绑定到 Node 0，避免跨 NUMA 访问
+    local -a numa_cmd=(numactl --cpunodebind=0 --membind=0)
+    log "强制绑定 Redis 到 NUMA Node 0"
+
     log "启动 Redis (port=$REDIS_PORT, maxmemory=$MAX_MEMORY)..."
     "${numa_cmd[@]}" "$REDIS_SERVER" \
         --port "$REDIS_PORT" \
@@ -453,23 +456,45 @@ run_phase3_sustain() {
 # ── 生成报告 ────────────────────────────────────────────────────────────────
 generate_report() {
     log "生成可视化报告..."
-    
-    if [[ -f "$VISUALIZE_SCRIPT" ]]; then
-        if command -v python3 &>/dev/null; then
-            python3 "$VISUALIZE_SCRIPT" \
-                --input "$METRICS_CSV" \
-                --output "$OUTPUT_DIR/benchmark_report.png" \
-                2>&1 || log_warn "可视化失败，请查看 metrics.csv"
-            
-            if [[ -f "$OUTPUT_DIR/benchmark_report.png" ]]; then
-                log_ok "报告已生成: $OUTPUT_DIR/benchmark_report.png"
-            fi
-        else
-            log_warn "python3 未找到，跳过可视化"
-        fi
-    else
+
+    if [[ ! -f "$VISUALIZE_SCRIPT" ]]; then
         log_warn "可视化脚本不存在: $VISUALIZE_SCRIPT"
         log "请查看原始数据: $METRICS_CSV"
+        return
+    fi
+
+    if ! command -v python3 &>/dev/null; then
+        log_warn "python3 未找到，跳过可视化"
+        return
+    fi
+
+    local VENV_DIR="$SCRIPT_DIR/scripts/.venv"
+    local PYTHON="$VENV_DIR/bin/python"
+
+    if [[ ! -x "$PYTHON" ]]; then
+        log "首次运行，创建 Python 虚拟环境..."
+        python3 -m venv "$VENV_DIR" || {
+            log_warn "创建 venv 失败，跳过可视化（sudo apt install python3-venv）"
+            return
+        }
+        "$VENV_DIR/bin/pip" install --quiet matplotlib pandas || {
+            log_warn "依赖安装失败，跳过可视化"
+            return
+        }
+        log_ok "虚拟环境就绪"
+    else
+        if ! "$PYTHON" -c "import matplotlib, pandas" 2>/dev/null; then
+            "$VENV_DIR/bin/pip" install --quiet matplotlib pandas
+        fi
+    fi
+
+    "$PYTHON" "$VISUALIZE_SCRIPT" \
+        --input "$METRICS_CSV" \
+        --output "$OUTPUT_DIR/benchmark_report.png" \
+        2>&1 || log_warn "可视化失败，请查看 metrics.csv"
+
+    if [[ -f "$OUTPUT_DIR/benchmark_report.png" ]]; then
+        log_ok "报告已生成: $OUTPUT_DIR/benchmark_report.png"
     fi
 }
 
@@ -536,14 +561,23 @@ cleanup() {
             wait $COLLECTOR_PID 2>/dev/null || true
         fi
     fi
-    
+
     # 清理标记文件
     [[ -n "$PHASE_FLAG" ]] && rm -f "$PHASE_FLAG"
-    
+
     # 停止 Redis（如果没有指定 --no-restart）
     if [[ "$NO_RESTART" = false ]]; then
         log "停止 Redis..."
         "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" SHUTDOWN NOSAVE 2>/dev/null || true
+    fi
+
+    # 恢复 NUMA Balancing 和 THP（如果之前关闭了）
+    if [[ $EUID -eq 0 ]]; then
+        log "恢复 NUMA Balancing 和 THP..."
+        echo 1 > /proc/sys/kernel/numa_balancing 2>/dev/null || true
+        echo "always/madvise" > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+        echo "always" > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+        log_ok "NUMA Balancing 和 THP 已恢复"
     fi
 }
 

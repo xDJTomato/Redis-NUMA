@@ -1,10 +1,10 @@
-/* numa_pool.c - NUMA感知内存池分配器实现
+/* numa_pool.c - NUMA Slab 分配器实现（jemalloc 风格，统一覆盖 8B-4KB）
  *
- * 实现说明：
- * - 内部元数据（chunk头部、池结构）使用libc malloc/free
- * - 实际内存chunk使用numa_alloc_onnode/numa_free
- * - 分配路径中不输出printf/调试信息，避免递归
- * - 通过每池互斥锁保证线程安全
+ * 设计原则：
+ * - 24 级 jemalloc 风格大小 class：8B~4KB，消除内部碎片
+ * - 16KB Slab + 512bit 位图 + 原子 CAS 无锁分配
+ * - 16 字节 PREFIX 元数据：跟踪对象大小、来源标记和节点ID
+ * - 所有对象统一走 Slab 路径（8B-4KB），>4KB 走 Direct NUMA 分配
  */
 
 #define _GNU_SOURCE
@@ -17,558 +17,21 @@
 #include <sched.h>
 #include <unistd.h>
 
-/* 内存池大小分类 - 扩展到16级 */
+/* 24 级 jemalloc 风格大小 class（覆盖 8B-4KB） */
 const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES] = {
-    16, 32, 48, 64,          /* 细粒度小对象 */
-    96, 128, 192, 256,       /* 中小对象 */
-    384, 512, 768, 1024,     /* 中型对象 */
-    1536, 2048, 3072, 4096   /* 大型对象 */
+    8, 16, 24, 32, 48, 64, 80, 96, 128,              /* 小对象（8/16 字节粒度） */
+    160, 192, 256, 320, 384, 512, 640, 768,            /* 中对象（32-64 字节粒度） */
+    1024, 1280, 1536, 2048, 2560, 3072, 4096           /* 大对象（128-256 字节粒度） */
 };
-
-/* 根据对象大小获取最优chunk大小 */
-size_t get_chunk_size_for_object(size_t obj_size) {
-    if (obj_size <= 256) {
-        return CHUNK_SIZE_SMALL;    /* 小对象使用16KB */
-    } else if (obj_size <= 1024) {
-        return CHUNK_SIZE_MEDIUM;   /* 中型对象使用64KB */
-    } else if (obj_size <= 4096) {
-        return CHUNK_SIZE_LARGE;    /* 大型对象使用256KB */
-    } else {
-        return 0;  /* 超大对象直接分配 */
-    }
-}
-
-/* 前向声明 */
-typedef struct numa_pool_chunk numa_pool_chunk_t;
-typedef struct free_block free_block_t;
-
-/* P1优化：空闲块结构，用于空闲列表管理 */
-struct free_block {
-    void *ptr;                     /* 已释放内存指针 */
-    size_t size;                   /* 已释放块的大小 */
-    struct free_block *next;       /* 列表中的下一个空闲块 */
-    struct numa_pool_chunk *owner_chunk; /* 所属chunk（用于递减used_bytes+compaction） */
-};
-
-/* 内存池chunk结构 */
-struct numa_pool_chunk {
-    void *memory;                  /* NUMA分配的内存 */
-    size_t size;                   /* chunk大小 */
-    size_t offset;                 /* 当前分配偏移量 */
-    size_t used_bytes;             /* 实际已分配字节数（P1：利用率跟踪） */
-    struct numa_pool_chunk *next;  /* 链表中的下一个chunk */
-};
-
-/* 大小分类池 */
-typedef struct {
-    size_t obj_size;               /* 该分类的对象大小 */
-    numa_pool_chunk_t *chunks;     /* chunk链表 */
-    free_block_t *free_list;       /* P1：该大小分类的空闲列表 */
-    pthread_mutex_t lock;          /* 线程安全 */
-    size_t chunks_count;           /* 统计信息 */
-} numa_size_class_pool_t;
-
-/* 每节点内存池 */
-typedef struct numa_node_pool {
-    int node_id;
-    numa_size_class_pool_t pools[NUMA_POOL_SIZE_CLASSES];
-    numa_pool_stats_t stats;
-} numa_node_pool_t;
-
-/* 全局池上下文 */
-static struct {
-    int initialized;
-    int numa_available;
-    int num_nodes;
-    int current_node;
-    numa_node_pool_t *node_pools;
-    pthread_mutex_t init_lock;
-} pool_ctx = {
-    .initialized = 0,
-    .numa_available = 0,
-    .num_nodes = 0,
-    .current_node = 0,
-    .node_pools = NULL
-};
-
-/* 线程局部当前节点 */
-static __thread int tls_current_node = -1;
-
-/* 初始化内存池系统 */
-int numa_pool_init(void)
-{
-    pthread_mutex_lock(&pool_ctx.init_lock);
-    
-    if (pool_ctx.initialized) {
-        pthread_mutex_unlock(&pool_ctx.init_lock);
-        return 0;
-    } 
-    
-    /* 检查NUMA可用性 */
-    if (numa_available() == -1) {
-        pool_ctx.numa_available = 0;
-        pool_ctx.initialized = 1;
-        pthread_mutex_unlock(&pool_ctx.init_lock);
-        return 0;
-    }
-    
-    pool_ctx.numa_available = 1;
-    pool_ctx.num_nodes = numa_max_node() + 1;
-    
-    /* 获取当前节点 */
-    int cpu = sched_getcpu();
-    if (cpu >= 0) {
-        pool_ctx.current_node = numa_node_of_cpu(cpu);
-    } else {
-        pool_ctx.current_node = 0;
-    }
-    tls_current_node = pool_ctx.current_node;
-    
-    /* 分配节点池数组 */
-    pool_ctx.node_pools = calloc(pool_ctx.num_nodes, sizeof(numa_node_pool_t));
-    if (!pool_ctx.node_pools) {
-        pool_ctx.numa_available = 0;
-        pool_ctx.initialized = 1;
-        pthread_mutex_unlock(&pool_ctx.init_lock);
-        return -1;
-    }
-    
-    /* 初始化每个节点的内存池 */
-    for (int i = 0; i < pool_ctx.num_nodes; i++) {
-        pool_ctx.node_pools[i].node_id = i;
-        for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
-            pool_ctx.node_pools[i].pools[j].obj_size = numa_pool_size_classes[j];
-            pool_ctx.node_pools[i].pools[j].chunks = NULL;
-            pool_ctx.node_pools[i].pools[j].free_list = NULL;  /* P1：初始化空闲列表 */
-            pool_ctx.node_pools[i].pools[j].chunks_count = 0;
-            pthread_mutex_init(&pool_ctx.node_pools[i].pools[j].lock, NULL);
-        }
-        memset(&pool_ctx.node_pools[i].stats, 0, sizeof(numa_pool_stats_t));
-    }
-    
-    pool_ctx.initialized = 1;
-    pthread_mutex_unlock(&pool_ctx.init_lock);
-    return 0;
-}
-
-/* 清理所有内存池 */
-void numa_pool_cleanup(void)
-{
-    pthread_mutex_lock(&pool_ctx.init_lock);
-    
-    if (!pool_ctx.initialized || !pool_ctx.node_pools) {
-        pthread_mutex_unlock(&pool_ctx.init_lock);
-        return;
-    }
-    
-    for (int i = 0; i < pool_ctx.num_nodes; i++) {
-        for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
-            numa_size_class_pool_t *pool = &pool_ctx.node_pools[i].pools[j];
-            numa_pool_chunk_t *chunk = pool->chunks;
-            
-            pthread_mutex_lock(&pool->lock);
-            while (chunk) {
-                numa_pool_chunk_t *next = chunk->next;
-                if (chunk->memory) {
-                    numa_free(chunk->memory, chunk->size);
-                }
-                free(chunk);
-                chunk = next;
-            }
-            pool->chunks = NULL;
-            pthread_mutex_unlock(&pool->lock);
-            pthread_mutex_destroy(&pool->lock);
-        }
-    }
-    
-    free(pool_ctx.node_pools);
-    pool_ctx.node_pools = NULL;
-    pool_ctx.initialized = 0;
-    pool_ctx.numa_available = 0;
-    
-    pthread_mutex_unlock(&pool_ctx.init_lock);
-}
-
-/* 内部：动态分配内存池新chunk */
-static numa_pool_chunk_t *alloc_new_chunk(int node, size_t obj_size)
-{
-    numa_pool_chunk_t *chunk = malloc(sizeof(numa_pool_chunk_t));
-    if (!chunk) {
-        return NULL;
-    }
-    
-    /* 根据对象大小获取最优chunk大小 */
-    size_t chunk_size = get_chunk_size_for_object(obj_size);
-    if (chunk_size == 0) {
-        /* 超大对象，应使用直接分配 */
-        free(chunk);
-        return NULL;
-    }
-    
-    chunk->memory = numa_alloc_onnode(chunk_size, node);
-    if (!chunk->memory) {
-        free(chunk);
-        return NULL;
-    }
-    
-    chunk->size = chunk_size;
-    chunk->offset = 0;
-    chunk->used_bytes = 0;        /* P1：初始化利用率跟踪 */
-    chunk->next = NULL;
-    
-    return chunk;
-}
-
-/* 从内存池分配 - 优化快速路径。
- * from_pool_out: 输出参数，1=实际从Pool分配，0=回退到direct numa_alloc_onnode */
-void *numa_pool_alloc(size_t size, int node, size_t *total_size, int *from_pool_out)
-{
-    if (!pool_ctx.initialized) {
-        return NULL;
-    }
-    
-    if (node < 0 || node >= pool_ctx.num_nodes) {
-        node = pool_ctx.current_node;
-    }
-    
-    size_t alloc_size = size;
-    int from_pool = 0;
-    void *result = NULL;
-    
-    /* 小对象尝试内存池分配 */
-    if (alloc_size <= NUMA_POOL_MAX_ALLOC && pool_ctx.node_pools) {
-        /* 二分查找式快速大小分类查找 */
-        int class_idx = -1;
-        if (alloc_size <= 64) {
-            class_idx = (alloc_size <= 16) ? 0 : (alloc_size <= 32) ? 1 : (alloc_size <= 48) ? 2 : 3;
-        } else if (alloc_size <= 256) {
-            class_idx = (alloc_size <= 96) ? 4 : (alloc_size <= 128) ? 5 : (alloc_size <= 192) ? 6 : 7;
-        } else if (alloc_size <= 1024) {
-            class_idx = (alloc_size <= 384) ? 8 : (alloc_size <= 512) ? 9 : (alloc_size <= 768) ? 10 : 11;
-        } else if (alloc_size <= 4096) {
-            class_idx = (alloc_size <= 1536) ? 12 : (alloc_size <= 2048) ? 13 : (alloc_size <= 3072) ? 14 : 15;
-        }
-        
-        if (class_idx >= 0) {
-            numa_node_pool_t *node_pool = &pool_ctx.node_pools[node];
-            numa_size_class_pool_t *pool = &node_pool->pools[class_idx];
-            
-            pthread_mutex_lock(&pool->lock);
-            
-            size_t aligned_size = (alloc_size + 15) & ~15;  /* 16-byte align */
-            
-            /* 快速路径1：尝试空闲列表头部（O(1)复用） */
-            free_block_t *free_block = pool->free_list;
-            if (free_block && free_block->size >= aligned_size) {
-                result = free_block->ptr;
-                pool->free_list = free_block->next;
-                free(free_block);
-                from_pool = 1;
-            }
-            
-            /* 快速路径2：直接尝试第一个chunk（热缓存） */
-            if (!result) {
-                numa_pool_chunk_t *chunk = pool->chunks;
-                if (chunk && chunk->offset + aligned_size <= chunk->size) {
-                    result = (char *)chunk->memory + chunk->offset;
-                    chunk->offset += aligned_size;
-                    chunk->used_bytes += aligned_size;
-                    from_pool = 1;
-                }
-            }
-            
-            /* 慢速路径：按需分配新chunk */
-            if (!result) {
-                numa_pool_chunk_t *new_chunk = alloc_new_chunk(node, alloc_size);
-                if (new_chunk) {
-                    result = new_chunk->memory;
-                    new_chunk->offset = aligned_size;
-                    new_chunk->used_bytes = aligned_size;
-                    new_chunk->next = pool->chunks;
-                    pool->chunks = new_chunk;
-                    pool->chunks_count++;
-                    from_pool = 1;
-                }
-            }
-            
-            pthread_mutex_unlock(&pool->lock);
-            
-            if (from_pool) {
-                pool_ctx.node_pools[node].stats.pool_hits++;
-                pool_ctx.node_pools[node].stats.total_from_pool += alloc_size;
-            }
-        }
-    }
-    
-    /* 回退到直接NUMA分配 */
-    if (!result) {
-        result = numa_alloc_onnode(alloc_size, node);
-        from_pool = 0;
-        if (result && pool_ctx.node_pools) {
-            pool_ctx.node_pools[node].stats.pool_misses++;
-            pool_ctx.node_pools[node].stats.total_direct += alloc_size;
-        }
-    }
-    
-    if (result && pool_ctx.node_pools) {
-        pool_ctx.node_pools[node].stats.total_allocated += alloc_size;
-    }
-    
-    if (total_size) {
-        *total_size = alloc_size;
-    }
-    if (from_pool_out) {
-        *from_pool_out = from_pool;  /* 0=direct fallback, 1=genuine pool */
-    }
-
-    return result;
-}
-
-/* 释放内存 - P1：将已释放块添加到空闲列表
- * P1修复：node_id 从 PREFIX 传入，避免跨节点错配。
- * P1修复：递减 owner_chunk->used_bytes，使 compaction 准确检测低利用率。 */
-void numa_pool_free(void *ptr, size_t total_size, int from_pool, int node_id)
-{
-    if (!ptr) {
-        return;
-    }
-
-    if (!from_pool) {
-        /* 只释放直接NUMA分配 */
-        numa_free(ptr, total_size);
-        return;
-    }
-
-    /* P1：对于池内分配，添加到空闲列表 */
-    if (!pool_ctx.initialized || !pool_ctx.node_pools) {
-        return;  /* 内存池未初始化，默认泄漏 */
-    }
-
-    /* 找到此大小对应的大小分类 */
-    size_t aligned_size = (total_size + 15) & ~15;
-    int class_idx = -1;
-
-    for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
-        if (aligned_size <= numa_pool_size_classes[i]) {
-            class_idx = i;
-            break;
-        }
-    }
-
-    if (class_idx < 0) {
-        return;  /* 大小不匹配任何分类，跳过 */
-    }
-
-    /* P1修复：使用 PREFIX 记录的分配节点，而非 pool_ctx.current_node */
-    if (node_id < 0 || node_id >= pool_ctx.num_nodes) {
-        node_id = pool_ctx.current_node;  /* 回退 */
-    }
-
-    /* 在持锁前分配 free_block 元数据，缩短锁区间 */
-    free_block_t *free_block = malloc(sizeof(free_block_t));
-    if (!free_block) {
-        return;
-    }
-
-    numa_size_class_pool_t *pool = &pool_ctx.node_pools[node_id].pools[class_idx];
-    pthread_mutex_lock(&pool->lock);
-
-    /* P1修复：扫描chunk链表找到归属chunk，递减used_bytes */
-    numa_pool_chunk_t *owner = NULL;
-    numa_pool_chunk_t *chunk = pool->chunks;
-    while (chunk) {
-        if (ptr >= chunk->memory &&
-            ptr < (char *)chunk->memory + chunk->size) {
-            owner = chunk;
-            break;
-        }
-        chunk = chunk->next;
-    }
-    if (owner && owner->used_bytes >= aligned_size) {
-        owner->used_bytes -= aligned_size;
-    }
-
-    free_block->ptr         = ptr;
-    free_block->size        = aligned_size;
-    free_block->owner_chunk = owner;
-    free_block->next        = pool->free_list;
-    pool->free_list         = free_block;
-
-    pthread_mutex_unlock(&pool->lock);
-}
-
-/* 设置当前 NUMA 节点 */
-void numa_pool_set_node(int node)
-{
-    if (node >= 0 && node < pool_ctx.num_nodes) {
-        pool_ctx.current_node = node;
-        tls_current_node = node;
-    }
-}
-
-/* 获取当前 NUMA 节点 */
-int numa_pool_get_node(void)
-{
-    if (tls_current_node >= 0) {
-        return tls_current_node;
-    }
-    return pool_ctx.current_node;
-}
-
-/* 获取 NUMA 节点数量 */
-int numa_pool_num_nodes(void)
-{
-    return pool_ctx.num_nodes;
-}
-
-/* 检查 NUMA 是否可用 */
-int numa_pool_available(void)
-{
-    return pool_ctx.numa_available;
-}
-
-/* 获取池统计信息 */
-void numa_pool_get_stats(int node, numa_pool_stats_t *stats)
-{
-    if (!stats || node < 0 || node >= pool_ctx.num_nodes || !pool_ctx.node_pools) {
-        return;
-    }
-    
-    *stats = pool_ctx.node_pools[node].stats;
-}
-
-/* 重置池统计信息 */
-void numa_pool_reset_stats(void)
-{
-    if (!pool_ctx.node_pools) {
-        return;
-    }
-    
-    for (int i = 0; i < pool_ctx.num_nodes; i++) {
-        memset(&pool_ctx.node_pools[i].stats, 0, sizeof(numa_pool_stats_t));
-    }
-}
-
-/* P1优化：获取chunk利用率 */
-float numa_pool_get_utilization(int node, int size_class_idx)
-{
-    if (!pool_ctx.initialized || !pool_ctx.node_pools) {
-        return 0.0f;
-    }
-    
-    if (node < 0 || node >= pool_ctx.num_nodes) {
-        return 0.0f;
-    }
-    
-    if (size_class_idx < 0 || size_class_idx >= NUMA_POOL_SIZE_CLASSES) {
-        return 0.0f;
-    }
-    
-    numa_size_class_pool_t *pool = &pool_ctx.node_pools[node].pools[size_class_idx];
-    pthread_mutex_lock(&pool->lock);
-    
-    size_t total_size = 0;
-    size_t used_bytes = 0;
-    numa_pool_chunk_t *chunk = pool->chunks;
-    
-    while (chunk) {
-        total_size += chunk->size;
-        used_bytes += chunk->used_bytes;
-        chunk = chunk->next;
-    }
-    
-    pthread_mutex_unlock(&pool->lock);
-    
-    if (total_size == 0) {
-        return 0.0f;
-    }
-    
-    return (float)used_bytes / (float)total_size;
-}
-
-/* P1优化：尝试压缩低利用率chunk。
- * P1修复：
- *   1. used_bytes 现在在释放时递减，利用率计算准确
- *   2. 释放 chunk 前清理其 free_list 条目（只 free 元数据节点，ptr 随 chunk 整体释放）
- *   3. 移除原有的 free_count>10 清空 free_list 逻辑（该操作泄漏 NUMA 内存） */
-int numa_pool_try_compact(void)
-{
-    if (!pool_ctx.initialized || !pool_ctx.node_pools) {
-        return 0;
-    }
-
-    int compacted_count = 0;
-
-    /* 遍历所有节点和大小分类 */
-    for (int node = 0; node < pool_ctx.num_nodes; node++) {
-        for (int class_idx = 0; class_idx < NUMA_POOL_SIZE_CLASSES; class_idx++) {
-            numa_size_class_pool_t *pool = &pool_ctx.node_pools[node].pools[class_idx];
-
-            pthread_mutex_lock(&pool->lock);
-
-            /* 查找并释放低利用率chunk */
-            numa_pool_chunk_t **prev_ptr = &pool->chunks;
-            numa_pool_chunk_t *chunk = pool->chunks;
-
-            while (chunk) {
-                float utilization = 0.0f;
-                if (chunk->size > 0) {
-                    utilization = (float)chunk->used_bytes / (float)chunk->size;
-                }
-
-                /* 如果chunk低于阈值且有较大空闲空间 */
-                if (utilization < COMPACT_THRESHOLD &&
-                    (1.0f - utilization) >= COMPACT_MIN_FREE_RATIO) {
-
-                    /* P1修复：先清理 free_list 中属于此 chunk 的条目。
-                     * 只释放 free_block 元数据节点，实际内存 ptr 随 chunk 整体释放。 */
-                    free_block_t **fb_prev = &pool->free_list;
-                    free_block_t *fb = pool->free_list;
-                    while (fb) {
-                        if (fb->owner_chunk == chunk) {
-                            *fb_prev = fb->next;
-                            free_block_t *to_free = fb;
-                            fb = fb->next;
-                            free(to_free);
-                        } else {
-                            fb_prev = &fb->next;
-                            fb = fb->next;
-                        }
-                    }
-
-                    /* 从链表移除chunk并释放 */
-                    *prev_ptr = chunk->next;
-                    numa_free(chunk->memory, chunk->size);
-                    free(chunk);
-                    pool->chunks_count--;
-                    compacted_count++;
-
-                    /* 不推进prev_ptr，直接移到下一个 */
-                    chunk = *prev_ptr;
-                    continue;
-                }
-
-                /* 移到下一个chunk */
-                prev_ptr = &chunk->next;
-                chunk = chunk->next;
-            }
-
-            pthread_mutex_unlock(&pool->lock);
-        }
-    }
-
-    return compacted_count;
-}
 
 /* ============================================================================
- * P2优化：Slab分配器实现
+ * Slab 分配器实现（jemalloc 风格，统一覆盖 8B-4KB）
  * ============================================================================
  * 设计：
- * - 4KB slab用于小对象（<=512B）
- * - 位图O(1)分配
- * - 每大小分类slab池
- * - 与已有Pool共存，用于大对象（>512B）
- * - P2修复：带回指针的Slab头部，支持O(1)free查找
+ * - 24 级 jemalloc 风格大小 class，覆盖 8B~4KB
+ * - 16KB Slab + 512bit 位图 + 原子 CAS 无锁分配
+ * - 带回指针的 Slab 头部，支持 O(1) free 查找
+ * - 部分占用/全占用/空闲 三态链表管理
  * ========================================================================= */
 
 /* 每个slab头部存储在slab开头，用于O(1)信free查找 */
@@ -607,6 +70,7 @@ typedef struct {
     numa_slab_t *partial_slabs;      /* 部分使用的slabs */
     numa_slab_t *full_slabs;         /* 已全占用的slabs */
     numa_slab_t *empty_slabs;        /* 空闲的slabs（缓存） */
+    numa_slab_t *current_slab;       /* 快速路径使用的当前slab指针 */
     size_t empty_count;              /* 缓存的空闲slab数 */
     pthread_mutex_t lock;            /* 线程安全 */
     size_t slabs_count;              /* 已分配slab总数 */
@@ -798,17 +262,15 @@ int numa_slab_init(void) {
         
         for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
             numa_slab_class_t *class = &slab_ctx.slab_nodes[i].classes[j];
-            
-            /* 只初始化小对象（<=512B） */
+
+            /* 初始化所有 24 个大小 class（8B-4KB 统一走 Slab） */
             size_t obj_size = numa_pool_size_classes[j];
-            if (obj_size > SLAB_MAX_OBJECT_SIZE) {
-                continue;
-            }
-            
+
             class->obj_size = obj_size + 16;  /* 包含PREFIX */
             class->partial_slabs = NULL;
             class->full_slabs = NULL;
             class->empty_slabs = NULL;
+            class->current_slab = NULL;
             class->empty_count = 0;
             class->slabs_count = 0;
             pthread_mutex_init(&class->lock, NULL);
@@ -854,7 +316,7 @@ void numa_slab_cleanup(void) {
                 free_slab(slab);
                 slab = next;
             }
-            
+
             pthread_mutex_destroy(&class->lock);
         }
     }
@@ -864,12 +326,12 @@ void numa_slab_cleanup(void) {
     slab_ctx.initialized = 0;
 }
 
-/* 从 slab 分配 - P2修复：无锁快速路径 */
+/* 从 slab 分配 - 快速路径只使用 current_slab 指针，避免链表遍历的 use-after-free */
 void *numa_slab_alloc(size_t size, int node, size_t *total_size) {
     if (!slab_ctx.initialized) {
         return NULL;
     }
-    
+
     /* 查找合适的大小分类 */
     int class_idx = -1;
     for (int i = 0; i < NUMA_POOL_SIZE_CLASSES; i++) {
@@ -878,88 +340,138 @@ void *numa_slab_alloc(size_t size, int node, size_t *total_size) {
             break;
         }
     }
-    
-    if (class_idx < 0 || numa_pool_size_classes[class_idx] > SLAB_MAX_OBJECT_SIZE) {
-        return NULL;  /* 超出slab大小限制 */
+
+    if (class_idx < 0) {
+        return NULL;  /* 超出大小 class 范围 */
     }
-    
+
     /* 验证节点 */
     if (node < 0 || node >= slab_ctx.num_nodes) {
         node = 0;
     }
-    
+
     numa_slab_class_t *class = &slab_ctx.slab_nodes[node].classes[class_idx];
     size_t aligned_size = (size + 15) & ~15;  /* 16-byte align */
     *total_size = aligned_size + 16;  /* Include PREFIX */
-    
-    /* 快速路径：无锁尝试从现有部分slab分配 */
-    numa_slab_t *slab = __atomic_load_n(&class->partial_slabs, __ATOMIC_ACQUIRE);
-    while (slab) {
-        /* Try lock-free allocation from this slab */
+
+    /* 快速路径：无锁尝试从 current_slab 分配 */
+    numa_slab_t *slab = __atomic_load_n(&class->current_slab, __ATOMIC_ACQUIRE);
+    if (slab) {
         int free_bit = bitmap_find_and_set(slab->bitmap, slab->objects_per_slab);
         if (free_bit >= 0) {
             /* 成功占用一个插槽 */
             uint16_t new_count = __atomic_sub_fetch(&slab->free_count, 1, __ATOMIC_ACQ_REL);
-            
+
             /* 计算对象地址（跳过头部） */
             void *result = (char *)slab->memory + SLAB_HEADER_SIZE + (free_bit * class->obj_size);
-            
-            /* 如果slab已满，移入full列表（需加锁进行链表操作） */
+
+            /* 如果 slab 已满，清除 current_slab（慢路径会选新的） */
             if (new_count == 0) {
-                pthread_mutex_lock(&class->lock);
-                /* 加锁后双重检查 */
-                if (__atomic_load_n(&slab->free_count, __ATOMIC_ACQUIRE) == 0 &&
-                    __atomic_load_n(&slab->list_type, __ATOMIC_ACQUIRE) == SLAB_LIST_PARTIAL) {
-                    slab_list_remove(&class->partial_slabs, slab);
-                    slab_list_add_head(&class->full_slabs, slab);
-                    __atomic_store_n(&slab->list_type, SLAB_LIST_FULL, __ATOMIC_RELEASE);
-                }
-                pthread_mutex_unlock(&class->lock);
+                __atomic_store_n(&class->current_slab, NULL, __ATOMIC_RELEASE);
             }
             return result;
         }
-        /* 该slab已满，尝试下一个 */
-        slab = __atomic_load_n(&slab->next, __ATOMIC_ACQUIRE);
+        /* current_slab 已满，清除它 */
+        __atomic_store_n(&class->current_slab, NULL, __ATOMIC_RELEASE);
     }
-    
-    /* 慢速路径：需要获取新slab（需加锁） */
+
+    /* 慢速路径：加锁获取新 slab */
     pthread_mutex_lock(&class->lock);
-    
-    /* 加锁后重新检查partial_slabs */
-    slab = class->partial_slabs;
+
+    /* 重新检查 current_slab（可能被其他线程更新） */
+    slab = class->current_slab;
     if (slab) {
         int free_bit = bitmap_find_and_set(slab->bitmap, slab->objects_per_slab);
         if (free_bit >= 0) {
             __atomic_sub_fetch(&slab->free_count, 1, __ATOMIC_ACQ_REL);
             void *result = (char *)slab->memory + SLAB_HEADER_SIZE + (free_bit * class->obj_size);
+            if (__atomic_load_n(&slab->free_count, __ATOMIC_ACQUIRE) == 0) {
+                class->current_slab = NULL;
+                slab_list_remove(&class->partial_slabs, slab);
+                slab_list_add_head(&class->full_slabs, slab);
+                __atomic_store_n(&slab->list_type, SLAB_LIST_FULL, __ATOMIC_RELEASE);
+            }
             pthread_mutex_unlock(&class->lock);
             return result;
         }
+        class->current_slab = NULL;
     }
-    
-    /* 从空闲缓存获取或分配新slab */
+
+    /* 从 partial_slabs 链表找可用的 slab，已满的清理到 full_slabs */
+    slab = class->partial_slabs;
+    while (slab) {
+        numa_slab_t *next = slab->next;
+        int free_bit = bitmap_find_and_set(slab->bitmap, slab->objects_per_slab);
+        if (free_bit >= 0) {
+            __atomic_sub_fetch(&slab->free_count, 1, __ATOMIC_ACQ_REL);
+            void *result = (char *)slab->memory + SLAB_HEADER_SIZE + (free_bit * class->obj_size);
+            if (__atomic_load_n(&slab->free_count, __ATOMIC_ACQUIRE) == 0) {
+                slab_list_remove(&class->partial_slabs, slab);
+                slab_list_add_head(&class->full_slabs, slab);
+                __atomic_store_n(&slab->list_type, SLAB_LIST_FULL, __ATOMIC_RELEASE);
+            } else {
+                class->current_slab = slab;
+            }
+            pthread_mutex_unlock(&class->lock);
+            return result;
+        }
+        /* slab 已满，移到 full_slabs 避免后续重复遍历 */
+        slab_list_remove(&class->partial_slabs, slab);
+        slab_list_add_head(&class->full_slabs, slab);
+        __atomic_store_n(&slab->list_type, SLAB_LIST_FULL, __ATOMIC_RELEASE);
+        slab = next;
+    }
+
+    /* 从空闲缓存获取或分配新 slab（批量分配减少系统调用） */
     if (class->empty_slabs) {
         slab = class->empty_slabs;
         slab_list_remove(&class->empty_slabs, slab);
         class->empty_count--;
     } else {
-        slab = alloc_new_slab(node, class->obj_size, class_idx);
-        if (!slab) {
-            pthread_mutex_unlock(&class->lock);
-            return NULL;
+        /* 批量分配：对象少的 class 多预分配几个 slab */
+        int batch_size = (slab_ctx.slab_nodes[node].classes[class_idx].obj_size > 512) ? 4 : 2;
+
+        for (int i = 0; i < batch_size; i++) {
+            numa_slab_t *new_slab = alloc_new_slab(node, class->obj_size, class_idx);
+            if (!new_slab) {
+                if (i == 0) {
+                    /* 一个都没分配成功 */
+                    pthread_mutex_unlock(&class->lock);
+                    return NULL;
+                }
+                /* 部分成功，使用已分配的 */
+                break;
+            }
+            slab_list_add_head(&class->empty_slabs, new_slab);
+            class->empty_count++;
+            class->slabs_count++;
         }
-        class->slabs_count++;
+
+        slab = class->empty_slabs;
+        slab_list_remove(&class->empty_slabs, slab);
+        class->empty_count--;
     }
-    
-    /* 添加到partial列表 */
+
+    /* 添加到 partial 列表并设为 current_slab */
     slab_list_add_head(&class->partial_slabs, slab);
     __atomic_store_n(&slab->list_type, SLAB_LIST_PARTIAL, __ATOMIC_RELEASE);
-    
-    /* 从新slab分配 */
+    class->current_slab = slab;
+
+    /* 从新 slab 分配 */
     int free_bit = bitmap_find_and_set(slab->bitmap, slab->objects_per_slab);
     __atomic_sub_fetch(&slab->free_count, 1, __ATOMIC_ACQ_REL);
     void *result = (char *)slab->memory + SLAB_HEADER_SIZE + (free_bit * class->obj_size);
-    
+
+    /* 清理多余的 empty slabs */
+    while (class->empty_count > SLAB_EMPTY_CACHE_MAX) {
+        numa_slab_t *es = class->empty_slabs;
+        if (!es) break;
+        slab_list_remove(&class->empty_slabs, es);
+        class->empty_count--;
+        free_slab(es);
+        class->slabs_count--;
+    }
+
     pthread_mutex_unlock(&class->lock);
     return result;
 }
@@ -1013,19 +525,25 @@ void numa_slab_free(void *ptr, size_t total_size, int node) {
     
     if (was_full || is_empty) {
         pthread_mutex_lock(&class->lock);
-        
+
         int current_list = __atomic_load_n(&slab->list_type, __ATOMIC_ACQUIRE);
         uint16_t current_count = __atomic_load_n(&slab->free_count, __ATOMIC_ACQUIRE);
-        
+
         if (was_full && current_list == SLAB_LIST_FULL) {
             /* 从 full 移到 partial */
             slab_list_remove(&class->full_slabs, slab);
             slab_list_add_head(&class->partial_slabs, slab);
             __atomic_store_n(&slab->list_type, SLAB_LIST_PARTIAL, __ATOMIC_RELEASE);
+            if (!class->current_slab) {
+                class->current_slab = slab;
+            }
         } else if (current_count == slab->objects_per_slab && current_list == SLAB_LIST_PARTIAL) {
             /* 从 partial 移到 empty/free */
             slab_list_remove(&class->partial_slabs, slab);
-            
+            if (class->current_slab == slab) {
+                class->current_slab = NULL;
+            }
+
             if (class->empty_count < SLAB_EMPTY_CACHE_MAX) {
                 slab_list_add_head(&class->empty_slabs, slab);
                 __atomic_store_n(&slab->list_type, SLAB_LIST_EMPTY, __ATOMIC_RELEASE);
@@ -1035,7 +553,36 @@ void numa_slab_free(void *ptr, size_t total_size, int node) {
                 class->slabs_count--;
             }
         }
-        
+
         pthread_mutex_unlock(&class->lock);
     }
+}
+
+/* 获取 NUMA 节点数量（兼容旧接口） */
+int numa_pool_num_nodes(void)
+{
+    if (slab_ctx.initialized) {
+        return slab_ctx.num_nodes;
+    }
+    /* 回退：直接查询 libnuma */
+    if (numa_available() < 0) {
+        return 1;
+    }
+    return numa_max_node() + 1;
+}
+
+/* 获取当前 NUMA 节点（兼容旧接口） */
+int numa_pool_get_node(void)
+{
+    int cpu = sched_getcpu();
+    if (cpu >= 0) {
+        return numa_node_of_cpu(cpu);
+    }
+    return 0;
+}
+
+/* 检查 NUMA 是否可用（兼容旧接口） */
+int numa_pool_available(void)
+{
+    return slab_ctx.initialized ? 1 : (numa_available() >= 0 ? 1 : 0);
 }
