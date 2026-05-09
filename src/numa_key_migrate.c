@@ -352,61 +352,70 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
     } else if (val_obj->encoding == OBJ_ENCODING_HT) {
         /* 哈希表编码：迁移dict及所有sds字段/値对
          * 因SDS头部结构复杂，使用标准sds函数 */
+        numa_alloc_push_node(target_node);
+
         dict *old_dict = val_obj->ptr;
         dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
         if (!new_dict) {
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
+
         /* 预展开以避免迁移中重哈希 */
         if (dictExpand(new_dict, dictSize(old_dict)) != DICT_OK) {
             dictRelease(new_dict);
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
+
         dictIterator *iter = dictGetIterator(old_dict);
         dictEntry *entry;
         size_t migrated_pairs = 0;
-        
+
         while ((entry = dictNext(iter)) != NULL) {
             sds old_field = dictGetKey(entry);
             sds old_value = dictGetVal(entry);
-            
+
             /* 使用标准分配创建新sds */
             sds new_field = sdsnewlen(old_field, sdslen(old_field));
             if (!new_field) {
                 dictReleaseIterator(iter);
                 dictRelease(new_dict);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
-            
+
             sds new_value = sdsnewlen(old_value, sdslen(old_value));
             if (!new_value) {
                 sdsfree(new_field);
                 dictReleaseIterator(iter);
                 dictRelease(new_dict);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
-            
+
             /* 添加到新dict（所有权new_field和new_value） */
             if (dictAdd(new_dict, new_field, new_value) != DICT_OK) {
                 sdsfree(new_field);
                 sdsfree(new_value);
                 dictReleaseIterator(iter);
                 dictRelease(new_dict);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ERR;
             }
-            
+
             migrated_pairs++;
         }
-        
+
         dictReleaseIterator(iter);
-        
+
         /* 交换dict并释放旧的 */
         val_obj->ptr = new_dict;
         dictRelease(old_dict);
-        
-        KEY_MIGRATE_LOG(LL_DEBUG, 
+
+        numa_alloc_pop_node();
+
+        KEY_MIGRATE_LOG(LL_DEBUG,
             "[NUMA Key Migrate] Hash (hashtable) migrated, %zu pairs", migrated_pairs);
         return NUMA_KEY_MIGRATE_OK;
         
@@ -420,19 +429,21 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
 /* 迁移 LIST 类型 */
 int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
     (void)key_obj;  /* 未使用参数 */
-    (void)target_node;  /* zmalloc分配时不直接使用 */
-    
+
     if (val_obj->encoding != OBJ_ENCODING_QUICKLIST) {
-        KEY_MIGRATE_LOG(LL_WARNING, 
+        KEY_MIGRATE_LOG(LL_WARNING,
             "[NUMA Key Migrate] Unknown list encoding: %d", val_obj->encoding);
         return NUMA_KEY_MIGRATE_ETYPE;
     }
-    
+
+    numa_alloc_push_node(target_node);
+
     quicklist *old_ql = val_obj->ptr;
-    
+
     /* 使用标准分配创建新quicklist */
     quicklist *new_ql = zmalloc(sizeof(quicklist));
     if (!new_ql) {
+        numa_alloc_pop_node();
         return NUMA_KEY_MIGRATE_ENOMEM;
     }
     
@@ -463,6 +474,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
                 cleanup = next;
             }
             zfree(new_ql);
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
         
@@ -493,6 +505,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
                     cleanup = next;
                 }
                 zfree(new_ql);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
             memcpy(new_node->zl, old_node->zl, lzf_sz);
@@ -509,6 +522,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
                     cleanup = next;
                 }
                 zfree(new_ql);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
             memcpy(new_node->zl, old_node->zl, old_node->sz);
@@ -540,8 +554,10 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
     
     /* 更新对象指针 */
     val_obj->ptr = new_ql;
-    
-    KEY_MIGRATE_LOG(LL_DEBUG, 
+
+    numa_alloc_pop_node();
+
+    KEY_MIGRATE_LOG(LL_DEBUG,
         "[NUMA Key Migrate] List (quicklist) migrated, %zu nodes", migrated_nodes);
     return NUMA_KEY_MIGRATE_OK;
 }
@@ -569,54 +585,55 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
         return NUMA_KEY_MIGRATE_OK;
         
     } else if (val_obj->encoding == OBJ_ENCODING_HT) {
-        /* 哈希表编码：迁移dict及所有sds元素
-         * 因SDS头部结构复杂，使用标准sds函数 */
+        /* 哈希表编码：迁移dict及所有sds元素 */
+        numa_alloc_push_node(target_node);
+
         dict *old_dict = val_obj->ptr;
         dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
         if (!new_dict) {
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
-        /* 预展开以避免重哈希 */
+
         if (dictExpand(new_dict, dictSize(old_dict)) != DICT_OK) {
             dictRelease(new_dict);
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
+
         dictIterator *iter = dictGetIterator(old_dict);
         dictEntry *entry;
         size_t migrated_members = 0;
-        
+
         while ((entry = dictNext(iter)) != NULL) {
             sds old_member = dictGetKey(entry);
-            
-            /* 使用标准分配创建新sds
-             * 注：真正NUMA迁移需要NUMA感知的sds分配器 */
             sds new_member = sdsnewlen(old_member, sdslen(old_member));
             if (!new_member) {
                 dictReleaseIterator(iter);
                 dictRelease(new_dict);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
-            
-            /* 添加到新dict（set的value为NULL） */
+
             if (dictAdd(new_dict, new_member, NULL) != DICT_OK) {
                 sdsfree(new_member);
                 dictReleaseIterator(iter);
                 dictRelease(new_dict);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ERR;
             }
-            
+
             migrated_members++;
         }
-        
+
         dictReleaseIterator(iter);
-        
-        /* 交换dict并释放旧的 */
+
         val_obj->ptr = new_dict;
         dictRelease(old_dict);
-        
-        KEY_MIGRATE_LOG(LL_DEBUG, 
+
+        numa_alloc_pop_node();
+
+        KEY_MIGRATE_LOG(LL_DEBUG,
             "[NUMA Key Migrate] Set (hashtable) migrated, %zu members", migrated_members);
         return NUMA_KEY_MIGRATE_OK;
         
@@ -630,8 +647,7 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
 /* 迁移 ZSET 类型 */
 int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
     (void)key_obj;  /* 未使用参数 */
-    (void)target_node;  /* sds分配时不直接使用 */
-    
+
     if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
         /* Ziplist编码：整体迁移 */
         unsigned char *old_zl = val_obj->ptr;
@@ -651,73 +667,70 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
         return NUMA_KEY_MIGRATE_OK;
         
     } else if (val_obj->encoding == OBJ_ENCODING_SKIPLIST) {
-        /* 跳表编码：迁移zset结构、dict和跳表
-         * 因SDS头部结构复杂，使用标准sds函数 */
+        /* 跳表编码：迁移zset结构、dict和跳表 */
+        numa_alloc_push_node(target_node);
+
         zset *old_zs = val_obj->ptr;
-        
-        /* 分配新zset结构 */
+
         zset *new_zs = zmalloc(sizeof(zset));
         if (!new_zs) {
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
-        /* 创建新跳表 */
+
         new_zs->zsl = zslCreate();
         if (!new_zs->zsl) {
             zfree(new_zs);
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
-        /* 创建新dict */
+
         new_zs->dict = dictCreate(old_zs->dict->type, old_zs->dict->privdata);
         if (!new_zs->dict) {
             zslFree(new_zs->zsl);
             zfree(new_zs);
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
-        /* 预展开dict */
+
         if (dictExpand(new_zs->dict, dictSize(old_zs->dict)) != DICT_OK) {
             dictRelease(new_zs->dict);
             zslFree(new_zs->zsl);
             zfree(new_zs);
+            numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
-        /* 从尾到头遍历跳表以获得最佳插入顺序 */
+
         zskiplistNode *old_node = old_zs->zsl->tail;
         size_t migrated_elements = 0;
-        
+
         while (old_node) {
-            /* 使用标准sds创建新元素字符串 */
             sds old_ele = old_node->ele;
             sds new_ele = sdsnewlen(old_ele, sdslen(old_ele));
             if (!new_ele) {
                 dictRelease(new_zs->dict);
                 zslFree(new_zs->zsl);
                 zfree(new_zs);
+                numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
-            
-            /* 插入新跳表 */
+
             zskiplistNode *new_sl_node = zslInsert(new_zs->zsl, old_node->score, new_ele);
-            
-            /* 添加到dict（元素 -> 分数指针） */
             dictAdd(new_zs->dict, new_ele, &new_sl_node->score);
-            
+
             migrated_elements++;
             old_node = old_node->backward;
         }
-        
-        /* 释放旧zset */
+
         dictRelease(old_zs->dict);
         zslFree(old_zs->zsl);
         zfree(old_zs);
-        
-        /* 更新对象指针 */
+
         val_obj->ptr = new_zs;
-        
-        KEY_MIGRATE_LOG(LL_DEBUG, 
+
+        numa_alloc_pop_node();
+
+        KEY_MIGRATE_LOG(LL_DEBUG,
             "[NUMA Key Migrate] Zset (skiplist) migrated, %zu elements", migrated_elements);
         return NUMA_KEY_MIGRATE_OK;
         

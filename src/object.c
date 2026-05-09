@@ -39,7 +39,7 @@
 /* ===================== Creation and parsing of objects ==================== */
 
 robj *createObject(int type, void *ptr) {
-    robj *o = zmalloc(sizeof(*o));
+    robj *o = zmalloc_local(sizeof(*o));
     //printf("DEBUG: sizeof(*o)=%lu\n", sizeof(*o));
     o->type = type;
     o->encoding = OBJ_ENCODING_RAW;
@@ -83,7 +83,7 @@ robj *createRawStringObject(const char *ptr, size_t len) {
  * an object where the sds string is actually an unmodifiable string
  * allocated in the same chunk as the object itself. */
 robj *createEmbeddedStringObject(const char *ptr, size_t len) {
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
+    robj *o = zmalloc_local(sizeof(robj)+sizeof(struct sdshdr8)+len+1);
     struct sdshdr8 *sh = (void*)(o+1);
 
     o->type = OBJ_STRING;

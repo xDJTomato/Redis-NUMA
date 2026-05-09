@@ -104,7 +104,6 @@ void numa_init(void)
     } else {
         numa_ctx.current_node = 0;
     }
-    tls_current_node = numa_ctx.current_node;
 
     /* 改为交错分配策略，实现跨节点负载均衡 */
     numa_ctx.allocation_strategy = NUMA_STRATEGY_INTERLEAVE;
@@ -280,7 +279,9 @@ static void *numa_alloc_with_size(size_t size)
 
     /* 由 numa_configurable_strategy 模块决定目标节点 */
     int target_node;
-    if (numa_ctx.num_nodes <= 1) {
+    if (tls_current_node >= 0) {
+        target_node = tls_current_node;
+    } else if (numa_ctx.num_nodes <= 1) {
         target_node = 0;
     } else {
         target_node = numa_config_get_best_node(size);
@@ -430,6 +431,14 @@ int numa_get_current_node(void)
     return numa_ctx.current_node;
 }
 
+void numa_alloc_push_node(int node) {
+    tls_current_node = node;
+}
+
+void numa_alloc_pop_node(void) {
+    tls_current_node = -1;
+}
+
 /* 在指定NUMA节点上分配内存（用于Key迁移，绕过Pool/Slab直接分配） */
 static void *numa_alloc_on_specific_node(size_t size, int node)
 {
@@ -472,6 +481,79 @@ void *numa_zcalloc_onnode(size_t size, int node)
         return NULL;
     }
 
+    memset(ptr, 0, size);
+    return ptr;
+}
+
+/* ========== 强制本地节点 (Node 0 / DRAM) 分配 ========== */
+
+/* 内部函数：与 numa_alloc_with_size() 共享 Slab→Direct 路径，target_node 固定为 0 */
+static void *numa_alloc_dram(size_t size)
+{
+    ASSERT_NO_SIZE_OVERFLOW(size);
+
+    size_t total_size = size + PREFIX_SIZE;
+    size_t alloc_size;
+    int target_node = 0;
+
+    void *raw_ptr = NULL;
+    int used_slab = 0;
+
+    if (should_use_slab(size)) {
+        raw_ptr = numa_slab_alloc(size, target_node, &alloc_size);
+        if (raw_ptr) used_slab = 1;
+    }
+
+    if (!raw_ptr) {
+        raw_ptr = numa_alloc_onnode(total_size, target_node);
+        alloc_size = total_size;
+    }
+
+    if (!raw_ptr)
+        return NULL;
+
+    if (used_slab) {
+        atomicIncr(numa_alloc_slab_bytes, total_size);
+        atomicIncr(numa_alloc_slab_count, 1);
+    } else {
+        atomicIncr(numa_alloc_direct_bytes, total_size);
+        atomicIncr(numa_alloc_direct_count, 1);
+    }
+
+    int from_slab = (should_use_slab(size) && used_slab) ? 1 : 0;
+
+    numa_init_prefix(raw_ptr, size, from_slab, target_node);
+    update_zmalloc_stat_alloc(total_size);
+    return numa_to_user_ptr(raw_ptr);
+}
+
+void *zmalloc_local(size_t size)
+{
+    void *ptr = numa_alloc_dram(size);
+    if (!ptr && size > 0)
+        zmalloc_oom_handler(size);
+    return ptr;
+}
+
+void *zcalloc_local(size_t size)
+{
+    ASSERT_NO_SIZE_OVERFLOW(size);
+    void *ptr = numa_alloc_dram(size);
+    if (!ptr) {
+        if (size > 0)
+            zmalloc_oom_handler(size);
+        return NULL;
+    }
+    memset(ptr, 0, size);
+    return ptr;
+}
+
+void *ztrycalloc_local(size_t size)
+{
+    ASSERT_NO_SIZE_OVERFLOW(size);
+    void *ptr = numa_alloc_local(size);
+    if (!ptr)
+        return NULL;
     memset(ptr, 0, size);
     return ptr;
 }

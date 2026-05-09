@@ -12,6 +12,7 @@
 #include "zmalloc.h"
 #include "numa_pool.h"        /* numa_pool_num_nodes() */
 #include "numa_bw_monitor.h"
+#include "numa_configurable_strategy.h"
 #include "evict.h"        /* numaGetNodePressure() */
 #include "numa_key_migrate.h"  /* numa_migrate_single_key() */
 #include <string.h>
@@ -254,11 +255,12 @@ int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_co
 static int check_resource_status(composite_lru_data_t *data, int node_id) {
     /* 1. 内存过载检查 */
     double pressure = numaGetNodePressure(node_id);
+    double bw_usage = (double)numa_config_get_cached_bw(node_id) / 100.0;
     if (pressure >= data->config.overload_threshold) {
         if (data->config.debug_logging_enabled) {
             _serverLog(LL_NOTICE,
                 "[Composite LRU][debug] resource target=%d pressure=%.2f bw=%.2f combined=%.2f decision=OVERLOADED",
-                node_id, pressure, numa_bw_get_usage(node_id), pressure * 0.6 + numa_bw_get_usage(node_id) * 0.4);
+                node_id, pressure, bw_usage, pressure * 0.6 + bw_usage * 0.4);
         }
         _serverLog(LL_DEBUG,
             "[Composite LRU] Node %d resource check: OVERLOADED (pressure=%.2f >= %.2f)",
@@ -266,8 +268,7 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
         return RESOURCE_OVERLOADED;
     }
 
-    /* 2. 带宽饱和检查（实时采样数据） */
-    double bw_usage = numa_bw_get_usage(node_id);
+    /* 2. 带宽饱和检查（读取全局缓存，serverCron 每秒更新） */
     if (bw_usage >= data->config.bandwidth_threshold) {
         if (data->config.debug_logging_enabled) {
             _serverLog(LL_NOTICE,
@@ -310,8 +311,12 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
  *
  * 设计原则：只更新热度，不入队。
  * 若本次访问使热度恰好越过阈值，且内存在远程节点，则写入候选池（快速通道）。
+ *
+ * val:      robj 指针，用于 PREFIX 热度追踪（robj 生命周期稳定）
+ * data_ptr: 实际数据指针（如 RAW SDS 体），用于检测数据所在 NUMA 节点
+ *           为 NULL 时退化为从 val 的 PREFIX 读取节点信息
  */
-void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, uint16_t current_time) {
+void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, void *data_ptr, uint16_t current_time) {
     if (!strategy || !strategy->private_data || !key) return;
 
     /* 单节点快速短路：无 NUMA 远端访问可能，PREFIX 热度追踪无意义 */
@@ -323,7 +328,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
     if (val) {
         /* ---- PREFIX 路径（主路径）---- */
         uint8_t hotness = numa_get_hotness(val);
-        int mem_node   = numa_get_node_id(val);
+        int mem_node = data_ptr ? numa_get_node_id(data_ptr) : numa_get_node_id(val);
 
         /* 阶梯式惰性衰减：一次性结算上次访问以来的衰减债 */
         uint16_t last_access = numa_get_last_access(val);
@@ -351,6 +356,11 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
          * 优化：本地访问且热度已达 MAX 时，跳过 access_count 累加，
          * 仅更新 last_access 供衰减结算使用。 */
         uint8_t is_local = (mem_node == current_node);
+        if (is_local) {
+            data->accesses_local++;
+        } else {
+            data->accesses_remote++;
+        }
         if (is_local && hotness >= COMPOSITE_LRU_HOTNESS_MAX) {
             uint8_t ac = numa_get_access_count(val);
             if (ac < UINT8_MAX) {
@@ -382,6 +392,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
             data->hot_candidates[idx].key             = sdsdup((sds)key);
             data->hot_candidates[idx].val             = val;
+            data->hot_candidates[idx].data_ptr        = data_ptr;
             data->hot_candidates[idx].target_node     = current_node;
             data->hot_candidates[idx].hotness_snapshot = hotness;
             data->candidates_head++;
@@ -651,7 +662,8 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                 "[NUMA Strategy Slot 1] Composite LRU executed "
                 "(count: %llu, candidates: %u, heat_updates: %llu, "
                 "migrations: %llu, bw_blocked: %llu, overloaded: %llu, "
-                "candidates_written: %llu, scan_checked: %llu, heat_map_size: %lu)",
+                "candidates_written: %llu, scan_checked: %llu, heat_map_size: %lu, "
+                "local: %llu, remote: %llu)",
                 (unsigned long long)exec_count,
                 data->candidates_count,
                 (unsigned long long)data->heat_updates,
@@ -660,7 +672,9 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                 (unsigned long long)data->migrations_overloaded,
                 (unsigned long long)data->candidates_written,
                 (unsigned long long)data->scan_keys_checked,
-                (unsigned long)dictSize(data->key_heat_map));
+                (unsigned long)dictSize(data->key_heat_map),
+                (unsigned long long)data->accesses_local,
+                (unsigned long long)data->accesses_remote);
             last_log_time = now;
         }
     }
@@ -684,7 +698,8 @@ int composite_lru_execute(numa_strategy_t *strategy) {
         int mem_node;
         if (cand->val) {
             cur_hotness = numa_get_hotness(cand->val);
-            mem_node    = numa_get_node_id(cand->val);
+            void *node_src = cand->data_ptr ? cand->data_ptr : cand->val;
+            mem_node    = numa_get_node_id(node_src);
         } else {
             /* 字典路径：从 heat_map 重读 */
             composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, cand->key);
@@ -699,7 +714,7 @@ int composite_lru_execute(numa_strategy_t *strategy) {
 
         /* 带宽感知：源节点繁忙时降低迁移门槛 */
         int effective_threshold = data->config.migrate_hotness_threshold;
-        double src_bw = numa_bw_get_usage(mem_node);  /* mem_node = key当前所在节点 */
+        double src_bw = (double)numa_config_get_cached_bw(mem_node) / 100.0;
         if (src_bw > 0.7 && effective_threshold > 1) {
             effective_threshold -= 1;
             _serverLog(LL_DEBUG,

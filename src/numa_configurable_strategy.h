@@ -46,6 +46,9 @@ typedef struct {
     redisAtomic int *allocation_counters;        /* 各节点分配计数器（原子，无锁更新） */
     redisAtomic size_t *bytes_allocated_per_node; /* 各节点已分配字节数（原子，无锁更新） */
     redisAtomic int *pressure_weights;           /* 压力权重数组（原子更新，分配路径无锁读取） */
+    redisAtomic int *bw_usage_percent;           /* 各节点带宽利用率 0-100（原子更新，迁移路径无锁读取） */
+    int cpu_node;                                /* Redis 主线程 CPU 所在 NUMA 节点 */
+    double *distance_factors;                    /* 各节点距离因子（启动时一次性计算）*/
 } numa_runtime_state_t;
 
 /* ========== 配置管理API ========== */
@@ -84,6 +87,12 @@ int numa_config_trigger_rebalance(void);
 
 /* 更新压力权重（serverCron 每秒调用） */
 void numa_config_update_pressure_weights(void);
+
+/* 获取缓存的带宽利用率（0-100），分配/迁移路径无锁读取 */
+int numa_config_get_cached_bw(int node);
+
+/* 获取缓存的压力权重，分配路径无锁读取 */
+int numa_config_get_cached_pressure_weight(int node);
 
 /* ========== 内存分配API ========== */
 

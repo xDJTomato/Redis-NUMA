@@ -33,6 +33,11 @@
 #include "latency.h"
 
 #ifdef HAVE_NUMA
+redisAtomic unsigned long long dboverwrite_realloc_count = 0;
+redisAtomic unsigned long long dboverwrite_check_count = 0;
+#endif
+
+#ifdef HAVE_NUMA
 #include "numa_strategy_slots.h"
 #include "numa_composite_lru.h"
 #endif
@@ -82,14 +87,41 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
         }
 
         /* NUMA Composite LRU 热度追踪：记录每次键访问。
-         * 优化：直接使用 server.lruclock 缓存，避免 gettimeofday() 系统调用；
-         * db 绑定为快速赋值，不作比较/日志。 */
+         * data_ptr: 实际数据体的分配基址（zmalloc 返回值），用于读取 PREFIX 中的 NUMA 节点。
+         *
+         * 关键：dict/robj 元数据被 zmalloc_local 强制分配到 DRAM (Node 0)，
+         * 因此 val->ptr (dict *) 的 PREFIX 永远报告 Node 0，不能代表真实数据位置。
+         * 对 OBJ_ENCODING_HT 编码的 hash/set，需要探测一个 dictEntry 的 SDS 值
+         * 来获取实际字段数据所在的 NUMA 节点。 */
 #ifdef HAVE_NUMA
         {
             numa_strategy_t *clru = numa_strategy_slot_get(1);
             if (clru && clru->enabled && clru->private_data) {
                 ((composite_lru_data_t *)clru->private_data)->db = db;
-                composite_lru_record_access(clru, key->ptr, val,
+                void *data_ptr = NULL;
+                if (val->encoding == OBJ_ENCODING_RAW && val->ptr) {
+                    data_ptr = sdsAllocPtr(val->ptr);
+                } else if (val->encoding == OBJ_ENCODING_HT && val->ptr) {
+                    dict *d = val->ptr;
+                    dictEntry *sample = NULL;
+                    for (int t = 0; t <= 1 && !sample; t++) {
+                        if (!d->ht[t].table || d->ht[t].used == 0) continue;
+                        for (unsigned long i = 0; i < d->ht[t].size && i < 8; i++) {
+                            if (d->ht[t].table[i]) { sample = d->ht[t].table[i]; break; }
+                        }
+                    }
+                    if (sample) {
+                        sds probe = (val->type == OBJ_HASH)
+                            ? (sds)dictGetVal(sample)
+                            : (sds)dictGetKey(sample);
+                        if (probe) data_ptr = sdsAllocPtr(probe);
+                    }
+                } else if (val->encoding != OBJ_ENCODING_INT &&
+                           val->encoding != OBJ_ENCODING_EMBSTR &&
+                           val->ptr) {
+                    data_ptr = val->ptr;
+                }
+                composite_lru_record_access(clru, key->ptr, val, data_ptr,
                                             (uint16_t)(server.lruclock & 0xFFFF));
             }
         }
@@ -248,6 +280,30 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
     serverAssertWithInfo(NULL,key,de != NULL);
     dictEntry auxentry = *de;
     robj *old = dictGetVal(de);
+#ifdef HAVE_NUMA
+    if (old->type == OBJ_STRING && val->type == OBJ_STRING &&
+        old->encoding == OBJ_ENCODING_RAW && val->encoding == OBJ_ENCODING_RAW &&
+        old->ptr && val->ptr) {
+        int old_node = numa_get_node_id(sdsAllocPtr(old->ptr));
+        int new_node = numa_get_node_id(sdsAllocPtr(val->ptr));
+        atomicIncr(dboverwrite_check_count, 1);
+        if (old_node == 0 && new_node != 0) {
+            sds cur = val->ptr;
+            size_t total = sdsAllocSize(cur);
+            void *cur_base = sdsAllocPtr(cur);
+            ptrdiff_t offset = (char *)cur - (char *)cur_base;
+            numa_alloc_push_node(0);
+            void *dst = zmalloc(total);
+            numa_alloc_pop_node();
+            if (dst) {
+                memcpy(dst, cur_base, total);
+                val->ptr = (char *)dst + offset;
+                zfree(cur_base);
+                atomicIncr(dboverwrite_realloc_count, 1);
+            }
+        }
+    }
+#endif
     if (server.maxmemory_policy & MAXMEMORY_FLAG_LFU) {
         val->lru = old->lru;
     }

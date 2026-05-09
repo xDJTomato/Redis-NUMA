@@ -73,7 +73,7 @@ if [[ $# -ge 1 ]]; then
     RESULT_DIR="$1"
 else
     # 自动查找最新的 bw_bench_* 目录
-    RESULT_DIR=$(ls -td "$RESULTS_BASE"/bw_bench_* 2>/dev/null | head -1)
+    RESULT_DIR=$(find "$RESULTS_BASE" -maxdepth 1 -type d -name 'bw_bench_*' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
     if [[ -z "$RESULT_DIR" ]]; then
         log_err "未找到测试结果目录"
         log "用法: $0 [结果目录路径]"
@@ -110,31 +110,52 @@ if ! command -v python3 &>/dev/null; then
     exit 1
 fi
 
-# 自动初始化 venv 并安装依赖
-PYTHON="$VENV_DIR/bin/python"
-if [[ ! -x "$PYTHON" ]]; then
-    log "首次运行，创建 Python 虚拟环境..."
-    python3 -m venv "$VENV_DIR" || {
-        log_err "创建 venv 失败，请确认已安装 python3-venv"
-        log "  sudo apt install python3-venv"
-        exit 1
-    }
-    log "安装可视化依赖 (matplotlib, pandas)..."
-    "$VENV_DIR/bin/pip" install --quiet matplotlib pandas || {
-        log_err "依赖安装失败"
-        exit 1
-    }
-    log_ok "虚拟环境就绪: $VENV_DIR"
+# 选择 Python 解释器：优先系统 python3（已有 matplotlib 即可），否则走 venv
+PYTHON=""
+if python3 -c "import matplotlib" 2>/dev/null; then
+    PYTHON="python3"
+    log "使用系统 Python (matplotlib 已可用)"
 else
-    # venv 已存在，检查依赖是否完整
-    if ! "$PYTHON" -c "import matplotlib, pandas" 2>/dev/null; then
-        log "补装缺失依赖..."
-        "$VENV_DIR/bin/pip" install --quiet matplotlib pandas
+    # 系统缺 matplotlib，尝试 venv
+    VENV_PYTHON="$VENV_DIR/bin/python"
+    if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c "import matplotlib" 2>/dev/null; then
+        PYTHON="$VENV_PYTHON"
+        log "使用已有 venv: $VENV_DIR"
+    else
+        # venv 不存在或已损坏，重建
+        if [[ -d "$VENV_DIR" ]]; then
+            log "检测到损坏的 venv，尝试删除重建..."
+            rm -rf "$VENV_DIR" 2>/dev/null || {
+                log_err "无法删除损坏的 venv (权限不足)"
+                log "请手动执行: sudo rm -rf $VENV_DIR"
+                exit 1
+            }
+        fi
+        log "创建 Python 虚拟环境..."
+        python3 -m venv "$VENV_DIR" || {
+            log_err "创建 venv 失败，请确认已安装 python3-venv"
+            log "  sudo apt install python3-venv"
+            exit 1
+        }
+        log "安装可视化依赖 (matplotlib)..."
+        "$VENV_DIR/bin/pip" install --quiet matplotlib || {
+            log_err "依赖安装失败"
+            exit 1
+        }
+        log_ok "虚拟环境就绪: $VENV_DIR"
+        PYTHON="$VENV_PYTHON"
     fi
 fi
 
-# 输出路径（与 run_bw_benchmark.sh 一致）
+# 输出路径：优先写入结果目录，不可写时回退到 results/ 根目录
 OUTPUT_PNG="$RESULT_DIR/benchmark_report.png"
+if ! touch "$OUTPUT_PNG" 2>/dev/null; then
+    BASENAME="$(basename "$RESULT_DIR")"
+    OUTPUT_PNG="$RESULTS_BASE/${BASENAME}_report.png"
+    log "${YELLOW}结果目录不可写（root 所有），输出回退至:${NC}"
+    log "  $OUTPUT_PNG"
+fi
+rm -f "$OUTPUT_PNG" 2>/dev/null
 
 # 生成报告
 log "生成可视化报告..."

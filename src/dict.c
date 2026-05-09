@@ -107,7 +107,7 @@ static void _dictReset(dictht *ht)
 dict *dictCreate(dictType *type,
         void *privDataPtr)
 {
-    dict *d = zmalloc(sizeof(*d));
+    dict *d = zmalloc_local(sizeof(*d));
 
     _dictInit(d,type,privDataPtr);
     return d;
@@ -165,12 +165,12 @@ int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
     n.size = realsize;
     n.sizemask = realsize-1;
     if (malloc_failed) {
-        n.table = ztrycalloc(realsize*sizeof(dictEntry*));
+        n.table = ztrycalloc_local(realsize*sizeof(dictEntry*));
         *malloc_failed = n.table == NULL;
         if (*malloc_failed)
             return DICT_ERR;
     } else
-        n.table = zcalloc(realsize*sizeof(dictEntry*));
+        n.table = zcalloc_local(realsize*sizeof(dictEntry*));
 
     n.used = 0;
 
@@ -342,7 +342,7 @@ dictEntry *dictAddRaw(dict *d, void *key, dictEntry **existing)
      * system it is more likely that recently added entries are accessed
      * more frequently. */
     ht = dictIsRehashing(d) ? &d->ht[1] : &d->ht[0];
-    entry = zmalloc(sizeof(*entry));
+    entry = zmalloc_local(sizeof(*entry));
     entry->next = ht->table[index];
     ht->table[index] = entry;
     ht->used++;
@@ -576,7 +576,7 @@ unsigned long long dictFingerprint(dict *d) {
 
 dictIterator *dictGetIterator(dict *d)
 {
-    dictIterator *iter = zmalloc(sizeof(*iter));
+    dictIterator *iter = zmalloc_local(sizeof(*iter));
 
     iter->d = d;
     iter->table = 0;

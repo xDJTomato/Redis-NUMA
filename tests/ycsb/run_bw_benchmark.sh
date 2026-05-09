@@ -261,9 +261,9 @@ start_redis() {
     pkill -f "redis-server.*:${REDIS_PORT}" 2>/dev/null || true
     sleep 1
 
-    # 强制绑定到 Node 0，避免跨 NUMA 访问
-    local -a numa_cmd=(numactl --cpunodebind=0 --membind=0)
-    log "强制绑定 Redis 到 NUMA Node 0"
+    # 仅绑定 CPU 到 Node 0，内存分配由 NUMA 策略层控制（weighted_interleave）
+    local -a numa_cmd=(numactl --cpunodebind=0)
+    log "绑定 Redis CPU 到 NUMA Node 0（内存策略由应用层控制）"
 
     log "启动 Redis (port=$REDIS_PORT, maxmemory=$MAX_MEMORY)..."
     "${numa_cmd[@]}" "$REDIS_SERVER" \
@@ -296,30 +296,32 @@ start_redis() {
 # ── 后台采集器 ──────────────────────────────────────────────────────────────
 start_collector() {
     local csv_file="$1"
-    
+
     # 写入 CSV header
-    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys" > "$csv_file"
-    
+    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys,accesses_local,accesses_remote" > "$csv_file"
+
     local prev_ops=0
     local prev_migrate=0
     local prev_n0_pages=0
     local prev_n1_pages=0
-    
+    local prev_acc_local=0
+    local prev_acc_remote=0
+
     while [[ -f "$COLLECTOR_FLAG" ]]; do
         local ts=$(date +%s)
         local phase=$(cat "$PHASE_FLAG" 2>/dev/null || echo "unknown")
-        
+
         # 采集 Redis INFO stats
         local stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" INFO stats 2>/dev/null || echo "")
         local ops_total=$(echo "$stats" | grep "total_commands_processed:" | cut -d: -f2 | tr -d '\r')
         local evicted=$(echo "$stats" | grep "evicted_keys:" | cut -d: -f2 | tr -d '\r')
-        
+
         # 采集 Redis INFO memory
         local meminfo=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" INFO memory 2>/dev/null || echo "")
         local used_mem=$(echo "$meminfo" | grep "used_memory:" | head -1 | cut -d: -f2 | tr -d '\r')
         local rss_mem=$(echo "$meminfo" | grep "used_memory_rss:" | head -1 | cut -d: -f2 | tr -d '\r')
         local frag=$(echo "$meminfo" | grep "mem_fragmentation_ratio:" | cut -d: -f2 | tr -d '\r')
-        
+
         # 转换为 MB
         local used_mb rss_mb
         if command -v bc &>/dev/null; then
@@ -329,19 +331,19 @@ start_collector() {
             used_mb=$((${used_mem:-0} / 1048576))
             rss_mb=$((${rss_mem:-0} / 1048576))
         fi
-        
-        # 采集迁移统计（从 NUMA MIGRATE STATS 获取）
-        local migrate_total=0
+
+        # 采集迁移统计 + 访问分布（从 NUMA MIGRATE STATS 获取）
+        local migrate_total=0 acc_local=0 acc_remote=0
         local migrate_stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" --raw NUMA MIGRATE STATS 2>/dev/null || echo "")
         if [[ -n "$migrate_stats" ]]; then
-            migrate_total=$(awk '
-                BEGIN { found = 0 }
-                /^successful_migrations$/ { found = 1; next }
-                found { print; exit }
-            ' <<< "$migrate_stats")
+            migrate_total=$(awk '/^successful_migrations$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+            acc_local=$(awk '/^accesses_local$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+            acc_remote=$(awk '/^accesses_remote$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
         fi
         [[ -z "$migrate_total" ]] && migrate_total=0
-        
+        [[ -z "$acc_local" ]] && acc_local=0
+        [[ -z "$acc_remote" ]] && acc_remote=0
+
         # 采集 NUMA 页面访问统计
         local n0_pages=0 n1_pages=0
         if [[ -f "/sys/devices/system/node/node0/numastat" ]]; then
@@ -350,27 +352,33 @@ start_collector() {
         if [[ -f "/sys/devices/system/node/node1/numastat" ]]; then
             n1_pages=$(awk '/^numa_hit/ {print $2}' /sys/devices/system/node/node1/numastat 2>/dev/null || echo "0")
         fi
-        
+
         # 计算每秒增量
         local ops_sec=$(( ${ops_total:-0} - ${prev_ops:-0} ))
         local migrate_sec=$(( ${migrate_total:-0} - ${prev_migrate:-0} ))
         local n0_delta=$(( ${n0_pages:-0} - ${prev_n0_pages:-0} ))
         local n1_delta=$(( ${n1_pages:-0} - ${prev_n1_pages:-0} ))
-        
+        local acc_local_sec=$(( ${acc_local:-0} - ${prev_acc_local:-0} ))
+        local acc_remote_sec=$(( ${acc_remote:-0} - ${prev_acc_remote:-0} ))
+
         # 负数保护
         [[ "${ops_sec:-0}" -lt 0 ]] 2>/dev/null && ops_sec=0
         [[ "${migrate_sec:-0}" -lt 0 ]] 2>/dev/null && migrate_sec=0
         [[ "${n0_delta:-0}" -lt 0 ]] 2>/dev/null && n0_delta=0
         [[ "${n1_delta:-0}" -lt 0 ]] 2>/dev/null && n1_delta=0
-        
+        [[ "${acc_local_sec:-0}" -lt 0 ]] 2>/dev/null && acc_local_sec=0
+        [[ "${acc_remote_sec:-0}" -lt 0 ]] 2>/dev/null && acc_remote_sec=0
+
         # 写入 CSV
-        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0}" >> "$csv_file"
-        
+        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0},${acc_local_sec},${acc_remote_sec}" >> "$csv_file"
+
         # 更新前值
         prev_ops=${ops_total:-0}
         prev_migrate=${migrate_total:-0}
         prev_n0_pages=${n0_pages:-0}
         prev_n1_pages=${n1_pages:-0}
+        prev_acc_local=${acc_local:-0}
+        prev_acc_remote=${acc_remote:-0}
         
         sleep 1
     done

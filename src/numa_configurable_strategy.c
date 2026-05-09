@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <sched.h>
+#include <math.h>
 #include <numa.h>
 
 /* 全局运行时状态 */
@@ -61,7 +63,13 @@ static int init_runtime_state(int num_nodes) {
     if (g_runtime_state.pressure_weights) {
         zfree(g_runtime_state.pressure_weights);
     }
-    
+    if (g_runtime_state.bw_usage_percent) {
+        zfree(g_runtime_state.bw_usage_percent);
+    }
+    if (g_runtime_state.distance_factors) {
+        zfree(g_runtime_state.distance_factors);
+    }
+
     memset(&g_runtime_state, 0, sizeof(g_runtime_state));
     
     g_runtime_state.config.num_nodes = num_nodes;
@@ -76,11 +84,13 @@ static int init_runtime_state(int num_nodes) {
     g_runtime_state.allocation_counters = zcalloc(num_nodes * sizeof(redisAtomic int));
     g_runtime_state.bytes_allocated_per_node = zcalloc(num_nodes * sizeof(redisAtomic size_t));
     g_runtime_state.pressure_weights = zcalloc(num_nodes * sizeof(redisAtomic int));
+    g_runtime_state.bw_usage_percent = zcalloc(num_nodes * sizeof(redisAtomic int));
 
     if (!g_runtime_state.config.node_weights ||
         !g_runtime_state.allocation_counters ||
         !g_runtime_state.bytes_allocated_per_node ||
-        !g_runtime_state.pressure_weights) {
+        !g_runtime_state.pressure_weights ||
+        !g_runtime_state.bw_usage_percent) {
         return C_ERR;
     }
     
@@ -89,7 +99,32 @@ static int init_runtime_state(int num_nodes) {
         g_runtime_state.config.node_weights[i] = 100; /* 默认静态权重100 */
         atomicSet(g_runtime_state.pressure_weights[i], 100); /* 默认压力权重100 */
     }
-    
+
+    /* 计算 NUMA 距离因子：sqrt(min_dist / dist) 阻尼
+     * Node 0 (dist=10): 1.0,  Node 1 CXL (dist=50): ~0.45
+     * 零压力下 DRAM 占 ~69%，CXL ~31%，给迁移系统留空间 */
+    int cpu_node = numa_node_of_cpu(sched_getcpu());
+    if (cpu_node < 0) cpu_node = 0;
+    g_runtime_state.cpu_node = cpu_node;
+
+    g_runtime_state.distance_factors = zcalloc(num_nodes * sizeof(double));
+    if (g_runtime_state.distance_factors) {
+        int min_dist = numa_distance(cpu_node, cpu_node);
+        if (min_dist <= 0) min_dist = 10;
+        for (int i = 0; i < num_nodes; i++) {
+            int d = numa_distance(cpu_node, i);
+            if (d <= 0) d = min_dist;
+            g_runtime_state.distance_factors[i] = sqrt((double)min_dist / d);
+            if (g_runtime_state.distance_factors[i] < 0.01)
+                g_runtime_state.distance_factors[i] = 0.01;
+        }
+        serverLog(LL_NOTICE,
+            "[NUMA Config] Distance factors (cpu_node=%d): node0=%.2f, node1=%.2f",
+            cpu_node,
+            num_nodes > 0 ? g_runtime_state.distance_factors[0] : 0,
+            num_nodes > 1 ? g_runtime_state.distance_factors[1] : 0);
+    }
+
     return C_OK;
 }
 
@@ -260,6 +295,12 @@ void numa_config_strategy_cleanup(void) {
     }
     if (g_runtime_state.pressure_weights) {
         zfree(g_runtime_state.pressure_weights);
+    }
+    if (g_runtime_state.bw_usage_percent) {
+        zfree(g_runtime_state.bw_usage_percent);
+    }
+    if (g_runtime_state.distance_factors) {
+        zfree(g_runtime_state.distance_factors);
     }
 
     memset(&g_runtime_state, 0, sizeof(g_runtime_state));
@@ -667,8 +708,37 @@ void numa_config_update_pressure_weights(void) {
     int n = g_runtime_state.config.num_nodes;
     for (int i = 0; i < n; i++) {
         double p = numaGetNodePressure(i);
-        int w = (int)((1.0 - p) * 100);
+        double bw = numa_bw_get_usage(i);
+        if (bw < 0) bw = 0;
+
+        double df = g_runtime_state.distance_factors
+                  ? g_runtime_state.distance_factors[i] : 1.0;
+        int w = (int)((1.0 - p) * (1.0 - bw) * df * 100);
         if (w < 1) w = 1;
         atomicSet(g_runtime_state.pressure_weights[i], w);
+
+        if (g_runtime_state.bw_usage_percent) {
+            int bw_pct = (int)(bw * 100);
+            if (bw_pct > 100) bw_pct = 100;
+            atomicSet(g_runtime_state.bw_usage_percent[i], bw_pct);
+        }
     }
+}
+
+int numa_config_get_cached_bw(int node) {
+    if (!g_initialized || !g_runtime_state.bw_usage_percent ||
+        node < 0 || node >= g_runtime_state.config.num_nodes)
+        return 0;
+    int val;
+    atomicGet(g_runtime_state.bw_usage_percent[node], val);
+    return val;
+}
+
+int numa_config_get_cached_pressure_weight(int node) {
+    if (!g_initialized || !g_runtime_state.pressure_weights ||
+        node < 0 || node >= g_runtime_state.config.num_nodes)
+        return 100;
+    int val;
+    atomicGet(g_runtime_state.pressure_weights[node], val);
+    return val;
 }

@@ -66,7 +66,8 @@ typedef struct {
 /* 热点候选池条目（环形缓冲区元素）*/
 typedef struct {
     sds      key;                       /* Key 名称（SDS） */
-    void    *val;                       /* Value 指针（用于重读 PREFIX 热度）*/
+    void    *val;                       /* robj 指针（用于重读 PREFIX 热度）*/
+    void    *data_ptr;                  /* 数据指针（用于检测 NUMA 物理节点位置）*/
     int      target_node;               /* 写入时的目标节点（CPU 所在节点）*/
     uint8_t  hotness_snapshot;          /* 写入时热度快照（仅用于优先级排序，执行前重读）*/
 } hot_candidate_t;
@@ -101,6 +102,8 @@ typedef struct {
     uint64_t scan_keys_checked;         /* 渐进扫描累计检查 key 数 */
     uint64_t migrations_bw_blocked;     /* 因带宽饱和被阻止的迁移次数 */
     uint64_t migrations_overloaded;     /* 因节点内存过载被阻止的迁移次数 */
+    uint64_t accesses_local;            /* 数据在本地节点（DRAM）的访问次数 */
+    uint64_t accesses_remote;           /* 数据在远程节点（CXL）的访问次数 */
 } composite_lru_data_t;
 
 /* ========== 公共接口 ========== */
@@ -118,7 +121,7 @@ int  composite_lru_execute(numa_strategy_t *strategy);
 void composite_lru_cleanup(numa_strategy_t *strategy);
 
 /* 热度管理 */
-void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, uint16_t lru_clock);
+void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, void *data_ptr, uint16_t lru_clock);
 void composite_lru_decay_heat(composite_lru_data_t *data);
 
 /* JSON 配置加载与应用 */

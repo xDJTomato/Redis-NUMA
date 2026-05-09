@@ -119,7 +119,17 @@ static void numa_cmd_migrate(client *c) {
     if (!strcasecmp(sub, "STATS")) {
         numa_key_migrate_stats_t stats;
         numa_get_migration_statistics(&stats);
-        addReplyArrayLen(c, 12);
+
+        /* Composite LRU 访问分布统计 */
+        uint64_t acc_local = 0, acc_remote = 0;
+        numa_strategy_t *clru = numa_strategy_slot_get(1);
+        if (clru && clru->private_data) {
+            composite_lru_data_t *d = clru->private_data;
+            acc_local  = d->accesses_local;
+            acc_remote = d->accesses_remote;
+        }
+
+        addReplyArrayLen(c, 20);
         addReplyBulkCString(c, "total_migrations");
         addReplyLongLong(c, stats.total_migrations);
         addReplyBulkCString(c, "successful_migrations");
@@ -132,6 +142,21 @@ static void numa_cmd_migrate(client *c) {
         addReplyLongLong(c, stats.total_migration_time_us);
         addReplyBulkCString(c, "peak_concurrent_migrations");
         addReplyLongLong(c, stats.peak_concurrent_migrations);
+        addReplyBulkCString(c, "accesses_local");
+        addReplyLongLong(c, acc_local);
+        addReplyBulkCString(c, "accesses_remote");
+        addReplyLongLong(c, acc_remote);
+        {
+            extern redisAtomic unsigned long long dboverwrite_realloc_count;
+            extern redisAtomic unsigned long long dboverwrite_check_count;
+            unsigned long long rc, cc;
+            atomicGet(dboverwrite_realloc_count, rc);
+            atomicGet(dboverwrite_check_count, cc);
+            addReplyBulkCString(c, "dboverwrite_checks");
+            addReplyLongLong(c, cc);
+            addReplyBulkCString(c, "dboverwrite_reallocs");
+            addReplyLongLong(c, rc);
+        }
         return;
     }
 
@@ -168,11 +193,35 @@ static void numa_cmd_migrate(client *c) {
         }
         addReplyBulkCString(c, type_name);
         addReplyBulkCString(c, "current_node");
-        addReplyLongLong(c, meta ? meta->current_node : -1);
+        {
+            int node = -1;
+            if (val->encoding == OBJ_ENCODING_RAW && val->ptr)
+                node = numa_get_node_id(sdsAllocPtr(val->ptr));
+            else if (val->encoding != OBJ_ENCODING_INT &&
+                     val->encoding != OBJ_ENCODING_EMBSTR && val->ptr)
+                node = numa_get_node_id(val->ptr);
+            addReplyLongLong(c, node);
+        }
         addReplyBulkCString(c, "hotness_level");
-        addReplyLongLong(c, meta ? meta->hotness_level : 0);
+        {
+            uint8_t h = 0;
+            if (val->encoding == OBJ_ENCODING_RAW && val->ptr)
+                h = numa_get_hotness(sdsAllocPtr(val->ptr));
+            else if (val->encoding != OBJ_ENCODING_INT &&
+                     val->encoding != OBJ_ENCODING_EMBSTR && val->ptr)
+                h = numa_get_hotness(val->ptr);
+            addReplyLongLong(c, h);
+        }
         addReplyBulkCString(c, "access_count");
-        addReplyLongLong(c, meta ? meta->access_count : 0);
+        {
+            uint8_t ac = 0;
+            if (val->encoding == OBJ_ENCODING_RAW && val->ptr)
+                ac = numa_get_access_count(sdsAllocPtr(val->ptr));
+            else if (val->encoding != OBJ_ENCODING_INT &&
+                     val->encoding != OBJ_ENCODING_EMBSTR && val->ptr)
+                ac = numa_get_access_count(val->ptr);
+            addReplyLongLong(c, ac);
+        }
         addReplyBulkCString(c, "numa_nodes_available");
         addReplyLongLong(c, numa_max_node() + 1);
         addReplyBulkCString(c, "current_cpu_node");

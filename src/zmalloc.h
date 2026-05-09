@@ -132,6 +132,15 @@ void numa_zfree(void *ptr);
 void *numa_zmalloc_onnode(size_t size, int node);
 void *numa_zcalloc_onnode(size_t size, int node);
 
+/* Force-local (Node 0 / DRAM) allocation — for metadata structures */
+void *zmalloc_local(size_t size);
+void *zcalloc_local(size_t size);
+void *ztrycalloc_local(size_t size);
+
+/* TLS node override: pin all zmalloc/sdsnewlen to a specific node (migration use) */
+void numa_alloc_push_node(int node);
+void numa_alloc_pop_node(void);
+
 /* NUMA heat tracking API - stored in PREFIX */
 #define NUMA_HOTNESS_MAX     7
 #define NUMA_HOTNESS_MIN     0
@@ -147,6 +156,13 @@ void numa_set_last_access(void *ptr, uint16_t lru_clock);
 int numa_get_node_id(void *ptr);
 void numa_set_node_id(void *ptr, int node_id);
 
+#else /* !HAVE_NUMA */
+/* Non-NUMA fallback: local = default allocator */
+#define zmalloc_local(size) zmalloc(size)
+#define zcalloc_local(size) zcalloc(size)
+#define ztrycalloc_local(size) ztrycalloc(size)
+#define numa_alloc_push_node(node) ((void)(node))
+#define numa_alloc_pop_node()      ((void)0)
 #endif /* HAVE_NUMA */
 void *zrealloc(void *ptr, size_t size);
 void *ztrymalloc(size_t size);
