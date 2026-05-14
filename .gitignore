@@ -50,3 +50,16 @@ tests/ycsb/results/
 
 # Reference projects
 TieredMemDB/
+
+# Remote server scripts (contain credentials, never commit)
+run_remote_bench.sh
+run_remote_bench_vanilla.sh
+tests/ycsb/run_remote_bench.sh
+tests/ycsb/run_remote_bench_vanilla.sh
+tests/ycsb/run_full_test.sh
+tests/ycsb/fetch_results.sh
+tests/ycsb/scripts/perf_3way_profile.sh
+tests/ycsb/scripts/numa_locality_measure.sh
+
+# Build artifacts
+build/

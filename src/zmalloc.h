@@ -141,6 +141,9 @@ void *ztrycalloc_local(size_t size);
 void numa_alloc_push_node(int node);
 void numa_alloc_pop_node(void);
 
+/* Thread-local cache flush (call before thread exit) */
+void numa_tcache_flush(void);
+
 /* NUMA heat tracking API - stored in PREFIX */
 #define NUMA_HOTNESS_MAX     7
 #define NUMA_HOTNESS_MIN     0
@@ -155,6 +158,10 @@ uint16_t numa_get_last_access(void *ptr);
 void numa_set_last_access(void *ptr, uint16_t lru_clock);
 int numa_get_node_id(void *ptr);
 void numa_set_node_id(void *ptr, int node_id);
+
+/* Per-node memory usage (for pressure calculation) */
+#define ZMALLOC_MAX_NUMA_NODES 16
+size_t zmalloc_used_memory_node(int node_id);
 
 #else /* !HAVE_NUMA */
 /* Non-NUMA fallback: local = default allocator */

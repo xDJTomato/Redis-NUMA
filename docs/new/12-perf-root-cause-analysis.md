@@ -2,14 +2,25 @@
 
 ## 测试环境
 
+### 初始测试（QEMU 虚拟 NUMA）
+
 - **平台**: QEMU VM，6 核 i7-12700H，11GB RAM
 - **NUMA**: 双节点（distance=50），Node 0=DRAM 4GB，Node 1=CXL 8GB
 - **编译**: 两者均为 `MALLOC=libc`
 - **负载**: YCSB bw_saturate，80 万条 × 5KB 值，Phase 2 64 线程 80%READ/20%UPDATE
 
+### 当前测试（真实双路 NUMA 服务器）
+
+- **平台**: Dell 双路服务器，192.168.12.204
+- **NUMA**: 真实双路 NUMA 拓扑
+- **编译**: 两者均为 `MALLOC=libc`
+- **负载**: YCSB bw_saturate，100 万条，Phase 2 64 线程 Zipfian α=0.99
+
 ---
 
-## Phase 1 — 数据加载（纯 SET）
+## 初始结果（QEMU，优化前）
+
+### Phase 1 — 数据加载（纯 SET）
 
 | 指标 | CXL 版本 | Vanilla | 差距 |
 |------|---------|---------|------|
@@ -19,9 +30,7 @@
 | 总耗时 | 93.8 秒 | 50.3 秒 | vanilla 1.87x |
 | frag_ratio | 1.58–1.59 | 1.02 | CXL RSS 多 56% |
 
----
-
-## Phase 2 — 热点读写
+### Phase 2 — 热点读写
 
 | 指标 | CXL 版本 | Vanilla | 差距 |
 |------|---------|---------|------|
@@ -31,6 +40,33 @@
 | RSS | ~6.5 GB | ~4.2 GB | CXL 多 2.3GB |
 | frag_ratio | 1.66–1.72 | 1.02–1.30 | 持续膨胀 |
 | 迁移数/秒 | 200–400 | 0 | CXL 额外 CPU 开销 |
+
+---
+
+## 最新结果（真实 NUMA 服务器，全部优化后）
+
+### 基准对比（2026-05-15，tcache 优化后）
+
+| Phase | NUMA 版 | Vanilla | 差距 |
+|-------|---------|---------|------|
+| P1 Fill | 36,031 ops/s | 33,566 ops/s | **NUMA +7.3%** |
+| P2 Hotspot | 77,721 ops/s | 80,054 ops/s | vanilla +3.0% |
+| P3 Sustain | 76,377 ops/s | 86,014 ops/s | vanilla +12.6% |
+
+**关键改善**：
+- Phase 1（纯写入）NUMA 版已稳定反超 vanilla（+7.3%），得益于 local_first 策略的 NUMA 亲和分配
+- Phase 2（热点读写）差距从初始的 4-5x 缩小到仅 3.0%，tcache 消除了 Slab 分配器竞争
+- Phase 3（持续负载）差距 12.6%，主要来自 NUMA PREFIX 开销和热度追踪逻辑
+
+### NUMA 本地命中率
+
+| 配置 | node-loads | node-load-misses | 命中率 | L3→local DRAM |
+|------|-----------|------------------|--------|---------------|
+| local_first | 60.8M | 11.8M | 80.6% | 97.0% |
+| interleave | 47.2M | 35.0M | 26.0% | 78.7% |
+| vanilla | 57.3M | 16.8M | 70.8% | 95.9% |
+
+local_first 策略在 L3→Local DRAM 命中率上达到 97.0%，超过 vanilla 的 95.9%，验证了 NUMA 感知分配的有效性。interleave 策略因数据分散到两个节点，命中率显著低于其他配置。
 
 ---
 
@@ -97,6 +133,8 @@ QEMU 虚拟 NUMA 跨节点访问延迟远高于真实硬件（10-20）。Interle
 | **P0** | 分配器锁 | `numa_pool.c` | Pool 路径移除，Slab 原子 CAS 无锁 | ✅ 已修复 |
 | **P0** | 默认策略 | `server.c` | INTERLEAVE → WEIGHTED_INTERLEAVE | ✅ 已修复 |
 | **P1** | 路径合并 | `zmalloc.c` | Pool+Slab 合并为纯 Slab（≤4KB） | ✅ 已修复 |
+| **P0** | Slab 分配器竞争 | `zmalloc.c` | Thread-Local Cache (tcache)，per-thread bin 避免 CAS/mutex | ✅ 已修复 |
+| **P2** | Size class 线性查找 | `zmalloc.c` | O(1) 查找表 `g_class_lookup[]` | ✅ 已修复 |
 | **P2** | 迁移 CPU 开销 | `numa_composite_lru.c` | 带宽感知限速 + overload 阻断 | ✅ 已实现 |
 
 ---
@@ -104,5 +142,16 @@ QEMU 虚拟 NUMA 跨节点访问延迟远高于真实硬件（10-20）。Interle
 ## 验证方式
 
 1. `perf top -p $(pidof redis-server)` 查看热点函数分布
-2. `NUMA CONFIG STATS` 查看分配路径计数器
+2. `NUMA CONFIG STATS` 查看分配路径计数器及 tcache 命中率
 3. 分阶段修复：先修 P0 锁 → 测 Phase 1 → 再修 P1 → 测 RSS → 最后 P2
+4. `tests/ycsb/run_full_test.sh` 一键全量测试（含基准对比、perf 火焰图、NUMA 本地命中率）
+
+## NUMA 本地命中率可视化
+
+测试流水线通过 `numa_locality_measure.sh` + `visualize_locality.py` 生成两份报告：
+- **locality_report.png** — 汇总柱状图：Node Load 命中率、L3→Local DRAM 比例、内存分布、吞吐量
+- **locality_report_timeseries.png** — 逐秒时序图：吞吐量、命中率、内存用量、碎片率、Key 迁移
+
+数据来源：
+- PMU 计数器：`perf stat -I 1000 -e node-loads,node-load-misses,mem_load_l3_miss_retired.{local,remote}_dram`
+- Redis 指标：`INFO memory` (used_memory, RSS, frag_ratio) + `NUMA MIGRATE STATS` (migration counts)

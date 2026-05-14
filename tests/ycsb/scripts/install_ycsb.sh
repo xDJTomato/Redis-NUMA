@@ -30,7 +30,7 @@ check_dependencies() {
         missing_deps+=("java")
     fi
     
-    if ! command -v maven &> /dev/null; then
+    if ! command -v mvn &> /dev/null; then
         missing_deps+=("maven")
     fi
     

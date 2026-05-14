@@ -213,11 +213,114 @@ void composite_lru_record_access(strategy, key, val, lru_clock) {
 | `numa_get_last_access(ptr)` | 读取上次访问时间 | uint16_t |
 | `numa_set_last_access(ptr, t)` | 设置上次访问时间 | - |
 
+## Thread-Local Cache (tcache)
+
+### 问题
+
+YCSB 64 线程高并发下，每次 `zmalloc()`/`zfree()` 都需要与 Slab 分配器交互——位图 CAS、`current_slab` 原子加载、慢路径 `pthread_mutex`。这些共享状态操作成为瓶颈，导致 NUMA 版比 vanilla (libc malloc) 慢 25-29%。
+
+### 设计
+
+在 Slab 分配器上层增加 `__thread` 线程本地缓存，类似 jemalloc/tcmalloc 的 tcache 机制：
+
+```c
+#define TCACHE_BIN_MAX     64   // 每个 size class 最多缓存 64 个对象
+#define TCACHE_DRAIN_COUNT 32   // bin 满时归还一半到 slab
+
+typedef struct {
+    void *ptrs[TCACHE_BIN_MAX];   // 用户指针栈
+    uint16_t count;
+} tcache_bin_t;
+
+typedef struct {
+    tcache_bin_t bins[NUMA_POOL_SIZE_CLASSES]; // 24 个 bin
+} numa_tcache_t;
+
+static __thread numa_tcache_t tls_tcache;
+static __thread int tls_tcache_inited = 0;
+```
+
+### O(1) Size Class 查找表
+
+替代原来的 O(24) 线性扫描：
+
+```c
+#define CLASS_LOOKUP_ENTRIES 513   // 覆盖 0..4096，步长 8 字节
+static int g_class_lookup[CLASS_LOOKUP_ENTRIES];
+
+static inline int fast_size_class(size_t size) {
+    if (size > SLAB_MAX_OBJECT_SIZE) return -1;
+    return g_class_lookup[(size + 7) >> 3];
+}
+```
+
+在 `numa_init()` 中预计算一次。
+
+### 分配快路径
+
+```
+numa_alloc_with_size(size):
+  if size <= 4096 AND lookup table ready:
+    cls = fast_size_class(size)
+    if bins[cls].count > 0:
+      pop user_ptr from bin            ← O(1)，无锁，无 CAS
+      update prefix metadata
+      update_zmalloc_stat_alloc()
+      atomicIncr(used_memory_node[])
+      return user_ptr                  ← 完成，未触碰 slab
+  ... 原有 slab/direct 路径不变 ...
+```
+
+### 释放快路径
+
+```
+numa_free_with_size(user_ptr):
+  if prefix->from_pool AND lookup table ready:
+    cls = fast_size_class(prefix->size)
+    if bins[cls].count < TCACHE_BIN_MAX:
+      update_zmalloc_stat_free()
+      atomicDecr(used_memory_node[])
+      push user_ptr into bin           ← 完成，未触碰 slab
+      return
+    else:
+      drain TCACHE_DRAIN_COUNT items back to slab
+      then cache current item
+  ... 原有 slab/direct 释放路径不变 ...
+```
+
+### 计数器一致性
+
+| 事件 | `used_memory` | `used_memory_node` | `numa_alloc_slab_*` |
+|------|-------------|-------------------|---------------------|
+| 从 tcache 分配 | +total_size | +total_size | 不变 |
+| 释放到 tcache | -total_size | -total_size | 不变 |
+| drain 到 slab | 不变 | 不变 | 不变 |
+| 从 slab 分配（miss） | 原有路径 | 原有路径 | 原有路径 |
+| 释放到 slab（miss） | 原有路径 | 原有路径 | 原有路径 |
+
+tcache 中的对象从 Redis 视角已被释放（`used_memory` 已减），但物理上仍占用 slab 槽位。
+
+### 命中率监控
+
+```c
+static redisAtomic size_t numa_tcache_alloc_hit  = 0;
+static redisAtomic size_t numa_tcache_alloc_miss = 0;
+static redisAtomic size_t numa_tcache_free_hit   = 0;
+static redisAtomic size_t numa_tcache_free_miss  = 0;
+```
+
+可通过 `NUMA CONFIG STATS` 查看命中率。
+
+### 性能效果
+
+tcache 上线后 NUMA 版与 vanilla 的 Phase 2 差距从 ~11.5% 缩小到 ~5.9%。
+
 ## 线程安全
 
 - **PREFIX 读写**：Redis 单线程模型，无需额外同步
 - **热度更新**：由 `composite_lru_record_access()` 在主线程中串行执行
 - **统计计数器**：使用 `atomicIncr` 无锁更新
+- **tcache**：`__thread` TLS 变量，每线程独立，无共享状态竞争
 
 ## 与其他模块的关系
 

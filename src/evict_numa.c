@@ -81,53 +81,68 @@ double numaGetNodePressure(int node_id) {
     if (node_id < 0 || node_id > max_node) {
         return 1.0; /* 无效节点返回满压力 */
     }
-    
+
     /* 检查缓存 */
     long long now = server.mstime;
     if (g_pressure_cache_time[node_id] > 0 &&
         (now - g_pressure_cache_time[node_id]) < PRESSURE_CACHE_TTL_MS) {
         return g_node_pressure_cache[node_id];
     }
-    
-    /* 读取 sysfs */
-    char path[128];
-    snprintf(path, sizeof(path),
-             "/sys/devices/system/node/node%d/meminfo", node_id);
-    
-    FILE *fp = fopen(path, "r");
-    if (!fp) {
-        g_node_pressure_cache[node_id] = 1.0;
-        g_pressure_cache_time[node_id] = now;
-        return 1.0;
-    }
-    
-    unsigned long mem_total = 0, mem_free = 0;
-    char line[256];
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, "MemTotal")) {
-            /* 格式: Node X MemTotal: XXXX kB */
-            char *colon = strchr(line, ':');
-            if (colon) {
-                mem_total = strtoul(colon + 1, NULL, 10);
+
+    double pressure;
+
+    /*
+     * 当 maxmemory > 0 时，使用「按节点分摊配额」作为分母：
+     *   per_node_quota = server.maxmemory / num_nodes
+     *   pressure       = node_used_bytes / per_node_quota
+     *
+     * 这样 pressure 反映的是该节点相对于 Redis 分配给它的内存份额的
+     * 占用程度，而不是相对于整个物理节点内存（后者在 441GB 双路服务器
+     * 上始终只有 ~9.7%，永远触发不了迁移）。
+     */
+    if (server.maxmemory > 0) {
+        int num_nodes = max_node + 1;
+        size_t per_node_quota = server.maxmemory / (size_t)num_nodes;
+        size_t node_used = zmalloc_used_memory_node(node_id);
+
+        if (per_node_quota > 0) {
+            pressure = (double)node_used / (double)per_node_quota;
+            if (pressure > 1.0) pressure = 1.0;
+        } else {
+            pressure = 1.0;
+        }
+    } else {
+        /* maxmemory 未设置：回退到物理节点内存压力 */
+        char path[128];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/node/node%d/meminfo", node_id);
+
+        FILE *fp = fopen(path, "r");
+        if (!fp) {
+            pressure = 1.0;
+        } else {
+            unsigned long mem_total = 0, mem_free = 0;
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strstr(line, "MemTotal")) {
+                    char *colon = strchr(line, ':');
+                    if (colon) mem_total = strtoul(colon + 1, NULL, 10);
+                } else if (strstr(line, "MemFree")) {
+                    char *colon = strchr(line, ':');
+                    if (colon) mem_free = strtoul(colon + 1, NULL, 10);
+                }
             }
-        } else if (strstr(line, "MemFree")) {
-            char *colon = strchr(line, ':');
-            if (colon) {
-                mem_free = strtoul(colon + 1, NULL, 10);
-            }
+            fclose(fp);
+
+            pressure = (mem_total > 0) ?
+                       (1.0 - ((double)mem_free / (double)mem_total)) : 1.0;
         }
     }
-    fclose(fp);
-    
-    double pressure = 1.0;
-    if (mem_total > 0) {
-        pressure = 1.0 - ((double)mem_free / (double)mem_total);
-    }
-    
+
     /* 更新缓存 */
     g_node_pressure_cache[node_id] = pressure;
     g_pressure_cache_time[node_id] = now;
-    
+
     return pressure;
 }
 

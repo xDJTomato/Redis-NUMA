@@ -18,20 +18,36 @@
 
 set -euo pipefail
 
+# 调试：捕获任何非 0 退出，打印行号和命令
+_on_err() {
+    local exit_code=$?
+    local line_no=${BASH_LINENO[0]}
+    echo -e "\033[0;31m[ERR-TRAP]\033[0m 脚本在第 ${line_no} 行以退出码 ${exit_code} 失败" >&2
+    echo -e "\033[0;31m[ERR-TRAP]\033[0m 失败命令: ${BASH_COMMAND}" >&2
+}
+trap '_on_err' ERR
+
 # ============ 配置常量 ============
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-REDIS_SERVER="$PROJECT_ROOT/../redis-6.2.21/src/redis-server"
-REDIS_CLI="$PROJECT_ROOT/../redis-6.2.21/src/redis-cli"
+# 支持环境变量覆盖，方便远程部署到非标准路径
+VANILLA_ROOT="${VANILLA_REDIS_ROOT:-$PROJECT_ROOT/../redis-6.2.21}"
+REDIS_SERVER="$VANILLA_ROOT/src/redis-server"
+REDIS_CLI="$VANILLA_ROOT/src/redis-cli"
 YCSB_DIR="$SCRIPT_DIR/ycsb-0.17.0"
 YCSB_BIN="$YCSB_DIR/bin/ycsb.sh"
 WORKLOAD="$SCRIPT_DIR/workloads/workload_bw_saturate"
 VISUALIZE_SCRIPT="$SCRIPT_DIR/scripts/visualize_bw_benchmark.py"
 
-# 创建无空格的临时符号链接（YCSB 不支持路径中的空格）
+# 创建无空格的临时符号链接（ycsb Python wrapper 不支持路径中的空格）
 SAFE_LINK="/tmp/redis-vanilla-bench-$$"
 ln -sfn "$PROJECT_ROOT" "$SAFE_LINK"
-YCSB_BIN="$SAFE_LINK/tests/ycsb/ycsb-0.17.0/bin/ycsb.sh"
+# 优先 ycsb.sh（Java wrapper），回退到 ycsb（Python）
+if [[ -x "$SAFE_LINK/tests/ycsb/ycsb-0.17.0/bin/ycsb.sh" ]]; then
+    YCSB_BIN="$SAFE_LINK/tests/ycsb/ycsb-0.17.0/bin/ycsb.sh"
+else
+    YCSB_BIN="$SAFE_LINK/tests/ycsb/ycsb-0.17.0/bin/ycsb"
+fi
 WORKLOAD="$SAFE_LINK/tests/ycsb/workloads/workload_bw_saturate"
 
 # 默认参数 — 使用 6380 避免与 CXL 版本冲突
@@ -191,7 +207,7 @@ save_system_info() {
         uname -a
         echo ""
         echo "=== CPU 信息 ==="
-        grep "model name" /proc/cpuinfo | head -1 | cut -d: -f2 | xargs
+        awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo
         echo "核心数: $(nproc)"
         echo ""
         echo "=== 内存信息 ==="
@@ -251,7 +267,9 @@ start_redis() {
 
     local retries=30
     while [[ $retries -gt 0 ]]; do
-        if "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" PING 2>/dev/null | grep -q PONG; then
+        local pong
+        pong=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" PING 2>/dev/null || true)
+        if [[ "$pong" == *PONG* ]]; then
             log_ok "Redis 已就绪"
             "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" FLUSHALL > /dev/null 2>&1
             return 0
@@ -385,22 +403,44 @@ run_phase3_sustain() {
 generate_report() {
     log "生成可视化报告..."
 
-    if [[ -f "$VISUALIZE_SCRIPT" ]]; then
-        if command -v python3 &>/dev/null; then
-            python3 "$VISUALIZE_SCRIPT" \
-                --input "$METRICS_CSV" \
-                --output "$OUTPUT_DIR/benchmark_report.png" \
-                2>&1 || log_warn "可视化失败，请查看 metrics.csv"
-
-            if [[ -f "$OUTPUT_DIR/benchmark_report.png" ]]; then
-                log_ok "报告已生成: $OUTPUT_DIR/benchmark_report.png"
-            fi
-        else
-            log_warn "python3 未找到，跳过可视化"
-        fi
-    else
+    if [[ ! -f "$VISUALIZE_SCRIPT" ]]; then
         log_warn "可视化脚本不存在: $VISUALIZE_SCRIPT"
-        log "请查看原始数据: $METRICS_CSV"
+        return
+    fi
+
+    if ! command -v python3 &>/dev/null; then
+        log_warn "python3 未找到，跳过可视化"
+        return
+    fi
+
+    # 复用 NUMA 版 venv（已含 matplotlib/pandas，且与 NumPy 版本兼容）
+    local VENV_DIR="$SCRIPT_DIR/scripts/.venv"
+    local PYTHON="$VENV_DIR/bin/python"
+
+    if [[ ! -x "$PYTHON" ]]; then
+        log "首次运行，创建 Python 虚拟环境..."
+        python3 -m venv "$VENV_DIR" || {
+            log_warn "创建 venv 失败，跳过可视化（sudo apt install python3-venv）"
+            return
+        }
+        "$VENV_DIR/bin/pip" install --quiet matplotlib pandas || {
+            log_warn "依赖安装失败，跳过可视化"
+            return
+        }
+        log_ok "虚拟环境就绪"
+    else
+        if ! "$PYTHON" -c "import matplotlib, pandas" 2>/dev/null; then
+            "$VENV_DIR/bin/pip" install --quiet matplotlib pandas
+        fi
+    fi
+
+    "$PYTHON" "$VISUALIZE_SCRIPT" \
+        --input "$METRICS_CSV" \
+        --output "$OUTPUT_DIR/benchmark_report.png" \
+        2>&1 || log_warn "可视化失败，请查看 metrics.csv"
+
+    if [[ -f "$OUTPUT_DIR/benchmark_report.png" ]]; then
+        log_ok "报告已生成: $OUTPUT_DIR/benchmark_report.png"
     fi
 }
 
@@ -451,7 +491,8 @@ print_summary() {
 
 # ── 清理函数 ────────────────────────────────────────────────────────────────
 cleanup() {
-    log "清理中..."
+    local exit_code=$?
+    log "清理中... (退出码: ${exit_code})"
 
     rm -f "$SAFE_LINK" 2>/dev/null || true
 
@@ -492,21 +533,23 @@ main() {
     log "输出目录: $OUTPUT_DIR"
     log "运行阶段: $RUN_PHASE"
 
+    trap cleanup EXIT
+
     check_prerequisites
     save_system_info
 
     if [[ "$NO_RESTART" = false ]]; then
         start_redis
     else
-        if ! "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" PING 2>/dev/null | grep -q PONG; then
+        local pong
+        pong=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" PING 2>/dev/null || true)
+        if [[ "$pong" != *PONG* ]]; then
             log_err "Redis 未响应 ($REDIS_HOST:$REDIS_PORT)"
             log "请先启动 Redis 或去掉 --no-restart 参数"
             exit 1
         fi
         log_ok "Redis 连接正常 ($REDIS_HOST:$REDIS_PORT)"
     fi
-
-    trap cleanup EXIT
 
     touch "$COLLECTOR_FLAG"
     echo "init" > "$PHASE_FLAG"

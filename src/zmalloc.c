@@ -79,6 +79,9 @@ static struct {
 /* 线程局部存储：当前线程绑定的NUMA节点 */
 static __thread int tls_current_node = -1;
 
+/* Forward declarations */
+static void init_class_lookup(void);
+
 /* 初始化NUMA支持：初始化Slab分配器并按距离排序节点 */
 void numa_init(void)
 {
@@ -87,6 +90,9 @@ void numa_init(void)
         numa_ctx.numa_available = 0;
         return;
     }
+
+    /* 初始化 O(1) size class 查找表和 tcache 基础设施 */
+    init_class_lookup();
 
     /* 检查 NUMA 可用性 */
     if (numa_available() < 0) {
@@ -193,6 +199,73 @@ static redisAtomic size_t numa_alloc_direct_bytes = 0;
 static redisAtomic size_t numa_alloc_slab_count   = 0;
 static redisAtomic size_t numa_alloc_direct_count = 0;
 
+/* tcache 命中率计数器 */
+static redisAtomic size_t numa_tcache_alloc_hit  = 0;
+static redisAtomic size_t numa_tcache_alloc_miss = 0;
+static redisAtomic size_t numa_tcache_free_hit   = 0;
+static redisAtomic size_t numa_tcache_free_miss  = 0;
+
+/* ── Thread-Local Cache (tcache) ──
+ *
+ * Per-thread bin of recently freed slab objects. On alloc, check the tcache
+ * first; on free, push into the tcache instead of returning to the slab.
+ * This eliminates CAS bitmap contention, mutex slow-path, and the O(24)
+ * size class lookup on cache hit.
+ */
+
+/* Forward declarations for tcache */
+static inline numa_alloc_prefix_t *numa_get_prefix(void *user_ptr);
+
+#define TCACHE_BIN_MAX     64
+#define TCACHE_DRAIN_COUNT 32
+
+typedef struct {
+    void *ptrs[TCACHE_BIN_MAX];
+    uint16_t count;
+} tcache_bin_t;
+
+typedef struct {
+    tcache_bin_t bins[NUMA_POOL_SIZE_CLASSES];
+} numa_tcache_t;
+
+static __thread numa_tcache_t tls_tcache;
+static __thread int tls_tcache_inited = 0;
+
+/* O(1) size → class index lookup table (covers 0..4096 in 8-byte steps) */
+#define CLASS_LOOKUP_ENTRIES 513
+static int g_class_lookup[CLASS_LOOKUP_ENTRIES];
+static int g_class_lookup_ready = 0;
+
+static void init_class_lookup(void) {
+    int cls = 0;
+    for (int i = 0; i < CLASS_LOOKUP_ENTRIES; i++) {
+        size_t sz = (size_t)i << 3;
+        while (cls < NUMA_POOL_SIZE_CLASSES - 1 &&
+               sz > numa_pool_size_classes[cls])
+            cls++;
+        g_class_lookup[i] = cls;
+    }
+    g_class_lookup_ready = 1;
+}
+
+static inline int fast_size_class(size_t size) {
+    if (size > SLAB_MAX_OBJECT_SIZE) return -1;
+    return g_class_lookup[(size + 7) >> 3];
+}
+
+static void tcache_drain_bin(int cls) {
+    tcache_bin_t *bin = &tls_tcache.bins[cls];
+    int drain = TCACHE_DRAIN_COUNT;
+    while (drain > 0 && bin->count > 0) {
+        void *user_ptr = bin->ptrs[--bin->count];
+        numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
+        void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
+        numa_slab_free(raw_ptr, prefix->size + PREFIX_SIZE,
+                       (int)prefix->node_id);
+        drain--;
+    }
+}
+
 #else
 /* Standard allocator can use HAVE_MALLOC_SIZE if available */
 #ifdef HAVE_MALLOC_SIZE
@@ -232,6 +305,9 @@ static redisAtomic size_t numa_alloc_direct_count = 0;
 #define update_zmalloc_stat_free(__n) atomicDecr(used_memory, (__n))
 
 static redisAtomic size_t used_memory = 0;
+#ifdef HAVE_NUMA
+static redisAtomic size_t used_memory_node[ZMALLOC_MAX_NUMA_NODES];
+#endif
 
 static void zmalloc_default_oom(size_t size)
 {
@@ -273,6 +349,31 @@ static inline void *numa_to_user_ptr(void *raw_ptr)
 static void *numa_alloc_with_size(size_t size)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
+
+    /* ── tcache fast path ── */
+    if (g_class_lookup_ready && should_use_slab(size)) {
+        if (!tls_tcache_inited) {
+            memset(&tls_tcache, 0, sizeof(tls_tcache));
+            tls_tcache_inited = 1;
+        }
+        int cls = fast_size_class(size);
+        if (cls >= 0 && tls_tcache.bins[cls].count > 0) {
+            tcache_bin_t *bin = &tls_tcache.bins[cls];
+            void *user_ptr = bin->ptrs[--bin->count];
+            numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
+            size_t total_size = size + PREFIX_SIZE;
+            prefix->size = size;
+            prefix->hotness = NUMA_HOTNESS_DEFAULT;
+            prefix->access_count = 0;
+            prefix->last_access = 0;
+            update_zmalloc_stat_alloc(total_size);
+            int node_id = (int)prefix->node_id;
+            if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
+                atomicIncr(used_memory_node[node_id], total_size);
+            atomicIncr(numa_tcache_alloc_hit, 1);
+            return user_ptr;
+        }
+    }
 
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
@@ -319,6 +420,10 @@ static void *numa_alloc_with_size(size_t size)
 
     numa_init_prefix(raw_ptr, size, from_slab, target_node);
     update_zmalloc_stat_alloc(total_size);
+    if (target_node >= 0 && target_node < ZMALLOC_MAX_NUMA_NODES)
+        atomicIncr(used_memory_node[target_node], total_size);
+    if (should_use_slab(size))
+        atomicIncr(numa_tcache_alloc_miss, 1);
     return numa_to_user_ptr(raw_ptr);
 }
 
@@ -333,6 +438,26 @@ static void numa_free_with_size(void *user_ptr)
     int node_id = (int)prefix->node_id;
 
     update_zmalloc_stat_free(total_size);
+    if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
+        atomicDecr(used_memory_node[node_id], total_size);
+
+    /* ── tcache fast path: cache slab objects instead of returning to slab ── */
+    if (prefix->from_pool && g_class_lookup_ready) {
+        if (!tls_tcache_inited) {
+            memset(&tls_tcache, 0, sizeof(tls_tcache));
+            tls_tcache_inited = 1;
+        }
+        int cls = fast_size_class(prefix->size);
+        if (cls >= 0) {
+            tcache_bin_t *bin = &tls_tcache.bins[cls];
+            if (bin->count >= TCACHE_BIN_MAX) {
+                tcache_drain_bin(cls);
+            }
+            bin->ptrs[bin->count++] = user_ptr;
+            atomicIncr(numa_tcache_free_hit, 1);
+            return;
+        }
+    }
 
     void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
 
@@ -346,6 +471,17 @@ static void numa_free_with_size(void *user_ptr)
         numa_free(raw_ptr, total_size);
         atomicDecr(numa_alloc_direct_bytes, total_size);
         atomicDecr(numa_alloc_direct_count, 1);
+    }
+}
+
+/* Flush all tcache bins back to slab (call before thread exit or cleanup) */
+void numa_tcache_flush(void)
+{
+    if (!tls_tcache_inited) return;
+    for (int cls = 0; cls < NUMA_POOL_SIZE_CLASSES; cls++) {
+        while (tls_tcache.bins[cls].count > 0) {
+            tcache_drain_bin(cls);
+        }
     }
 }
 
@@ -453,6 +589,8 @@ static void *numa_alloc_on_specific_node(size_t size, int node)
 
     numa_init_prefix(raw_ptr, size, 0, node);  /* 标记为直接分配并记录节点ID */
     update_zmalloc_stat_alloc(total_size);
+    if (node >= 0 && node < ZMALLOC_MAX_NUMA_NODES)
+        atomicIncr(used_memory_node[node], total_size);
     return numa_to_user_ptr(raw_ptr);
 }
 
@@ -935,6 +1073,16 @@ size_t zmalloc_used_memory(void)
     atomicGet(used_memory, um);
     return um;
 }
+
+#ifdef HAVE_NUMA
+size_t zmalloc_used_memory_node(int node_id)
+{
+    size_t um;
+    if (node_id < 0 || node_id >= ZMALLOC_MAX_NUMA_NODES) return 0;
+    atomicGet(used_memory_node[node_id], um);
+    return um;
+}
+#endif
 
 void zmalloc_set_oom_handler(void (*oom_handler)(size_t))
 {
