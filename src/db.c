@@ -35,6 +35,7 @@
 #ifdef HAVE_NUMA
 redisAtomic unsigned long long dboverwrite_realloc_count = 0;
 redisAtomic unsigned long long dboverwrite_check_count = 0;
+redisAtomic unsigned long long dbset_overwrite_seen_count = 0;
 #endif
 
 #ifdef HAVE_NUMA
@@ -281,26 +282,30 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
     dictEntry auxentry = *de;
     robj *old = dictGetVal(de);
 #ifdef HAVE_NUMA
+    atomicIncr(dboverwrite_check_count, 1);
     if (old->type == OBJ_STRING && val->type == OBJ_STRING &&
         old->encoding == OBJ_ENCODING_RAW && val->encoding == OBJ_ENCODING_RAW &&
         old->ptr && val->ptr) {
         int old_node = numa_get_node_id(sdsAllocPtr(old->ptr));
         int new_node = numa_get_node_id(sdsAllocPtr(val->ptr));
-        atomicIncr(dboverwrite_check_count, 1);
-        if (old_node == 0 && new_node != 0) {
+        int old_migrated = numa_get_migrated(old);
+        if (old_node >= 0 && new_node != old_node) {
             sds cur = val->ptr;
             size_t total = sdsAllocSize(cur);
             void *cur_base = sdsAllocPtr(cur);
             ptrdiff_t offset = (char *)cur - (char *)cur_base;
-            numa_alloc_push_node(0);
+            numa_alloc_push_node(old_node);
             void *dst = zmalloc(total);
             numa_alloc_pop_node();
             if (dst) {
                 memcpy(dst, cur_base, total);
                 val->ptr = (char *)dst + offset;
                 zfree(cur_base);
+                if (old_migrated)
+                    numa_set_migrated(val, 1);
                 atomicIncr(dboverwrite_realloc_count, 1);
             }
+            /* dst == NULL: 原节点分配失败，保留新值在当前节点 */
         }
     }
 #endif
@@ -333,9 +338,13 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
  * The client 'c' argument may be set to NULL if the operation is performed
  * in a context where there is no clear client performing the operation. */
 void genericSetKey(client *c, redisDb *db, robj *key, robj *val, int keepttl, int signal) {
-    if (lookupKeyWrite(db,key) == NULL) {
+    robj *old = lookupKeyWrite(db,key);
+    if (old == NULL) {
         dbAdd(db,key,val);
     } else {
+#ifdef HAVE_NUMA
+        atomicIncr(dbset_overwrite_seen_count, 1);
+#endif
         dbOverwrite(db,key,val);
     }
     incrRefCount(val);

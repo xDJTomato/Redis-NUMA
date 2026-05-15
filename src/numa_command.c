@@ -129,7 +129,7 @@ static void numa_cmd_migrate(client *c) {
             acc_remote = d->accesses_remote;
         }
 
-        addReplyArrayLen(c, 20);
+        addReplyArrayLen(c, 22);
         addReplyBulkCString(c, "total_migrations");
         addReplyLongLong(c, stats.total_migrations);
         addReplyBulkCString(c, "successful_migrations");
@@ -149,13 +149,17 @@ static void numa_cmd_migrate(client *c) {
         {
             extern redisAtomic unsigned long long dboverwrite_realloc_count;
             extern redisAtomic unsigned long long dboverwrite_check_count;
-            unsigned long long rc, cc;
+            extern redisAtomic unsigned long long dbset_overwrite_seen_count;
+            unsigned long long rc, cc, sc;
             atomicGet(dboverwrite_realloc_count, rc);
             atomicGet(dboverwrite_check_count, cc);
+            atomicGet(dbset_overwrite_seen_count, sc);
             addReplyBulkCString(c, "dboverwrite_checks");
             addReplyLongLong(c, cc);
             addReplyBulkCString(c, "dboverwrite_reallocs");
             addReplyLongLong(c, rc);
+            addReplyBulkCString(c, "dbset_overwrite_seen");
+            addReplyLongLong(c, sc);
         }
         return;
     }

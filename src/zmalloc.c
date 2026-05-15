@@ -182,7 +182,8 @@ typedef struct {
     uint8_t hotness;       /* 1字节 - 热度级别（0-7），0=冷，7=热 */
     uint8_t access_count;  /* 1字节 - 访问计数（循环计数器） */
     uint16_t last_access;  /* 2字节 - LRU时钟低16位（上次访问时间） */
-    char reserved[2];      /* 2字节 - 保留字段，供未来扩展使用 */
+    char migrated;         /* 1字节 - 迁移亲和标记：1=已迁移，UPDATE时保持节点亲和 */
+    char reserved[1];      /* 1字节 - 保留字段 */
 } numa_alloc_prefix_t;
 
 /* 热度追踪常量 */
@@ -251,6 +252,11 @@ static void init_class_lookup(void) {
 static inline int fast_size_class(size_t size) {
     if (size > SLAB_MAX_OBJECT_SIZE) return -1;
     return g_class_lookup[(size + 7) >> 3];
+}
+
+static inline size_t numa_slab_class_size(size_t size) {
+    int cls = fast_size_class(size);
+    return (cls >= 0) ? numa_pool_size_classes[cls] : 0;
 }
 
 static void tcache_drain_bin(int cls) {
@@ -346,9 +352,12 @@ static inline void *numa_to_user_ptr(void *raw_ptr)
 }
 
 /* NUMA感知内存分配（含大小追踪）：Slab（8B-4KB）→ Direct（>4KB） */
-static void *numa_alloc_with_size(size_t size)
+static void *numa_alloc_with_size_onnode(size_t size, int target_node)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
+
+    if (target_node < 0 || target_node >= numa_ctx.num_nodes)
+        target_node = 0;
 
     /* ── tcache fast path ── */
     if (g_class_lookup_ready && should_use_slab(size)) {
@@ -359,34 +368,27 @@ static void *numa_alloc_with_size(size_t size)
         int cls = fast_size_class(size);
         if (cls >= 0 && tls_tcache.bins[cls].count > 0) {
             tcache_bin_t *bin = &tls_tcache.bins[cls];
-            void *user_ptr = bin->ptrs[--bin->count];
+            void *user_ptr = bin->ptrs[bin->count - 1];
             numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
-            size_t total_size = size + PREFIX_SIZE;
-            prefix->size = size;
-            prefix->hotness = NUMA_HOTNESS_DEFAULT;
-            prefix->access_count = 0;
-            prefix->last_access = 0;
-            update_zmalloc_stat_alloc(total_size);
-            int node_id = (int)prefix->node_id;
-            if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
-                atomicIncr(used_memory_node[node_id], total_size);
-            atomicIncr(numa_tcache_alloc_hit, 1);
-            return user_ptr;
+            if ((int)prefix->node_id == target_node) {
+                bin->count--;
+                size_t total_size = size + PREFIX_SIZE;
+                prefix->size = size;
+                prefix->hotness = NUMA_HOTNESS_DEFAULT;
+                prefix->access_count = 0;
+                prefix->last_access = 0;
+                update_zmalloc_stat_alloc(total_size);
+                int node_id = (int)prefix->node_id;
+                if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
+                    atomicIncr(used_memory_node[node_id], total_size);
+                atomicIncr(numa_tcache_alloc_hit, 1);
+                return user_ptr;
+            }
         }
     }
 
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
-
-    /* 由 numa_configurable_strategy 模块决定目标节点 */
-    int target_node;
-    if (tls_current_node >= 0) {
-        target_node = tls_current_node;
-    } else if (numa_ctx.num_nodes <= 1) {
-        target_node = 0;
-    } else {
-        target_node = numa_config_get_best_node(size);
-    }
 
     void *raw_ptr = NULL;
     int used_slab = 0;
@@ -425,6 +427,22 @@ static void *numa_alloc_with_size(size_t size)
     if (should_use_slab(size))
         atomicIncr(numa_tcache_alloc_miss, 1);
     return numa_to_user_ptr(raw_ptr);
+}
+
+static int numa_select_allocation_node(size_t size)
+{
+    if (tls_current_node >= 0) {
+        return tls_current_node;
+    } else if (numa_ctx.num_nodes <= 1) {
+        return 0;
+    } else {
+        return numa_config_get_best_node(size);
+    }
+}
+
+static void *numa_alloc_with_size(size_t size)
+{
+    return numa_alloc_with_size_onnode(size, numa_select_allocation_node(size));
 }
 
 /* NUMA感知内存释放（含大小追踪）：根据PREFIX路由到Slab或Direct */
@@ -523,19 +541,50 @@ void *numa_zrealloc(void *ptr, size_t size)
         return NULL;
     }
 
-    /* 从PREFIX读取旧内存大小 */
     numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
     size_t old_size = prefix->size;
+    int old_node = (int)prefix->node_id;
+    size_t old_total = old_size + PREFIX_SIZE;
+    size_t new_total = size + PREFIX_SIZE;
+    size_t old_class = should_use_slab(old_size) ? numa_slab_class_size(old_size) : 0;
+    size_t new_class = should_use_slab(size) ? numa_slab_class_size(size) : 0;
 
-    /* 分配新内存 */
-    void *new_ptr = numa_alloc_with_size(size);
+    if (prefix->from_pool && should_use_slab(size) && old_class == new_class) {
+        update_zmalloc_stat_free(old_total);
+        update_zmalloc_stat_alloc(new_total);
+        if (old_node >= 0 && old_node < ZMALLOC_MAX_NUMA_NODES) {
+            atomicDecr(used_memory_node[old_node], old_total);
+            atomicIncr(used_memory_node[old_node], new_total);
+        }
+        prefix->size = size;
+        return ptr;
+    }
+
+    if (!prefix->from_pool && !should_use_slab(size)) {
+        void *raw_ptr = (char *)ptr - PREFIX_SIZE;
+        void *new_raw = numa_realloc(raw_ptr, old_total, new_total);
+        if (!new_raw) {
+            zmalloc_oom_handler(size);
+            return NULL;
+        }
+        numa_alloc_prefix_t *new_prefix = (numa_alloc_prefix_t *)new_raw;
+        new_prefix->size = size;
+        update_zmalloc_stat_free(old_total);
+        update_zmalloc_stat_alloc(new_total);
+        if (old_node >= 0 && old_node < ZMALLOC_MAX_NUMA_NODES) {
+            atomicDecr(used_memory_node[old_node], old_total);
+            atomicIncr(used_memory_node[old_node], new_total);
+        }
+        return numa_to_user_ptr(new_raw);
+    }
+
+    void *new_ptr = numa_alloc_with_size_onnode(size, old_node);
     if (!new_ptr)
     {
         zmalloc_oom_handler(size);
         return NULL;
     }
 
-    /* 拷贝数据并释放旧内存 */
     size_t copy_size = (old_size < size) ? old_size : size;
     memcpy(new_ptr, ptr, copy_size);
     numa_free_with_size(ptr);
@@ -578,20 +627,7 @@ void numa_alloc_pop_node(void) {
 /* 在指定NUMA节点上分配内存（用于Key迁移，绕过Pool/Slab直接分配） */
 static void *numa_alloc_on_specific_node(size_t size, int node)
 {
-    ASSERT_NO_SIZE_OVERFLOW(size);
-
-    size_t total_size = size + PREFIX_SIZE;
-    
-    /* 指定节点请求始终使用直接分配，确保物理位置精确 */
-    void *raw_ptr = numa_alloc_onnode(total_size, node);
-    if (!raw_ptr)
-        return NULL;
-
-    numa_init_prefix(raw_ptr, size, 0, node);  /* 标记为直接分配并记录节点ID */
-    update_zmalloc_stat_alloc(total_size);
-    if (node >= 0 && node < ZMALLOC_MAX_NUMA_NODES)
-        atomicIncr(used_memory_node[node], total_size);
-    return numa_to_user_ptr(raw_ptr);
+    return numa_alloc_with_size_onnode(size, node);
 }
 
 /* 在指定NUMA节点上分配内存（对外接口） */
@@ -604,6 +640,67 @@ void *numa_zmalloc_onnode(size_t size, int node)
     if (!ptr && size > 0)
         zmalloc_oom_handler(size);
     return ptr;
+}
+
+/* 在指定NUMA节点上重新分配内存 */
+void *numa_zrealloc_onnode(void *ptr, size_t size, int node)
+{
+    if (ptr == NULL)
+        return numa_zmalloc_onnode(size, node);
+    if (size == 0) {
+        numa_zfree(ptr);
+        return NULL;
+    }
+    if (node < 0 || node >= numa_ctx.num_nodes)
+        return NULL;
+
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    size_t old_size = prefix->size;
+    int old_node = (int)prefix->node_id;
+    size_t old_total = old_size + PREFIX_SIZE;
+    size_t new_total = size + PREFIX_SIZE;
+    size_t old_class = should_use_slab(old_size) ? numa_slab_class_size(old_size) : 0;
+    size_t new_class = should_use_slab(size) ? numa_slab_class_size(size) : 0;
+
+    if (old_node == node && prefix->from_pool && should_use_slab(size) && old_class == new_class) {
+        update_zmalloc_stat_free(old_total);
+        update_zmalloc_stat_alloc(new_total);
+        if (old_node >= 0 && old_node < ZMALLOC_MAX_NUMA_NODES) {
+            atomicDecr(used_memory_node[old_node], old_total);
+            atomicIncr(used_memory_node[old_node], new_total);
+        }
+        prefix->size = size;
+        return ptr;
+    }
+
+    if (old_node == node && !prefix->from_pool && !should_use_slab(size)) {
+        void *raw_ptr = (char *)ptr - PREFIX_SIZE;
+        void *new_raw = numa_realloc(raw_ptr, old_total, new_total);
+        if (!new_raw) {
+            zmalloc_oom_handler(size);
+            return NULL;
+        }
+        numa_alloc_prefix_t *new_prefix = (numa_alloc_prefix_t *)new_raw;
+        new_prefix->size = size;
+        update_zmalloc_stat_free(old_total);
+        update_zmalloc_stat_alloc(new_total);
+        if (old_node >= 0 && old_node < ZMALLOC_MAX_NUMA_NODES) {
+            atomicDecr(used_memory_node[old_node], old_total);
+            atomicIncr(used_memory_node[old_node], new_total);
+        }
+        return numa_to_user_ptr(new_raw);
+    }
+
+    void *new_ptr = numa_alloc_with_size_onnode(size, node);
+    if (!new_ptr) {
+        zmalloc_oom_handler(size);
+        return NULL;
+    }
+
+    size_t copy_size = (old_size < size) ? old_size : size;
+    memcpy(new_ptr, ptr, copy_size);
+    numa_free_with_size(ptr);
+    return new_ptr;
 }
 
 /* 在指定NUMA节点上分配并清零内存 */
@@ -761,6 +858,20 @@ void numa_set_node_id(void *ptr, int node_id)
     if (!ptr) return;
     numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
     prefix->node_id = (char)node_id;
+}
+
+int numa_get_migrated(void *ptr)
+{
+    if (!ptr) return 0;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    return (int)prefix->migrated;
+}
+
+void numa_set_migrated(void *ptr, int migrated)
+{
+    if (!ptr) return;
+    numa_alloc_prefix_t *prefix = numa_get_prefix(ptr);
+    prefix->migrated = (char)migrated;
 }
 
 /* 读取各分配路径的实时字节数和累计分配次数 */

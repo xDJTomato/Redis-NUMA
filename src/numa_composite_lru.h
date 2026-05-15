@@ -111,6 +111,9 @@ typedef struct {
 /* 模块初始化：向策略管理器注册工厂 */
 int numa_composite_lru_register(void);
 
+/* 主线程绑定：在 main() 中调用，锁定迁移目标节点为主线程所在节点 */
+void composite_lru_set_main_thread(void);
+
 /* 策略工厂函数 */
 numa_strategy_t* composite_lru_create(void);
 void composite_lru_destroy(numa_strategy_t *strategy);

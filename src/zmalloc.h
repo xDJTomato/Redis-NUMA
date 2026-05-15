@@ -131,6 +131,7 @@ void *numa_zrealloc(void *ptr, size_t size);
 void numa_zfree(void *ptr);
 void *numa_zmalloc_onnode(size_t size, int node);
 void *numa_zcalloc_onnode(size_t size, int node);
+void *numa_zrealloc_onnode(void *ptr, size_t size, int node);
 
 /* Force-local (Node 0 / DRAM) allocation — for metadata structures */
 void *zmalloc_local(size_t size);
@@ -158,6 +159,8 @@ uint16_t numa_get_last_access(void *ptr);
 void numa_set_last_access(void *ptr, uint16_t lru_clock);
 int numa_get_node_id(void *ptr);
 void numa_set_node_id(void *ptr, int node_id);
+int numa_get_migrated(void *ptr);
+void numa_set_migrated(void *ptr, int migrated);
 
 /* Per-node memory usage (for pressure calculation) */
 #define ZMALLOC_MAX_NUMA_NODES 16

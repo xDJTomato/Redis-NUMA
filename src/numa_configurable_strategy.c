@@ -73,9 +73,11 @@ static int init_runtime_state(int num_nodes) {
     memset(&g_runtime_state, 0, sizeof(g_runtime_state));
     
     g_runtime_state.config.num_nodes = num_nodes;
-    g_runtime_state.config.strategy_type = NUMA_STRATEGY_CONFIG_LOCAL_FIRST; /* 默认使用本地优先策略 */
+    g_runtime_state.config.strategy_type = NUMA_STRATEGY_CONFIG_INTERLEAVE;
     g_runtime_state.config.balance_threshold = 0.3;
     g_runtime_state.config.auto_rebalance = 1;
+    g_runtime_state.config.enable_cxl_optimization = 1;
+    g_runtime_state.config.min_allocation_size = 1024;
     g_runtime_state.config.rebalance_interval_us = 5000000; /* 5秒 */
     
     /* 分配权重数组（权重不需要原子性，仅 WEIGHTED 策略持锁读取） */

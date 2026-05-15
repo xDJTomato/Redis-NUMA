@@ -415,7 +415,13 @@ run_phase1_fill() {
     echo "PHASE_MARKER,1,fill_start,$(date +%s)" >> "$METRICS_CSV"
     
     local total_gb=$((PHASE1_RECORDS * PHASE1_FIELD_LENGTH / 1024 / 1024 / 1024))
-    log "Loading $PHASE1_RECORDS records x ${PHASE1_FIELD_LENGTH}B (~${total_gb}GB)..."
+    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
+        NUMA CONFIG SET strategy cxl_optimized >/dev/null 2>&1 || \
+        log_warn "无法设置 Phase 1 远端填充策略 cxl_optimized"
+    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
+        NUMA CONFIG GET > "$OUTPUT_DIR/phase1_config_before.txt" 2>&1 || true
+    log "Phase 1 NUMA config saved: $OUTPUT_DIR/phase1_config_before.txt"
+    log "Loading $PHASE1_RECORDS records x ${PHASE1_FIELD_LENGTH}B (~${total_gb}GB) to remote memory..."
     
     "$YCSB_BIN" load redis -s \
         -P "$WORKLOAD" \
@@ -428,6 +434,13 @@ run_phase1_fill() {
         2>&1 | tee "$OUTPUT_DIR/phase1_load.txt"
     
     echo "PHASE_MARKER,1,fill_end,$(date +%s)" >> "$METRICS_CSV"
+    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
+        NUMA CONFIG STATS > "$OUTPUT_DIR/phase1_config_stats_after.txt" 2>&1 || true
+    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
+        NUMA MIGRATE STATS > "$OUTPUT_DIR/phase1_migrate_stats_after.txt" 2>&1 || true
+    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
+        NUMA CONFIG SET strategy local_first >/dev/null 2>&1 || \
+        log_warn "无法将 Phase 2/3 分配策略切回 local_first"
     
     local throughput
     throughput=$(grep 'OVERALL.*Throughput' "$OUTPUT_DIR/phase1_load.txt" 2>/dev/null || echo "See phase1_load.txt")
@@ -673,7 +686,7 @@ main() {
     fi
     # 验证策略插槽状态
     local slot_info
-    slot_info=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA SLOT LIST 2>/dev/null || echo "")
+    slot_info=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY LIST 2>/dev/null || echo "")
     if [[ -n "$slot_info" ]]; then
         log_ok "NUMA 策略插槽已激活"
         echo "$slot_info" | while IFS= read -r line; do
@@ -682,9 +695,7 @@ main() {
     else
         log_warn "NUMA SLOT LIST 无返回（单节点环境下正常）"
     fi
-    # 确保自动迁移已启用
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
-        NUMA CONFIG SET auto_migrate_enabled 1 2>/dev/null || true
+    # 自动迁移开关由 composite_lru.json 控制
 
     # 启动后台采集器
     touch "$COLLECTOR_FLAG"
@@ -701,11 +712,11 @@ main() {
             log "跳过 Phase 1 (--skip-fill)"
         fi
     fi
-    
+
     if [[ "$RUN_PHASE" = "all" || "$RUN_PHASE" = "2" ]]; then
         run_phase2_hotspot
     fi
-    
+
     if [[ "$RUN_PHASE" = "all" || "$RUN_PHASE" = "3" ]]; then
         run_phase3_sustain
     fi

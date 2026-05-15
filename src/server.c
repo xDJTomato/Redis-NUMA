@@ -6499,15 +6499,18 @@ int main(int argc, char **argv) {
     initServer();
     
 #ifdef HAVE_NUMA
+    /* 锁定主线程 NUMA 节点，防止后台线程触发迁移乒乓 */
+    composite_lru_set_main_thread();
+
     /* 初始化NUMA策略插槽框架（必须在 initServer() 之后） */
     printf("DEBUG: 调用numa_strategy_init()\n");
     numa_strategy_init();
     printf("DEBUG: numa_strategy_init()完成\n");
 
-    /* 初始化可配置分配策略，使用 INTERLEAVE（跨节点轮询分配） */
+    /* 初始化可配置分配策略，默认使用 INTERLEAVE，benchmark 可在运行时切换策略 */
     if (numa_config_strategy_init() == C_OK) {
-        numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE);
-        serverLog(LL_NOTICE, "NUMA configurable strategy initialized (weighted_interleave)");
+        numa_config_set_strategy(NUMA_STRATEGY_CONFIG_INTERLEAVE);
+        serverLog(LL_NOTICE, "NUMA configurable strategy initialized (interleaved)");
     }
 
     /* 初始化NUMA Key迁移模块 */

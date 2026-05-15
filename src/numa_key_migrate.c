@@ -308,22 +308,26 @@ int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
         return NUMA_KEY_MIGRATE_OK;
     }
 
+    /* 跳过已在目标节点的数据 */
     sds old_str = val_obj->ptr;
-    size_t total = sdsAllocSize(old_str);
     void *old_base = sdsAllocPtr(old_str);
+    int cur_node = numa_get_node_id(old_base);
+    if (cur_node == target_node)
+        return NUMA_KEY_MIGRATE_OK;
+
+    size_t total = sdsAllocSize(old_str);
     ptrdiff_t str_offset = (char *)old_str - (char *)old_base;
 
-    void *new_base = numa_zmalloc_onnode(total, target_node);
+    void *new_base = numa_zrealloc_onnode(old_base, total, target_node);
     if (!new_base) {
         return NUMA_KEY_MIGRATE_ENOMEM;
     }
 
-    memcpy(new_base, old_base, total);
     sds new_str = (char *)new_base + str_offset;
     val_obj->ptr = new_str;
-    sdsfree(old_str);
 
     numa_set_node_id(val_obj, target_node);
+    numa_set_migrated(val_obj, 1);
     return NUMA_KEY_MIGRATE_OK;
 }
 
