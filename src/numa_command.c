@@ -305,7 +305,7 @@ static void numa_cmd_config(client *c) {
             addReplyError(c, "NUMA configuration not available");
             return;
         }
-        addReplyArrayLen(c, 16);
+        addReplyArrayLen(c, 24);
         addReplyBulkCString(c, "strategy");
         addReplyBulkCString(c, get_strategy_name(cfg->strategy_type));
         addReplyBulkCString(c, "nodes");
@@ -320,6 +320,37 @@ static void numa_cmd_config(client *c) {
         addReplyLongLong(c, cfg->rebalance_interval_us);
         addReplyBulkCString(c, "min_allocation_size");
         addReplyLongLong(c, cfg->min_allocation_size);
+        addReplyBulkCString(c, "enabled_nodes");
+        uint64_t enabled_mask = numa_config_get_enabled_nodes_mask();
+        if (enabled_mask == 0) {
+            addReplyBulkCString(c, "all");
+        } else {
+            sds nodes = sdsempty();
+            for (int i = 0; i < cfg->num_nodes && i < 64; i++) {
+                if (!(enabled_mask & (1ULL << i))) continue;
+                if (sdslen(nodes)) nodes = sdscatlen(nodes, ",", 1);
+                nodes = sdscatfmt(nodes, "%i", i);
+            }
+            addReplyBulkCBuffer(c, nodes, sdslen(nodes));
+            sdsfree(nodes);
+        }
+        numa_strategy_t *strat = numa_strategy_slot_get(1);
+        char vbuf[64];
+        addReplyBulkCString(c, "access_tracking_enabled");
+        if (strat && composite_lru_get_config(strat, "access_tracking_enabled", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
+            addReplyBulkCString(c, vbuf);
+        else
+            addReplyBulkCString(c, "unavailable");
+        addReplyBulkCString(c, "locality_stats_enabled");
+        if (strat && composite_lru_get_config(strat, "locality_stats_enabled", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
+            addReplyBulkCString(c, vbuf);
+        else
+            addReplyBulkCString(c, "unavailable");
+        addReplyBulkCString(c, "debug_logging_enabled");
+        if (strat && composite_lru_get_config(strat, "debug_logging_enabled", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
+            addReplyBulkCString(c, vbuf);
+        else
+            addReplyBulkCString(c, "unavailable");
         addReplyBulkCString(c, "node_weights");
         addReplyArrayLen(c, cfg->num_nodes);
         for (int i = 0; i < cfg->num_nodes; i++) {
@@ -407,6 +438,66 @@ static void numa_cmd_config(client *c) {
             else addReplyError(c, "Failed to set node weight");
             return;
         }
+        if (!strcasecmp(param, "enabled_nodes")) {
+            uint64_t mask = 0;
+            const numa_strategy_config_t *cur = numa_config_get_current();
+            if (!cur) {
+                addReplyError(c, "NUMA configuration not available");
+                return;
+            }
+            if (!strcasecmp(val, "all")) {
+                mask = 0;
+            } else {
+                char *spec = zstrdup(val);
+                char *saveptr = NULL;
+                char *tok = strtok_r(spec, ",", &saveptr);
+                while (tok) {
+                    char *end = NULL;
+                    long node = strtol(tok, &end, 10);
+                    if (*tok == '\0' || *end != '\0' || node < 0 || node >= cur->num_nodes || node >= 64) {
+                        zfree(spec);
+                        addReplyErrorFormat(c, "Invalid enabled_nodes entry: %s", tok);
+                        return;
+                    }
+                    mask |= (1ULL << node);
+                    tok = strtok_r(NULL, ",", &saveptr);
+                }
+                zfree(spec);
+                if (mask == 0) {
+                    addReplyError(c, "enabled_nodes must be 'all' or a non-empty comma-separated node list");
+                    return;
+                }
+            }
+            if (numa_config_set_enabled_nodes_mask(mask) == C_OK)
+                addReplyStatus(c, "OK");
+            else
+                addReplyError(c, "Failed to set enabled nodes");
+            return;
+        }
+        if (!strcasecmp(param, "access_tracking") ||
+            !strcasecmp(param, "access_tracking_enabled") ||
+            !strcasecmp(param, "locality_stats") ||
+            !strcasecmp(param, "locality_stats_enabled") ||
+            !strcasecmp(param, "debug_logging") ||
+            !strcasecmp(param, "debug_logging_enabled") ||
+            !strcasecmp(param, "auto_migrate_enabled")) {
+            numa_strategy_t *strat = numa_strategy_slot_get(1);
+            if (!strat) {
+                addReplyError(c, "No active strategy on slot 1");
+                return;
+            }
+            char normalized[64];
+            const char *key = param;
+            if (!strcasecmp(param, "access_tracking")) key = "access_tracking_enabled";
+            if (!strcasecmp(param, "locality_stats")) key = "locality_stats_enabled";
+            if (!strcasecmp(param, "debug_logging")) key = "debug_logging_enabled";
+            snprintf(normalized, sizeof(normalized), "%s", key);
+            if (composite_lru_set_config(strat, normalized, val) == NUMA_STRATEGY_OK)
+                addReplyStatus(c, "OK");
+            else
+                addReplyError(c, "Failed to set composite-lru config");
+            return;
+        }
         addReplyErrorFormat(c, "Unknown NUMA CONFIG SET parameter: %s", param);
         return;
     }
@@ -472,30 +563,34 @@ static void numa_cmd_config(client *c) {
             return;
         }
         numa_config_get_statistics(allocs, bytes, cfg->num_nodes);
-        /* 先输出原有节点统计 */
-        addReplyArrayLen(c, cfg->num_nodes * 2 + 1);
+
+        /* 扁平 key-value 输出：每节点 3 个字段 + 4 个路径统计 = 3*num_nodes + 4 */
+        int total_fields = cfg->num_nodes * 3 + 4;
+        addReplyArrayLen(c, total_fields * 2);
+
         for (int i = 0; i < cfg->num_nodes; i++) {
-            addReplyArrayLen(c, 2);
-            addReplyBulkCString(c, "node");
-            addReplyLongLong(c, i);
-            addReplyArrayLen(c, 4);
-            addReplyBulkCString(c, "allocations");
+            char key[64];
+            snprintf(key, sizeof(key), "node%d_allocations", i);
+            addReplyBulkCString(c, key);
             addReplyLongLong(c, allocs[i]);
-            addReplyBulkCString(c, "bytes");
+
+            snprintf(key, sizeof(key), "node%d_bytes", i);
+            addReplyBulkCString(c, key);
             addReplyLongLong(c, bytes[i]);
+
+            snprintf(key, sizeof(key), "node%d_live", i);
+            addReplyBulkCString(c, key);
+            addReplyLongLong(c, zmalloc_used_memory_node(i));
         }
         zfree(allocs);
         zfree(bytes);
 
-        /* 追加分配路径统计 */
+        /* 分配路径统计 */
         size_t slab_bytes, pool_bytes, direct_bytes;
         size_t slab_count, pool_count, direct_count;
         numa_get_alloc_stats(&slab_bytes, &pool_bytes, &direct_bytes,
                              &slab_count, &pool_count, &direct_count);
 
-        addReplyArrayLen(c, 2);
-        addReplyBulkCString(c, "alloc_paths");
-        addReplyArrayLen(c, 6);
         addReplyBulkCString(c, "alloc_slab_bytes");
         addReplyLongLong(c, slab_bytes);
         addReplyBulkCString(c, "alloc_direct_bytes");
@@ -560,7 +655,7 @@ static void numa_cmd_strategy(client *c) {
 /* ========== NUMA HELP ========== */
 
 static void numa_cmd_help(client *c) {
-    addReplyArrayLen(c, 17);
+    addReplyArrayLen(c, 21);
     /* MIGRATE */
     addReplyBulkCString(c, "NUMA MIGRATE KEY <key> <node>      - Migrate a key to target NUMA node");
     addReplyBulkCString(c, "NUMA MIGRATE DB <node>             - Migrate entire database to target NUMA node");
@@ -574,6 +669,10 @@ static void numa_cmd_help(client *c) {
     addReplyBulkCString(c, "NUMA CONFIG SET weight <node> <w>  - Set node weight");
     addReplyBulkCString(c, "NUMA CONFIG SET cxl_optimization <on|off>");
     addReplyBulkCString(c, "NUMA CONFIG SET balance_threshold <percent>");
+    addReplyBulkCString(c, "NUMA CONFIG SET access_tracking <0|1>");
+    addReplyBulkCString(c, "NUMA CONFIG SET locality_stats <0|1>");
+    addReplyBulkCString(c, "NUMA CONFIG SET debug_logging <0|1>");
+    addReplyBulkCString(c, "NUMA CONFIG SET enabled_nodes <all|n[,m]>");
     addReplyBulkCString(c, "NUMA CONFIG LOAD [/path]           - Hot-reload composite-lru JSON config");
     addReplyBulkCString(c, "NUMA CONFIG REBALANCE              - Trigger manual rebalance");
     addReplyBulkCString(c, "NUMA CONFIG STATS                  - Show per-node allocation statistics");

@@ -169,6 +169,9 @@ int numa_get_strategy(void)
 
 #endif /* HAVE_NUMA */
 
+#define update_zmalloc_stat_alloc(__n) atomicIncr(used_memory, (__n))
+#define update_zmalloc_stat_free(__n) atomicDecr(used_memory, (__n))
+
 /* NUMA分配器必须使用PREFIX_SIZE策略（即使定义了HAVE_MALLOC_SIZE），
  * 因为libNUMA无法查询已分配内存的大小。
  * 同时利用前缀标志字段区分池分配和直接分配。 */
@@ -193,6 +196,11 @@ typedef struct {
 
 #define PREFIX_SIZE (sizeof(numa_alloc_prefix_t))
 #define ASSERT_NO_SIZE_OVERFLOW(sz) assert((sz) <= SIZE_MAX - PREFIX_SIZE)
+
+static redisAtomic size_t used_memory = 0;
+#ifdef HAVE_NUMA
+static redisAtomic size_t used_memory_node[ZMALLOC_MAX_NUMA_NODES];
+#endif
 
 /* 分配路径计数器：记录各路径的实时字节数和累计分配次数 */
 static redisAtomic size_t numa_alloc_slab_bytes   = 0;
@@ -232,8 +240,8 @@ typedef struct {
 static __thread numa_tcache_t tls_tcache;
 static __thread int tls_tcache_inited = 0;
 
-/* O(1) size → class index lookup table (covers 0..4096 in 8-byte steps) */
-#define CLASS_LOOKUP_ENTRIES 513
+/* O(1) size → class index lookup table (covers 0..65536 in 8-byte steps) */
+#define CLASS_LOOKUP_ENTRIES 8193
 static int g_class_lookup[CLASS_LOOKUP_ENTRIES];
 static int g_class_lookup_ready = 0;
 
@@ -265,9 +273,16 @@ static void tcache_drain_bin(int cls) {
     while (drain > 0 && bin->count > 0) {
         void *user_ptr = bin->ptrs[--bin->count];
         numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
+        size_t total_size = prefix->size + PREFIX_SIZE;
+        int node_id = (int)prefix->node_id;
+        /* tcache drain: 真正释放，此时递减统计 */
+        update_zmalloc_stat_free(total_size);
+        if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
+            atomicDecr(used_memory_node[node_id], total_size);
         void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
-        numa_slab_free(raw_ptr, prefix->size + PREFIX_SIZE,
-                       (int)prefix->node_id);
+        numa_slab_free(raw_ptr, total_size, node_id);
+        atomicDecr(numa_alloc_slab_bytes, total_size);
+        atomicDecr(numa_alloc_slab_count, 1);
         drain--;
     }
 }
@@ -307,14 +322,6 @@ static void tcache_drain_bin(int cls) {
 #define dallocx(ptr, flags) je_dallocx(ptr, flags)
 #endif
 
-#define update_zmalloc_stat_alloc(__n) atomicIncr(used_memory, (__n))
-#define update_zmalloc_stat_free(__n) atomicDecr(used_memory, (__n))
-
-static redisAtomic size_t used_memory = 0;
-#ifdef HAVE_NUMA
-static redisAtomic size_t used_memory_node[ZMALLOC_MAX_NUMA_NODES];
-#endif
-
 static void zmalloc_default_oom(size_t size)
 {
     fprintf(stderr, "zmalloc: Out of memory trying to allocate %lu bytes\n",
@@ -351,7 +358,7 @@ static inline void *numa_to_user_ptr(void *raw_ptr)
     return (char *)raw_ptr + PREFIX_SIZE;
 }
 
-/* NUMA感知内存分配（含大小追踪）：Slab（8B-4KB）→ Direct（>4KB） */
+/* NUMA感知内存分配（含大小追踪）：Slab（8B-64KB）→ Direct（>64KB） */
 static void *numa_alloc_with_size_onnode(size_t size, int target_node)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
@@ -372,15 +379,11 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
             numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
             if ((int)prefix->node_id == target_node) {
                 bin->count--;
-                size_t total_size = size + PREFIX_SIZE;
                 prefix->size = size;
                 prefix->hotness = NUMA_HOTNESS_DEFAULT;
                 prefix->access_count = 0;
                 prefix->last_access = 0;
-                update_zmalloc_stat_alloc(total_size);
-                int node_id = (int)prefix->node_id;
-                if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
-                    atomicIncr(used_memory_node[node_id], total_size);
+                /* tcache hit: 统计已在 tcache put 时保留，不再递增 used_memory/used_memory_node */
                 atomicIncr(numa_tcache_alloc_hit, 1);
                 return user_ptr;
             }
@@ -393,7 +396,7 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
     void *raw_ptr = NULL;
     int used_slab = 0;
 
-    /* Slab 路径（8B-4KB）：统一走 Slab 分配器 */
+    /* Slab 路径（8B-64KB）：统一走 Slab 分配器 */
     if (should_use_slab(size)) {
         raw_ptr = numa_slab_alloc(size, target_node, &alloc_size);
         if (raw_ptr) used_slab = 1;
@@ -455,10 +458,6 @@ static void numa_free_with_size(void *user_ptr)
     size_t total_size = prefix->size + PREFIX_SIZE;
     int node_id = (int)prefix->node_id;
 
-    update_zmalloc_stat_free(total_size);
-    if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
-        atomicDecr(used_memory_node[node_id], total_size);
-
     /* ── tcache fast path: cache slab objects instead of returning to slab ── */
     if (prefix->from_pool && g_class_lookup_ready) {
         if (!tls_tcache_inited) {
@@ -473,9 +472,15 @@ static void numa_free_with_size(void *user_ptr)
             }
             bin->ptrs[bin->count++] = user_ptr;
             atomicIncr(numa_tcache_free_hit, 1);
+            /* tcache put: 不递减 used_memory/used_memory_node，统计保留到真正释放时 */
             return;
         }
     }
+
+    /* 非 tcache 路径：立即递减统计 */
+    update_zmalloc_stat_free(total_size);
+    if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
+        atomicDecr(used_memory_node[node_id], total_size);
 
     void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
 
@@ -529,8 +534,8 @@ void *numa_zcalloc(size_t size)
     return ptr;
 }
 
-/* NUMA感知版zrealloc：重新分配内存并保留原有数据 */
-void *numa_zrealloc(void *ptr, size_t size)
+/* NUMA感知版zrealloc：重新分配内存并保留原有数据，失败返回NULL */
+static void *numa_tryrealloc(void *ptr, size_t size)
 {
     /* 处理边界情况 */
     if (ptr == NULL)
@@ -563,10 +568,7 @@ void *numa_zrealloc(void *ptr, size_t size)
     if (!prefix->from_pool && !should_use_slab(size)) {
         void *raw_ptr = (char *)ptr - PREFIX_SIZE;
         void *new_raw = numa_realloc(raw_ptr, old_total, new_total);
-        if (!new_raw) {
-            zmalloc_oom_handler(size);
-            return NULL;
-        }
+        if (!new_raw) return NULL;
         numa_alloc_prefix_t *new_prefix = (numa_alloc_prefix_t *)new_raw;
         new_prefix->size = size;
         update_zmalloc_stat_free(old_total);
@@ -579,17 +581,21 @@ void *numa_zrealloc(void *ptr, size_t size)
     }
 
     void *new_ptr = numa_alloc_with_size_onnode(size, old_node);
-    if (!new_ptr)
-    {
-        zmalloc_oom_handler(size);
-        return NULL;
-    }
+    if (!new_ptr) return NULL;
 
     size_t copy_size = (old_size < size) ? old_size : size;
     memcpy(new_ptr, ptr, copy_size);
     numa_free_with_size(ptr);
 
     return new_ptr;
+}
+
+void *numa_zrealloc(void *ptr, size_t size)
+{
+    void *result = numa_tryrealloc(ptr, size);
+    if (!result && size != 0)
+        zmalloc_oom_handler(size);
+    return result;
 }
 
 /* NUMA感知版zfree */
@@ -759,6 +765,8 @@ static void *numa_alloc_dram(size_t size)
 
     numa_init_prefix(raw_ptr, size, from_slab, target_node);
     update_zmalloc_stat_alloc(total_size);
+    if (target_node >= 0 && target_node < ZMALLOC_MAX_NUMA_NODES)
+        atomicIncr(used_memory_node[target_node], total_size);
     return numa_to_user_ptr(raw_ptr);
 }
 
@@ -1078,7 +1086,7 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable)
     /* NUMA可用时使用NUMA realloc */
     if (numa_ctx.numa_available)
     {
-        void *result = numa_zrealloc(ptr, size);
+        void *result = numa_tryrealloc(ptr, size);
         if (result && usable)
             *usable = size;  /* NUMA allocator returns exact requested size */
         return result;

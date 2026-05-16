@@ -13,6 +13,7 @@
 #   --phase 1|2|3|all    运行哪个阶段 (默认: all)
 #   --skip-fill          跳过填充阶段
 #   --no-restart         不重启 Redis
+#   --process-nodes NODES Redis 进程可用 NUMA 节点 (默认: 0,2)
 #   --help               显示帮助
 # ============================================================================
 
@@ -53,15 +54,17 @@ WORKLOAD="$SAFE_LINK/tests/ycsb/workloads/workload_bw_saturate"
 # 默认参数
 REDIS_PORT=6379
 REDIS_HOST="127.0.0.1"
-MAX_MEMORY="11gb"
+MAX_MEMORY="16gb"
 OUTPUT_DIR=""
 RUN_PHASE="all"
 SKIP_FILL=false
 NO_RESTART=false
+ENABLE_LOCALITY_STATS=true
+PROCESS_NUMA_NODES="0,2"
 
 # Phase 参数
 PHASE1_RECORDS=1000000
-PHASE1_FIELD_LENGTH=1800
+PHASE1_FIELD_LENGTH=8192
 PHASE1_THREADS=8
 PHASE2_OPS=2000000
 PHASE2_THREADS=64
@@ -104,6 +107,8 @@ usage() {
   --phase 1|2|3|all    运行哪个阶段 (默认: all)
   --skip-fill          跳过填充阶段
   --no-restart         不重启 Redis
+  --process-nodes NODES Redis 进程可用 NUMA 节点 (默认: 0,2；传 all 禁用绑定)
+  --locality-stats     开启访问本地/远端统计（默认开启）
   --help               显示此帮助
 
 阶段说明:
@@ -151,6 +156,14 @@ parse_args() {
                 ;;
             --no-restart)
                 NO_RESTART=true
+                shift
+                ;;
+            --process-nodes)
+                PROCESS_NUMA_NODES="$2"
+                shift 2
+                ;;
+            --locality-stats)
+                ENABLE_LOCALITY_STATS=true
                 shift
                 ;;
             --help|-h)
@@ -274,15 +287,18 @@ start_redis() {
     pkill -f "redis-server.*:${REDIS_PORT}" 2>/dev/null || true
     sleep 1
 
-    # 仅绑定 CPU 到 Node 0，内存分配由 NUMA 策略层控制（weighted_interleave）
+    # 将整个 Redis 进程限制在 Node 0/2 的 CPU 和内存节点上，应用层策略仍可在 0/2 间选择。
     local -a numa_cmd=()
     if command -v numactl &>/dev/null; then
-        # 调试：打印当前系统可用 NUMA 节点，方便双路服务器诊断节点编号
         log "[DEBUG] 可用 NUMA 节点: $(numactl --hardware 2>/dev/null | grep 'available:' || echo '无法获取')"
-        numa_cmd=(numactl --cpunodebind=0)
-        log "绑定 Redis CPU 到 NUMA Node 0（内存策略由应用层控制）"
+        if [[ "$PROCESS_NUMA_NODES" == "all" ]]; then
+            log "未限制 Redis 进程 NUMA 节点 (--process-nodes all)"
+        else
+            numa_cmd=(numactl --cpunodebind="$PROCESS_NUMA_NODES" --membind="$PROCESS_NUMA_NODES")
+            log "绑定 Redis 进程 CPU 和内存到 NUMA Node $PROCESS_NUMA_NODES"
+        fi
     else
-        log_warn "numactl 未找到，跳过 CPU 绑定，Redis 将在默认调度下运行"
+        log_warn "numactl 未找到，跳过进程级 NUMA 绑定，Redis 将在默认调度下运行"
     fi
 
     log "启动 Redis (port=$REDIS_PORT, maxmemory=$MAX_MEMORY)..."
@@ -320,7 +336,7 @@ start_collector() {
     local csv_file="$1"
 
     # 写入 CSV header
-    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys,accesses_local,accesses_remote" > "$csv_file"
+    echo "timestamp,phase,ops_total,ops_sec,used_mem_mb,rss_mb,frag_ratio,migrate_total,migrate_sec,numa_pages_n0,numa_pages_n1,evicted_keys,accesses_local,accesses_remote,live_node0_mb,live_node2_mb,alloc_slab_mb,alloc_direct_mb,rss_gap_mb" > "$csv_file"
 
     local prev_ops=0
     local prev_migrate=0
@@ -391,8 +407,37 @@ start_collector() {
         [[ "${acc_local_sec:-0}" -lt 0 ]] 2>/dev/null && acc_local_sec=0
         [[ "${acc_remote_sec:-0}" -lt 0 ]] 2>/dev/null && acc_remote_sec=0
 
+        # 采集 NUMA live allocator 统计（扁平 key-value 格式）
+        local live_node0=0 live_node2=0 alloc_slab=0 alloc_direct=0
+        local config_stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" --raw NUMA CONFIG STATS 2>/dev/null || echo "")
+        if [[ -n "$config_stats" ]]; then
+            live_node0=$(awk '/^node0_live$/ {getline; print; exit}' <<< "$config_stats")
+            live_node2=$(awk '/^node2_live$/ {getline; print; exit}' <<< "$config_stats")
+            alloc_slab=$(awk '/^alloc_slab_bytes$/ {getline; print; exit}' <<< "$config_stats")
+            alloc_direct=$(awk '/^alloc_direct_bytes$/ {getline; print; exit}' <<< "$config_stats")
+        fi
+        [[ -z "$live_node0" ]] && live_node0=0
+        [[ -z "$live_node2" ]] && live_node2=0
+        [[ -z "$alloc_slab" ]] && alloc_slab=0
+        [[ -z "$alloc_direct" ]] && alloc_direct=0
+
+        local live_node0_mb live_node2_mb alloc_slab_mb alloc_direct_mb rss_gap_mb
+        if command -v bc &>/dev/null; then
+            live_node0_mb=$(echo "scale=1; ${live_node0:-0} / 1048576" | bc 2>/dev/null || echo "0")
+            live_node2_mb=$(echo "scale=1; ${live_node2:-0} / 1048576" | bc 2>/dev/null || echo "0")
+            alloc_slab_mb=$(echo "scale=1; ${alloc_slab:-0} / 1048576" | bc 2>/dev/null || echo "0")
+            alloc_direct_mb=$(echo "scale=1; ${alloc_direct:-0} / 1048576" | bc 2>/dev/null || echo "0")
+            rss_gap_mb=$(echo "scale=1; (${rss_mem:-0} - ${used_mem:-0}) / 1048576" | bc 2>/dev/null || echo "0")
+        else
+            live_node0_mb=$((${live_node0:-0} / 1048576))
+            live_node2_mb=$((${live_node2:-0} / 1048576))
+            alloc_slab_mb=$((${alloc_slab:-0} / 1048576))
+            alloc_direct_mb=$((${alloc_direct:-0} / 1048576))
+            rss_gap_mb=$(((${rss_mem:-0} - ${used_mem:-0}) / 1048576))
+        fi
+
         # 写入 CSV
-        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0},${acc_local_sec},${acc_remote_sec}" >> "$csv_file"
+        echo "${ts},${phase},${ops_total:-0},${ops_sec},${used_mb},${rss_mb},${frag:-0},${migrate_total},${migrate_sec},${n0_delta},${n1_delta},${evicted:-0},${acc_local_sec},${acc_remote_sec},${live_node0_mb},${live_node2_mb},${alloc_slab_mb},${alloc_direct_mb},${rss_gap_mb}" >> "$csv_file"
 
         # 更新前值
         prev_ops=${ops_total:-0}
@@ -414,6 +459,13 @@ run_phase1_fill() {
     # 写入阶段标记
     echo "PHASE_MARKER,1,fill_start,$(date +%s)" >> "$METRICS_CSV"
     
+    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
+        NUMA CONFIG SET locality_stats "$([[ "$ENABLE_LOCALITY_STATS" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || \
+        log_warn "无法设置 locality_stats 开关"
+    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
+        NUMA CONFIG SET enabled_nodes 0,2 >/dev/null 2>&1 || \
+        log_warn "无法限制 NUMA 可用节点为 0,2"
+
     local total_gb=$((PHASE1_RECORDS * PHASE1_FIELD_LENGTH / 1024 / 1024 / 1024))
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
         NUMA CONFIG SET strategy cxl_optimized >/dev/null 2>&1 || \

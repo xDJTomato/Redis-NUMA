@@ -1,10 +1,10 @@
-/* NUMA Slab 分配器（jemalloc 风格，统一覆盖 8B-4KB）
+/* NUMA Slab 分配器（jemalloc 风格，覆盖 8B-64KB）
  *
  * 设计原则：
- * - 24 级 jemalloc 风格大小 class：8B~4KB，消除内部碎片
- * - 16KB Slab + 512bit 位图 + 原子 CAS 无锁分配
+ * - 33 级 jemalloc 风格大小 class：8B~64KB，消除内部碎片
+ * - 小 slab 64KB + 大 slab 2MB，带回指针头部，O(1) free 查找
  * - 16 字节 PREFIX 元数据：跟踪对象大小、来源标记和节点ID
- * - ≤128B 走原子位图快速路径，>128B 同样走 Slab 但 objects_per_slab 更小
+ * - ≤4KB 走小 slab，>4KB-64KB 走大 slab（消除 per-object page 对齐浪费）
  */
 
 #ifndef NUMA_POOL_H
@@ -17,13 +17,14 @@
 #define NUMA_STRATEGY_INTERLEAVE  1   /* 交错分配（跨节点负载均衡） */
 
 /* Slab 分配器配置 */
-#define NUMA_POOL_SIZE_CLASSES 24     /* jemalloc 风格 24 级大小 class */
-#define SLAB_SIZE (64 * 1024)         /* 64KB slab（大对象 2048B class 从 7 提升到 31 objects/slab） */
-#define SLAB_MAX_OBJECT_SIZE 4096     /* Slab 处理 8B-4KB 的对象 */
-#define SLAB_BITMAP_SIZE 96           /* 3072bit 位图，覆盖 64KB slab 最多 ~2729 个对象 */
+#define NUMA_POOL_SIZE_CLASSES 33     /* jemalloc 风格 33 级大小 class (8B-64KB) */
+#define SLAB_SIZE (64 * 1024)         /* 64KB 小 slab */
+#define LARGE_SLAB_SIZE (2UL * 1024 * 1024) /* 2MB 大 slab（>4KB 对象） */
+#define SLAB_MAX_OBJECT_SIZE 65536    /* Slab 处理 8B-64KB 的对象 */
+#define SLAB_BITMAP_SIZE 96           /* 3072bit 位图 */
 #define SLAB_EMPTY_CACHE_MAX 8        /* 每个大小级别保留的空闲 slab 缓存数量 */
 
-/* 各大小级别的实际大小数组（24级 jemalloc 风格） */
+/* 各大小级别的实际大小数组（33级 jemalloc 风格） */
 extern const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES];
 
 /* 初始化所有NUMA节点的Slab分配器

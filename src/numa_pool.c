@@ -1,10 +1,10 @@
-/* numa_pool.c - NUMA Slab 分配器实现（jemalloc 风格，统一覆盖 8B-4KB）
+/* numa_pool.c - NUMA Slab 分配器实现（jemalloc 风格，覆盖 8B-64KB）
  *
  * 设计原则：
- * - 24 级 jemalloc 风格大小 class：8B~4KB，消除内部碎片
- * - 16KB Slab + 512bit 位图 + 原子 CAS 无锁分配
- * - 16 字节 PREFIX 元数据：跟踪对象大小、来源标记和节点ID
- * - 所有对象统一走 Slab 路径（8B-4KB），>4KB 走 Direct NUMA 分配
+ * - 33 级大小 class：8B~64KB，消除内部碎片
+ * - 小 slab 64KB（≤4KB 对象）+ 大 slab 2MB（>4KB 对象）
+ * - 16 字节 PREFIX + 带回指针头部，O(1) free 查找
+ * - >4KB 对象走大 slab，消除 per-object mmap page 对齐浪费
  */
 
 #define _GNU_SOURCE
@@ -14,28 +14,32 @@
 #include <stdint.h>
 #include <pthread.h>
 #include <numa.h>
+#include <numaif.h>
 #include <sched.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
-/* 24 级 jemalloc 风格大小 class（覆盖 8B-4KB） */
+/* 33 级 jemalloc 风格大小 class（覆盖 8B-64KB） */
 const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES] = {
     8, 16, 24, 32, 48, 64, 80, 96, 128,              /* 小对象（8/16 字节粒度） */
     160, 192, 256, 320, 384, 512, 640, 768,            /* 中对象（32-64 字节粒度） */
-    1024, 1280, 1536, 2048, 2560, 3072, 4096           /* 大对象（128-256 字节粒度） */
+    1024, 1280, 1536, 2048, 2560, 3072, 4096,          /* 大对象（128-256 字节粒度） */
+    5120, 6144, 7168, 8192, 10240, 12288, 16384, 32768, 65536 /* 超大对象（>4KB，走大 slab） */
 };
 
 /* ============================================================================
- * Slab 分配器实现（jemalloc 风格，统一覆盖 8B-4KB）
+ * Slab 分配器实现（jemalloc 风格，覆盖 8B-64KB）
  * ============================================================================
  * 设计：
- * - 24 级 jemalloc 风格大小 class，覆盖 8B~4KB
- * - 16KB Slab + 512bit 位图 + 原子 CAS 无锁分配
+ * - 33 级 jemalloc 风格大小 class，覆盖 8B~64KB
+ * - 小 slab 64KB（≤4KB 对象）+ 大 slab 2MB（>4KB 对象）
  * - 带回指针的 Slab 头部，支持 O(1) free 查找
  * - 部分占用/全占用/空闲 三态链表管理
  * ========================================================================= */
 
-/* 每个slab头部存储在slab开头，用于O(1)信free查找 */
+/* 每个slab头部存储在slab开头，用于O(1) free查找 */
 #define SLAB_HEADER_MAGIC 0x534C4142  /* ASCII中的"SLAB" */
+#define LARGE_SLAB_HEADER_MAGIC 0x4C534C42  /* ASCII中的"LSLB" */
 typedef struct numa_slab_header {
     uint32_t magic;                  /* 魔数，用于验证 */
     uint32_t class_idx;              /* 大小分类索引 */
@@ -45,6 +49,22 @@ typedef struct numa_slab_header {
 
 #define SLAB_HEADER_SIZE (sizeof(numa_slab_header_t))
 #define SLAB_USABLE_SIZE (SLAB_SIZE - SLAB_HEADER_SIZE)
+#define LARGE_SLAB_USABLE_SIZE (LARGE_SLAB_SIZE - SLAB_HEADER_SIZE)
+
+/* 判断 class 是否为大 slab class（>4KB 对象） */
+static inline int is_large_slab_class(int class_idx) {
+    return class_idx >= 24;  /* class 24-32 对应 5KB-64KB */
+}
+
+/* 获取 slab 大小（按 class） */
+static inline size_t slab_size_for_class(int class_idx) {
+    return is_large_slab_class(class_idx) ? LARGE_SLAB_SIZE : SLAB_SIZE;
+}
+
+/* 获取 slab 对齐大小（按 class） */
+static inline size_t slab_align_for_class(int class_idx) {
+    return is_large_slab_class(class_idx) ? LARGE_SLAB_SIZE : SLAB_SIZE;
+}
 
 /* Slab结构 - P2修复：使用原子计数器实现无锁操作 */
 typedef struct numa_slab {
@@ -190,32 +210,79 @@ static numa_slab_t *alloc_new_slab(int node, size_t obj_size, int class_idx) {
     /* 分配slab结构 */
     numa_slab_t *slab = (numa_slab_t *)malloc(sizeof(numa_slab_t));
     if (!slab) return NULL;
-    
-    /* P2修复：分配对齐的slab内存，支持O(1)free查找
-     * 分配2倍大小并手动对齐到SLAB_SIZE边界 */
-    void *raw_mem = numa_alloc_onnode(SLAB_SIZE * 2, node);
-    if (!raw_mem) {
-        free(slab);
-        return NULL;
+
+    if (is_large_slab_class(class_idx)) {
+        /* 大 slab（>4KB 对象）：mmap + mbind 方式，借鉴 memkind arena_extent_alloc
+         * 分配 2x 大小，对齐到 LARGE_SLAB_SIZE，munmap 头尾减少 RSS */
+        size_t alloc_size = LARGE_SLAB_SIZE * 2;
+        void *raw_mem = mmap(NULL, alloc_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (raw_mem == MAP_FAILED) {
+            free(slab);
+            return NULL;
+        }
+
+        /* 对齐到 LARGE_SLAB_SIZE 边界 */
+        uintptr_t raw_addr = (uintptr_t)raw_mem;
+        uintptr_t aligned_addr = (raw_addr + LARGE_SLAB_SIZE - 1) & ~((uintptr_t)(LARGE_SLAB_SIZE - 1));
+
+        /* munmap 未对齐的头部和尾部，减少 RSS 浪费 */
+        size_t head_len = aligned_addr - raw_addr;
+        if (head_len > 0) munmap(raw_mem, head_len);
+
+        uintptr_t tail = aligned_addr + LARGE_SLAB_SIZE;
+        size_t tail_len = (raw_addr + alloc_size) - tail;
+        if (tail_len > 0) munmap((void *)tail, tail_len);
+
+        /* mbind 到目标 NUMA 节点 */
+        struct bitmask *nodemask = numa_allocate_nodemask();
+        if (!nodemask) {
+            munmap((void *)aligned_addr, LARGE_SLAB_SIZE);
+            free(slab);
+            return NULL;
+        }
+        numa_bitmask_setbit(nodemask, node);
+        long rc = mbind((void *)aligned_addr, LARGE_SLAB_SIZE,
+                        MPOL_BIND, nodemask->maskp, nodemask->size, 0);
+        numa_free_nodemask(nodemask);
+        if (rc < 0) {
+            munmap((void *)aligned_addr, LARGE_SLAB_SIZE);
+            free(slab);
+            return NULL;
+        }
+
+        slab->memory = (void *)aligned_addr;
+
+        /* 初始化头部 */
+        numa_slab_header_t *header = (numa_slab_header_t *)slab->memory;
+        header->magic = LARGE_SLAB_HEADER_MAGIC;
+        header->class_idx = class_idx;
+        header->slab = slab;
+        header->raw_memory = NULL; /* 大 slab 直接 munmap，不需要 raw 指针 */
+    } else {
+        /* 小 slab（≤4KB 对象）：沿用 numa_alloc_onnode + 2x 对齐 */
+        void *raw_mem = numa_alloc_onnode(SLAB_SIZE * 2, node);
+        if (!raw_mem) {
+            free(slab);
+            return NULL;
+        }
+
+        uintptr_t raw_addr = (uintptr_t)raw_mem;
+        uintptr_t aligned_addr = (raw_addr + SLAB_SIZE - 1) & ~((uintptr_t)(SLAB_SIZE - 1));
+        slab->memory = (void *)aligned_addr;
+
+        numa_slab_header_t *header = (numa_slab_header_t *)slab->memory;
+        header->magic = SLAB_HEADER_MAGIC;
+        header->class_idx = class_idx;
+        header->slab = slab;
+        header->raw_memory = raw_mem;
     }
-
-    /* 对齐到SLAB_SIZE边界 */
-    uintptr_t raw_addr = (uintptr_t)raw_mem;
-    uintptr_t aligned_addr = (raw_addr + SLAB_SIZE - 1) & ~((uintptr_t)(SLAB_SIZE - 1));
-    slab->memory = (void *)aligned_addr;
-    /* 存储原始指针用于释放 */
-
-    /* P2修复：初始化带回指针的slab头部，支持O(1)free查找 */
-    numa_slab_header_t *header = (numa_slab_header_t *)slab->memory;
-    header->magic = SLAB_HEADER_MAGIC;
-    header->class_idx = class_idx;
-    header->slab = slab;
-    header->raw_memory = raw_mem;  /* 存储原始指针用于numa_free */
     
     /* 初始化slab */
     memset(slab->bitmap, 0, sizeof(slab->bitmap));
     /* 使用可用大小（头部后）计算每个slab的对象数 */
-    slab->objects_per_slab = SLAB_USABLE_SIZE / obj_size;
+    size_t usable_size = is_large_slab_class(class_idx) ? LARGE_SLAB_USABLE_SIZE : SLAB_USABLE_SIZE;
+    slab->objects_per_slab = usable_size / obj_size;
     __atomic_store_n(&slab->free_count, slab->objects_per_slab, __ATOMIC_RELEASE);
     slab->next = NULL;
     slab->prev = NULL;  /* P2修复：初始化prev指针 */
@@ -229,9 +296,14 @@ static numa_slab_t *alloc_new_slab(int node, size_t obj_size, int class_idx) {
 /* 释放一个slab */
 static void free_slab(numa_slab_t *slab) {
     if (slab->memory) {
-        /* 从头部获取原始指针并释放2倍大小 */
         numa_slab_header_t *header = (numa_slab_header_t *)slab->memory;
-        numa_free(header->raw_memory, SLAB_SIZE * 2);
+        if (is_large_slab_class(slab->class_idx)) {
+            /* 大 slab：munmap 对齐后的 2MB 区域 */
+            munmap(slab->memory, LARGE_SLAB_SIZE);
+        } else {
+            /* 小 slab：numa_free 原始 2x 对齐区域 */
+            numa_free(header->raw_memory, SLAB_SIZE * 2);
+        }
     }
     free(slab);
 }
@@ -263,7 +335,7 @@ int numa_slab_init(void) {
         for (int j = 0; j < NUMA_POOL_SIZE_CLASSES; j++) {
             numa_slab_class_t *class = &slab_ctx.slab_nodes[i].classes[j];
 
-            /* 初始化所有 24 个大小 class（8B-4KB 统一走 Slab） */
+            /* 初始化所有 33 个大小 class（8B-64KB 统一走 Slab） */
             size_t obj_size = numa_pool_size_classes[j];
 
             class->obj_size = obj_size + 16;  /* 包含PREFIX */
@@ -481,17 +553,25 @@ void numa_slab_free(void *ptr, size_t total_size, int node) {
     if (!slab_ctx.initialized || !ptr) {
         return;
     }
-    
-    /* P2修复：使用页对齐和slab头部实现O(1)slab查找 */
+
+    /* P2修复：使用页对齐和slab头部实现O(1)slab查找
+     * 先尝试小 slab 对齐（64KB），再尝试大 slab 对齐（2MB） */
     uintptr_t ptr_addr = (uintptr_t)ptr;
+
+    /* 先尝试小 slab 对齐 */
     uintptr_t slab_base = ptr_addr & ~((uintptr_t)(SLAB_SIZE - 1));
     numa_slab_header_t *header = (numa_slab_header_t *)slab_base;
-    
-    /* 验证魔数 */
+
     if (header->magic != SLAB_HEADER_MAGIC) {
-        return;
+        /* 小 slab 未命中，尝试大 slab 对齐（2MB） */
+        slab_base = ptr_addr & ~((uintptr_t)(LARGE_SLAB_SIZE - 1));
+        header = (numa_slab_header_t *)slab_base;
+
+        if (header->magic != LARGE_SLAB_HEADER_MAGIC) {
+            return;
+        }
     }
-    
+
     numa_slab_t *slab = header->slab;
     if (!slab || slab->memory != (void *)slab_base) {
         return;
