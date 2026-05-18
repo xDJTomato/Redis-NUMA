@@ -133,11 +133,14 @@ void composite_lru_config_defaults(composite_lru_config_t *cfg) {
     cfg->migrate_hotness_threshold = 3;
     cfg->stability_count           = 3;
     cfg->hot_candidates_size       = 1024;
-    cfg->scan_batch_size           = 500;
+    cfg->scan_batch_size           = 2500;
+    cfg->migration_rate_multiplier = 5;
     cfg->overload_threshold        = 0.8;
     cfg->bandwidth_threshold       = 0.9;
     cfg->pressure_threshold        = 0.7;
     cfg->auto_migrate_enabled      = 1;
+    cfg->access_tracking_enabled   = 1;
+    cfg->locality_stats_enabled    = 0;
     cfg->debug_logging_enabled     = 0;
 }
 
@@ -195,7 +198,10 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
             out->hot_candidates_size = (sz > 0) ? sz : 256;
         } else if (strcmp(k, "scan_batch_size") == 0) {
             uint32_t bs = (uint32_t)atoi(v);
-            out->scan_batch_size = (bs > 0) ? bs : 200;
+            out->scan_batch_size = (bs > 0) ? bs : 2500;
+        } else if (strcmp(k, "migration_rate_multiplier") == 0) {
+            uint32_t m = (uint32_t)atoi(v);
+            out->migration_rate_multiplier = (m > 0) ? m : 5;
         } else if (strcmp(k, "overload_threshold") == 0) {
             out->overload_threshold = atof(v);
         } else if (strcmp(k, "bandwidth_threshold") == 0) {
@@ -204,6 +210,10 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
             out->pressure_threshold = atof(v);
         } else if (strcmp(k, "auto_migrate_enabled") == 0) {
             out->auto_migrate_enabled = atoi(v);
+        } else if (strcmp(k, "access_tracking_enabled") == 0) {
+            out->access_tracking_enabled = atoi(v);
+        } else if (strcmp(k, "locality_stats_enabled") == 0) {
+            out->locality_stats_enabled = atoi(v);
         } else if (strcmp(k, "debug_logging_enabled") == 0) {
             out->debug_logging_enabled = atoi(v);
         } else if (strncmp(k, "max_bandwidth_node", 18) == 0) {
@@ -220,9 +230,9 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
 
     fclose(fp);
     _serverLog(LL_NOTICE,
-        "[Composite LRU] Config loaded: %s (threshold=%d, candidates=%u, scan_batch=%u, auto=%d)",
+        "[Composite LRU] Config loaded: %s (threshold=%d, candidates=%u, scan_batch=%u, multiplier=%u, auto=%d)",
         path, out->migrate_hotness_threshold, out->hot_candidates_size,
-        out->scan_batch_size, out->auto_migrate_enabled);
+        out->scan_batch_size, out->migration_rate_multiplier, out->auto_migrate_enabled);
     return NUMA_STRATEGY_OK;
 }
 
@@ -256,9 +266,10 @@ int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_co
 
     data->config = *cfg;
     _serverLog(LL_NOTICE,
-        "[Composite LRU] Config applied: decay=%us, threshold=%d, pool=%u, batch=%u, auto=%d",
+        "[Composite LRU] Config applied: decay=%us, threshold=%d, pool=%u, batch=%u, multiplier=%u, auto=%d",
         cfg->decay_threshold_sec, cfg->migrate_hotness_threshold,
-        cfg->hot_candidates_size, cfg->scan_batch_size, cfg->auto_migrate_enabled);
+        cfg->hot_candidates_size, cfg->scan_batch_size,
+        cfg->migration_rate_multiplier, cfg->auto_migrate_enabled);
     return NUMA_STRATEGY_OK;
 }
 
@@ -334,6 +345,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
     if (numa_pool_num_nodes() <= 1) return;
 
     composite_lru_data_t *data = strategy->private_data;
+    if (!data->config.access_tracking_enabled) return;
     int current_node = get_current_numa_node();
 
     if (val) {
@@ -367,10 +379,12 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
          * 优化：本地访问且热度已达 MAX 时，跳过 access_count 累加，
          * 仅更新 last_access 供衰减结算使用。 */
         uint8_t is_local = (mem_node == current_node);
-        if (is_local) {
-            data->accesses_local++;
-        } else {
-            data->accesses_remote++;
+        if (data->config.locality_stats_enabled) {
+            if (is_local) {
+                data->accesses_local++;
+            } else {
+                data->accesses_remote++;
+            }
         }
         if (is_local && hotness >= COMPOSITE_LRU_HOTNESS_MAX) {
             uint8_t ac = numa_get_access_count(val);
@@ -637,10 +651,11 @@ int composite_lru_init(numa_strategy_t *strategy) {
     strategy->private_data = data;
 
     _serverLog(LL_NOTICE,
-        "[Composite LRU] Strategy initialized: threshold=%d, candidates_size=%u, scan_batch=%u, auto=%d",
+        "[Composite LRU] Strategy initialized: threshold=%d, candidates_size=%u, scan_batch=%u, multiplier=%u, auto=%d",
         data->config.migrate_hotness_threshold,
         data->config.hot_candidates_size,
         data->config.scan_batch_size,
+        data->config.migration_rate_multiplier,
         data->config.auto_migrate_enabled);
     return NUMA_STRATEGY_OK;
 }
@@ -701,7 +716,10 @@ int composite_lru_execute(numa_strategy_t *strategy) {
     int load_weight = numa_config_get_cached_pressure_weight(main_node);
     if (load_weight < 1) load_weight = 1;
     if (load_weight > 100) load_weight = 100;
-    uint32_t migration_budget = (pool_size * (uint32_t)load_weight + 99) / 100;
+    uint32_t migration_multiplier = data->config.migration_rate_multiplier;
+    if (migration_multiplier < 1) migration_multiplier = 1;
+    if (migration_multiplier > 100) migration_multiplier = 100;
+    uint32_t migration_budget = (pool_size * (uint32_t)load_weight * migration_multiplier + 99) / 100;
     if (migration_budget < 64) migration_budget = 64;
     if (migration_budget > pool_size) migration_budget = pool_size;
 
@@ -795,7 +813,7 @@ int composite_lru_execute(numa_strategy_t *strategy) {
     }
 
     /* ---- 兜底通道：渐进扫描 key_heat_map ---- */
-    uint32_t scan_budget = data->config.scan_batch_size * (uint32_t)load_weight / 100;
+    uint32_t scan_budget = data->config.scan_batch_size * (uint32_t)load_weight * migration_multiplier / 100;
     if (scan_budget < 64) scan_budget = 64;
     composite_lru_scan_once(strategy, scan_budget, NULL, NULL);
 
@@ -845,7 +863,7 @@ static const char* composite_lru_get_description(numa_strategy_t *strategy) {
 }
 
 /* 设置配置参数（兼容旧接口，内部转发到 config 结构体）*/
-static int composite_lru_set_config(numa_strategy_t *strategy,
+int composite_lru_set_config(numa_strategy_t *strategy,
                                     const char *key, const char *value) {
     if (!strategy || !strategy->private_data || !key || !value)
         return NUMA_STRATEGY_EINVAL;
@@ -878,8 +896,17 @@ static int composite_lru_set_config(numa_strategy_t *strategy,
     } else if (strcmp(key, "scan_batch_size") == 0) {
         uint32_t bs = (uint32_t)atoi(value);
         if (bs > 0) data->config.scan_batch_size = bs;
+    } else if (strcmp(key, "migration_rate_multiplier") == 0) {
+        uint32_t m = (uint32_t)atoi(value);
+        if (m > 0) data->config.migration_rate_multiplier = m;
     } else if (strcmp(key, "auto_migrate_enabled") == 0) {
         data->config.auto_migrate_enabled = atoi(value);
+    } else if (strcmp(key, "access_tracking_enabled") == 0) {
+        data->config.access_tracking_enabled = atoi(value);
+    } else if (strcmp(key, "locality_stats_enabled") == 0) {
+        data->config.locality_stats_enabled = atoi(value);
+    } else if (strcmp(key, "debug_logging_enabled") == 0) {
+        data->config.debug_logging_enabled = atoi(value);
     } else {
         return NUMA_STRATEGY_EINVAL;
     }
@@ -889,7 +916,7 @@ static int composite_lru_set_config(numa_strategy_t *strategy,
 }
 
 /* 获取配置参数 */
-static int composite_lru_get_config(numa_strategy_t *strategy,
+int composite_lru_get_config(numa_strategy_t *strategy,
                                     const char *key, char *buf, size_t buf_len) {
     if (!strategy || !strategy->private_data || !key || !buf || buf_len == 0)
         return NUMA_STRATEGY_EINVAL;
@@ -914,8 +941,16 @@ static int composite_lru_get_config(numa_strategy_t *strategy,
         snprintf(buf, buf_len, "%u", data->config.hot_candidates_size);
     } else if (strcmp(key, "scan_batch_size") == 0) {
         snprintf(buf, buf_len, "%u", data->config.scan_batch_size);
+    } else if (strcmp(key, "migration_rate_multiplier") == 0) {
+        snprintf(buf, buf_len, "%u", data->config.migration_rate_multiplier);
     } else if (strcmp(key, "auto_migrate_enabled") == 0) {
         snprintf(buf, buf_len, "%d", data->config.auto_migrate_enabled);
+    } else if (strcmp(key, "access_tracking_enabled") == 0) {
+        snprintf(buf, buf_len, "%d", data->config.access_tracking_enabled);
+    } else if (strcmp(key, "locality_stats_enabled") == 0) {
+        snprintf(buf, buf_len, "%d", data->config.locality_stats_enabled);
+    } else if (strcmp(key, "debug_logging_enabled") == 0) {
+        snprintf(buf, buf_len, "%d", data->config.debug_logging_enabled);
     } else if (strcmp(key, "heat_updates") == 0) {
         snprintf(buf, buf_len, "%llu", (unsigned long long)data->heat_updates);
     } else if (strcmp(key, "migrations_triggered") == 0) {

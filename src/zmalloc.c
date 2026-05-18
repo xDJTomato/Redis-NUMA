@@ -85,7 +85,7 @@ static void init_class_lookup(void);
 /* 初始化NUMA支持：初始化Slab分配器并按距离排序节点 */
 void numa_init(void)
 {
-    /* 初始化 Slab 分配器（统一覆盖 8B-4KB） */
+    /* 初始化 Slab 分配器（统一覆盖 8B-64KB） */
     if (numa_slab_init() != 0) {
         numa_ctx.numa_available = 0;
         return;

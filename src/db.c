@@ -41,6 +41,58 @@ redisAtomic unsigned long long dbset_overwrite_seen_count = 0;
 #ifdef HAVE_NUMA
 #include "numa_strategy_slots.h"
 #include "numa_composite_lru.h"
+#include "zmalloc.h"
+
+static void *numaObjectDataAllocPtr(robj *val) {
+    if (!val || !val->ptr) return NULL;
+
+    if (val->type == OBJ_STRING) {
+        if (val->encoding == OBJ_ENCODING_RAW) return sdsAllocPtr(val->ptr);
+        return NULL;
+    }
+
+    return val->ptr;
+}
+
+static void *numaObjectSampleAllocPtr(robj *val) {
+    if (!val || !val->ptr) return NULL;
+
+    if (val->type == OBJ_STRING) {
+        if (val->encoding == OBJ_ENCODING_RAW) return sdsAllocPtr(val->ptr);
+        return NULL;
+    }
+
+    switch (val->encoding) {
+    case OBJ_ENCODING_ZIPLIST:
+    case OBJ_ENCODING_INTSET:
+    case OBJ_ENCODING_QUICKLIST:
+    case OBJ_ENCODING_SKIPLIST:
+    case OBJ_ENCODING_STREAM:
+        return val->ptr;
+    case OBJ_ENCODING_HT: {
+        dict *d = val->ptr;
+        dictEntry *sample = NULL;
+        for (int t = 0; t <= 1 && !sample; t++) {
+            if (!d->ht[t].table || d->ht[t].used == 0) continue;
+            for (unsigned long i = 0; i < d->ht[t].size && i < 8; i++) {
+                if (d->ht[t].table[i]) { sample = d->ht[t].table[i]; break; }
+            }
+        }
+        if (!sample) return val->ptr;
+        if (val->type == OBJ_HASH) {
+            sds value = dictGetVal(sample);
+            return value ? sdsAllocPtr(value) : val->ptr;
+        }
+        if (val->type == OBJ_SET) {
+            sds member = dictGetKey(sample);
+            return member ? sdsAllocPtr(member) : val->ptr;
+        }
+        return val->ptr;
+    }
+    default:
+        return val->ptr;
+    }
+}
 #endif
 
 #include <signal.h>
@@ -98,32 +150,14 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
         {
             numa_strategy_t *clru = numa_strategy_slot_get(1);
             if (clru && clru->enabled && clru->private_data) {
-                ((composite_lru_data_t *)clru->private_data)->db = db;
-                void *data_ptr = NULL;
-                if (val->encoding == OBJ_ENCODING_RAW && val->ptr) {
-                    data_ptr = sdsAllocPtr(val->ptr);
-                } else if (val->encoding == OBJ_ENCODING_HT && val->ptr) {
-                    dict *d = val->ptr;
-                    dictEntry *sample = NULL;
-                    for (int t = 0; t <= 1 && !sample; t++) {
-                        if (!d->ht[t].table || d->ht[t].used == 0) continue;
-                        for (unsigned long i = 0; i < d->ht[t].size && i < 8; i++) {
-                            if (d->ht[t].table[i]) { sample = d->ht[t].table[i]; break; }
-                        }
-                    }
-                    if (sample) {
-                        sds probe = (val->type == OBJ_HASH)
-                            ? (sds)dictGetVal(sample)
-                            : (sds)dictGetKey(sample);
-                        if (probe) data_ptr = sdsAllocPtr(probe);
-                    }
-                } else if (val->encoding != OBJ_ENCODING_INT &&
-                           val->encoding != OBJ_ENCODING_EMBSTR &&
-                           val->ptr) {
-                    data_ptr = val->ptr;
+                composite_lru_data_t *clru_data = clru->private_data;
+                if (clru_data->config.access_tracking_enabled) {
+                    clru_data->db = db;
+                    void *data_ptr = clru_data->config.locality_stats_enabled ?
+                                     numaObjectSampleAllocPtr(val) : numaObjectDataAllocPtr(val);
+                    composite_lru_record_access(clru, key->ptr, val, data_ptr,
+                                                (uint16_t)(server.lruclock & 0xFFFF));
                 }
-                composite_lru_record_access(clru, key->ptr, val, data_ptr,
-                                            (uint16_t)(server.lruclock & 0xFFFF));
             }
         }
 #endif

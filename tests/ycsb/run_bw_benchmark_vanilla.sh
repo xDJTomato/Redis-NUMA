@@ -54,6 +54,8 @@ WORKLOAD="$SAFE_LINK/tests/ycsb/workloads/workload_bw_saturate"
 REDIS_PORT=6380
 REDIS_HOST="127.0.0.1"
 MAX_MEMORY="8gb"
+VANILLA_CPU_NODE="${VANILLA_CPU_NODE:-0}"
+VANILLA_MEM_NODE="${VANILLA_MEM_NODE:-0}"
 OUTPUT_DIR=""
 RUN_PHASE="all"
 SKIP_FILL=false
@@ -61,11 +63,11 @@ NO_RESTART=false
 
 # Phase 参数（与 CXL 版完全一致）
 PHASE1_RECORDS=1000000
-PHASE1_FIELD_LENGTH=1800
+PHASE1_FIELD_LENGTH=4096
 PHASE1_THREADS=8
 PHASE2_OPS=2000000
 PHASE2_THREADS=64
-PHASE3_OPS=2000000
+PHASE3_OPS=6000000
 PHASE3_THREADS=64
 
 YCSB_TIMEOUT_MS=30000
@@ -232,6 +234,8 @@ save_system_info() {
         echo "=== 测试参数 ==="
         echo "Redis 端口: $REDIS_PORT"
         echo "Redis 最大内存: $MAX_MEMORY"
+        echo "Vanilla CPU node: $VANILLA_CPU_NODE"
+        echo "Vanilla memory node: $VANILLA_MEM_NODE"
         echo "Phase 1 记录数: $PHASE1_RECORDS"
         echo "Phase 1 字段大小: $PHASE1_FIELD_LENGTH bytes"
         echo "Phase 2 操作数: $PHASE2_OPS"
@@ -253,17 +257,26 @@ start_redis() {
     pkill -f "redis-server.*:${REDIS_PORT}" 2>/dev/null || true
     sleep 1
 
-    log "启动 Redis (port=$REDIS_PORT, maxmemory=$MAX_MEMORY)..."
-    "$REDIS_SERVER" \
-        --port "$REDIS_PORT" \
-        --bind "$REDIS_HOST" \
-        --maxmemory "$MAX_MEMORY" \
-        --maxmemory-policy allkeys-lru \
-        --save "" \
-        --appendonly no \
-        --loglevel verbose \
-        --logfile "$OUTPUT_DIR/redis.log" \
+    log "启动 Redis (port=$REDIS_PORT, maxmemory=$MAX_MEMORY, cpu_node=$VANILLA_CPU_NODE, mem_node=$VANILLA_MEM_NODE)..."
+    local redis_cmd=(
+        "$REDIS_SERVER"
+        --port "$REDIS_PORT"
+        --bind "$REDIS_HOST"
+        --maxmemory "$MAX_MEMORY"
+        --maxmemory-policy allkeys-lru
+        --save ""
+        --appendonly no
+        --loglevel verbose
+        --logfile "$OUTPUT_DIR/redis.log"
         --daemonize yes
+    )
+
+    if command -v numactl &>/dev/null; then
+        numactl --cpunodebind="$VANILLA_CPU_NODE" --membind="$VANILLA_MEM_NODE" "${redis_cmd[@]}"
+    else
+        log_warn "numactl 未安装，原版 Redis 将不进行本地内存绑定"
+        "${redis_cmd[@]}"
+    fi
 
     local retries=30
     while [[ $retries -gt 0 ]]; do
@@ -436,6 +449,8 @@ generate_report() {
 
     "$PYTHON" "$VISUALIZE_SCRIPT" \
         --input "$METRICS_CSV" \
+        --label "Vanilla Redis" \
+        --phase-dir "$OUTPUT_DIR" \
         --output "$OUTPUT_DIR/benchmark_report.png" \
         2>&1 || log_warn "可视化失败，请查看 metrics.csv"
 

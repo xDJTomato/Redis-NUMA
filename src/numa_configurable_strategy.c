@@ -79,7 +79,8 @@ static int init_runtime_state(int num_nodes) {
     g_runtime_state.config.enable_cxl_optimization = 1;
     g_runtime_state.config.min_allocation_size = 1024;
     g_runtime_state.config.rebalance_interval_us = 5000000; /* 5秒 */
-    
+    g_runtime_state.config.enabled_nodes_mask = 0;
+
     /* 分配权重数组（权重不需要原子性，仅 WEIGHTED 策略持锁读取） */
     g_runtime_state.config.node_weights = zcalloc(num_nodes * sizeof(int));
     /* 原子计数器数组：元素类型为 redisAtomic int/size_t */
@@ -130,6 +131,46 @@ static int init_runtime_state(int num_nodes) {
     return C_OK;
 }
 
+static int node_enabled(int node, int num_nodes) {
+    uint64_t mask = g_runtime_state.config.enabled_nodes_mask;
+    if (node < 0 || node >= num_nodes) return 0;
+    if (mask == 0) return 1;
+    return (mask & (1ULL << node)) != 0;
+}
+
+static int first_enabled_node(int num_nodes) {
+    for (int i = 0; i < num_nodes && i < 64; i++) {
+        if (node_enabled(i, num_nodes)) return i;
+    }
+    return 0;
+}
+
+static int next_enabled_node(int start, int num_nodes) {
+    if (num_nodes <= 0) return 0;
+    for (int i = 0; i < num_nodes && i < 64; i++) {
+        int node = (start + i) % num_nodes;
+        if (node_enabled(node, num_nodes)) return node;
+    }
+    return 0;
+}
+
+static int count_enabled_nodes(int num_nodes) {
+    int count = 0;
+    for (int i = 0; i < num_nodes && i < 64; i++) {
+        if (node_enabled(i, num_nodes)) count++;
+    }
+    return count ? count : 1;
+}
+
+static int nth_enabled_node(int nth, int num_nodes) {
+    int seen = 0;
+    for (int i = 0; i < num_nodes && i < 64; i++) {
+        if (!node_enabled(i, num_nodes)) continue;
+        if (seen++ == nth) return i;
+    }
+    return first_enabled_node(num_nodes);
+}
+
 /* 选择最佳分配节点。
  * 优化：多数策略不再持 g_config_mutex 全局锁。
  *   - LOCAL_FIRST / INTERLEAVE / ROUND_ROBIN / CXL_OPTIMIZED: 完全无锁
@@ -141,24 +182,24 @@ static int init_runtime_state(int num_nodes) {
 static int select_best_node(size_t size) {
     int strategy_type = g_runtime_state.config.strategy_type;
     int num_nodes     = g_runtime_state.config.num_nodes;
-    int selected_node = 0;
+    int selected_node = first_enabled_node(num_nodes);
 
     switch (strategy_type) {
         case NUMA_STRATEGY_CONFIG_LOCAL_FIRST:
-            selected_node = 0;
+            selected_node = node_enabled(0, num_nodes) ? 0 : first_enabled_node(num_nodes);
             break;
 
         case NUMA_STRATEGY_CONFIG_INTERLEAVE: {
             static __thread unsigned int seed = 0;
             if (seed == 0) seed = getpid() ^ pthread_self();
-            selected_node = rand_r(&seed) % num_nodes;
+            selected_node = nth_enabled_node(rand_r(&seed) % count_enabled_nodes(num_nodes), num_nodes);
             break;
         }
 
         case NUMA_STRATEGY_CONFIG_ROUND_ROBIN: {
             static __thread int rr_index = 0;
-            selected_node = rr_index % num_nodes;
-            rr_index++;
+            selected_node = next_enabled_node(rr_index, num_nodes);
+            rr_index = selected_node + 1;
             break;
         }
 
@@ -167,6 +208,7 @@ static int select_best_node(size_t size) {
             pthread_mutex_lock(&g_config_mutex);
             int total_weight = 0;
             for (int i = 0; i < num_nodes; i++) {
+                if (!node_enabled(i, num_nodes)) continue;
                 if (g_runtime_state.config.node_weights)
                     total_weight += g_runtime_state.config.node_weights[i];
             }
@@ -177,6 +219,7 @@ static int select_best_node(size_t size) {
                 int random_value = rand_r(&seed) % total_weight;
                 int cumulative_weight = 0;
                 for (int i = 0; i < num_nodes; i++) {
+                    if (!node_enabled(i, num_nodes)) continue;
                     if (g_runtime_state.config.node_weights)
                         cumulative_weight += g_runtime_state.config.node_weights[i];
                     if (random_value < cumulative_weight) {
@@ -192,6 +235,7 @@ static int select_best_node(size_t size) {
         case NUMA_STRATEGY_CONFIG_PRESSURE_AWARE: {
             double min_utilization = 1.0;
             for (int i = 0; i < num_nodes; i++) {
+                if (!node_enabled(i, num_nodes)) continue;
                 double utilization = numa_config_get_node_utilization(i);
                 if (utilization < min_utilization) {
                     min_utilization = utilization;
@@ -204,9 +248,9 @@ static int select_best_node(size_t size) {
         case NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED: {
             size_t min_sz = g_runtime_state.config.min_allocation_size;
             if (size < min_sz) {
-                selected_node = 0;
+                selected_node = node_enabled(0, num_nodes) ? 0 : first_enabled_node(num_nodes);
             } else {
-                selected_node = (num_nodes > 1) ? 1 : 0;
+                selected_node = next_enabled_node(1, num_nodes);
             }
             break;
         }
@@ -216,6 +260,10 @@ static int select_best_node(size_t size) {
             int w[16];
             int n = (num_nodes <= 16) ? num_nodes : 16;
             for (int i = 0; i < n; i++) {
+                if (!node_enabled(i, num_nodes)) {
+                    w[i] = 0;
+                    continue;
+                }
                 atomicGet(g_runtime_state.pressure_weights[i], w[i]);
                 total_weight += w[i];
             }
@@ -234,12 +282,16 @@ static int select_best_node(size_t size) {
 
         case NUMA_STRATEGY_CONFIG_ADAPTIVE:
         case NUMA_STRATEGY_CONFIG_LATENCY_AWARE:
-            selected_node = 0;
+            selected_node = first_enabled_node(num_nodes);
             break;
 
         default:
-            selected_node = 0;
+            selected_node = first_enabled_node(num_nodes);
             break;
+    }
+
+    if (!node_enabled(selected_node, num_nodes)) {
+        selected_node = first_enabled_node(num_nodes);
     }
 
     /* 无锁原子更新统计计数器 —— 使用 Redis atomicvar.h API */
@@ -447,6 +499,31 @@ int numa_config_set_node_weights(int *weights, int num_nodes) {
     
     serverLog(LL_NOTICE, "[NUMA Config] Node weights updated");
     return C_OK;
+}
+
+int numa_config_set_enabled_nodes_mask(uint64_t mask) {
+    if (!g_initialized) return C_ERR;
+
+    pthread_mutex_lock(&g_config_mutex);
+    int num_nodes = g_runtime_state.config.num_nodes;
+    uint64_t valid_mask = 0;
+    for (int i = 0; i < num_nodes && i < 64; i++) {
+        valid_mask |= (1ULL << i);
+    }
+    mask &= valid_mask;
+    if (mask == 0) {
+        mask = 0;
+    }
+    g_runtime_state.config.enabled_nodes_mask = mask;
+    pthread_mutex_unlock(&g_config_mutex);
+
+    serverLog(LL_NOTICE, "[NUMA Config] Enabled nodes mask set to 0x%llx", (unsigned long long)mask);
+    return C_OK;
+}
+
+uint64_t numa_config_get_enabled_nodes_mask(void) {
+    if (!g_initialized) return 0;
+    return g_runtime_state.config.enabled_nodes_mask;
 }
 
 /* 启用/禁用CXL优化 */

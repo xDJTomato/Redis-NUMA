@@ -41,8 +41,8 @@
 │  │  │  │ Slot 0: Noop  │  │                             │   │
 │  │  │  │ Slot 1: C-LRU │  │  ┌───────────────────────┐  │   │
 │  │  │  │ Slot 2-15:    │  │  │  NUMA Slab 分配器      │  │   │
-│  │  │  │   自定义扩展   │  │  │  ├─ Slab (≤4KB)      │  │   │
-│  │  │  └───────────────┘  │  │  └─ Direct (>4KB)    │  │   │
+│  │  │  │   自定义扩展   │  │  │  ├─ Slab (≤64KB)     │  │   │
+│  │  │  └───────────────┘  │  │  └─ Direct (>64KB)   │  │   │
 │  │  └─────────────────────┘  └───────────────────────┘  │   │
 │  │                            └───────────────────────┘  │   │
 │  │                                                      │   │
@@ -68,7 +68,7 @@
 
 | 模块 | 文件 | 功能描述 |
 |------|------|---------|
-| **NUMA Slab 分配器** | `numa_pool.c/h` | 节点粒度内存分配，24 级 jemalloc 风格大小 class，Slab（≤4KB）+ Direct（>4KB）两层分配 |
+| **NUMA Slab 分配器** | `numa_pool.c/h` | 节点粒度内存分配，33 级 jemalloc 风格大小 class（8B-64KB），小 Slab（≤4KB）+ 大 Slab（>4KB-64KB）+ Direct（>64KB）三层分配 |
 | **NUMA 内存迁移** | `numa_migrate.c/h` | 块级内存跨节点迁移，统计追踪 |
 | **策略插槽框架** | `numa_strategy_slots.c/h` | 16 个策略插槽，工厂模式，虚函数表，支持动态扩展 |
 | **Composite LRU** | `numa_composite_lru.c/h` | 默认迁移策略，双通道架构（快速通道 + 兜底通道），阶梯式惰性衰减 |
@@ -90,8 +90,8 @@ zmalloc(size) ──────────────────────
     ▼                                       ▼
 检查对象大小                            numa_config_get_best_node(size)
     │                                  (默认 WEIGHTED_INTERLEAVE)
-    ├── ≤ 4KB ───► numa_slab_alloc()       │
-    └── > 4KB ───► numa_alloc_onnode()     │
+    ├── ≤ 64KB ──► numa_slab_alloc()       │
+    └── > 64KB ──► numa_alloc_onnode()     │
                                             │
                                             ▼
                                    分配内存 + 写入 PREFIX

@@ -1,0 +1,31 @@
+# =============================================================================
+# YCSB 渐进并发热点访问压力测试工作负载
+# =============================================================================
+# 用途：10000 * 1MB key 基础负载，按线程数渐进执行热点访问
+# 目标：测量请求处理速度与访问带宽随客户端并发线程数的变化
+# =============================================================================
+
+workload=site.ycsb.workloads.CoreWorkload
+
+recordcount=10000
+operationcount=10000
+threadcount=1
+
+readproportion=0.95
+updateproportion=0.05
+insertproportion=0
+scanproportion=0
+
+requestdistribution=hotspot
+hotspotdatafraction=0.05
+hotspotopnfraction=0.95
+
+fieldcount=1
+fieldlength=1048576
+fieldlengthdistribution=constant
+insertorder=hashed
+
+redis.host=127.0.0.1
+redis.port=6379
+redis.timeout=60000
+redis.database=0

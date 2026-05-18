@@ -36,6 +36,7 @@ typedef struct {
     size_t min_allocation_size;                 /* 最小分配大小 */
     int auto_rebalance;                         /* 是否自动重新平衡 */
     uint64_t rebalance_interval_us;             /* 重新平衡间隔 */
+    uint64_t enabled_nodes_mask;                 /* 可参与自动分配的 NUMA 节点掩码，0=全部 */
 } numa_strategy_config_t;
 
 /* 运行时策略状态 */
@@ -75,6 +76,10 @@ int numa_config_set_strategy(numa_config_strategy_type_t strategy);
 
 /* 设置节点权重 */
 int numa_config_set_node_weights(int *weights, int num_nodes);
+
+/* 设置自动分配节点掩码，mask=0 表示启用全部节点 */
+int numa_config_set_enabled_nodes_mask(uint64_t mask);
+uint64_t numa_config_get_enabled_nodes_mask(void);
 
 /* 启用/禁用CXL优化 */
 int numa_config_set_cxl_optimization(int enable);

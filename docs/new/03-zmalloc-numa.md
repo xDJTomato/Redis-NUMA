@@ -21,7 +21,8 @@ typedef struct {
     uint8_t hotness;       // 1 字节 - 热度级别（0-7）
     uint8_t access_count;  // 1 字节 - 访问计数（循环计数）
     uint16_t last_access;  // 2 字节 - LRU 时钟低 16 位
-    char reserved[2];      // 2 字节 - 保留对齐
+    char migrated;         // 1 字节 - 迁移亲和标记
+    char reserved[1];      // 1 字节 - 保留对齐
 } numa_alloc_prefix_t;     // 总计 16 字节
 ```
 
@@ -29,7 +30,7 @@ typedef struct {
 
 ```mermaid
 graph LR
-    A[内存块开始] --> B[PREFIX 16字节]
+    A[内存块开始] --> B[PREFIX 16 字节]
     B --> C[用户数据]
 
     B --> B1[size 8B]
@@ -38,7 +39,8 @@ graph LR
     B --> B4[hotness 1B]
     B --> B5[access_count 1B]
     B --> B6[last_access 2B]
-    B --> B7[reserved 2B]
+    B --> B7[migrated 1B]
+    B --> B8[reserved 1B]
 
     C --> D[robj / SDS / Dict]
 
@@ -60,15 +62,15 @@ void *zmalloc(size_t size) {
     // 1. 根据当前策略选择目标 NUMA 节点
     int node = numa_config_get_best_node(size);
 
-    // 2. 根据大小选择分配路径
+    // 2. 根据大小选择分配路径（33 级 class，覆盖 8B-64KB）
     void *ptr;
     size_t total_size;
 
     if (should_use_slab(size)) {
-        // Slab 路径（≤4KB）— 24 级 jemalloc 风格，原子 CAS 无锁
+        // Slab 路径（≤64KB）— 33 级 jemalloc 风格，原子 CAS 无锁
         ptr = numa_slab_alloc(size, node, &total_size);
     } else {
-        // Direct 路径（>4KB）
+        // Direct 路径（>64KB）
         ptr = numa_alloc_onnode(size + PREFIX_SIZE, node);
         if (ptr) {
             total_size = size + PREFIX_SIZE;
@@ -84,8 +86,10 @@ void *zmalloc(size_t size) {
         ptr = (char *)ptr + PREFIX_SIZE;
     }
 
-    // 3. 更新统计
+    // 3. 更新统计（包括 used_memory_node）
     update_zmalloc_stat_alloc(total_size);
+    if (node >= 0 && node < ZMALLOC_MAX_NUMA_NODES)
+        atomicIncr(used_memory_node[node], total_size);
 
     return ptr;
 }
@@ -104,8 +108,8 @@ int node = numa_config_get_best_node(size);
 
 | 大小 | 路径 | 函数 | 锁依赖 |
 |------|------|------|--------|
-| ≤ 4KB | Slab | `numa_slab_alloc()` | 原子 CAS（无锁） |
-| > 4KB | Direct | `numa_alloc_onnode()` | 系统调用 |
+| ≤ 64KB | Slab | `numa_slab_alloc()` | 原子 CAS（无锁） |
+| > 64KB | Direct | `numa_alloc_onnode()` | 系统调用 |
 
 ## 释放路径
 
@@ -126,7 +130,7 @@ void zfree(void *ptr) {
     // 3. 根据来源选择释放路径
     if (from_slab) {
         // Slab 路径
-        size_t total_size = get_slab_total_size(size);
+        size_t total_size = prefix->size + PREFIX_SIZE;
         numa_slab_free(ptr, total_size, node_id);
     } else {
         // Direct 路径
@@ -134,8 +138,10 @@ void zfree(void *ptr) {
         numa_free(prefix, total_size);
     }
 
-    // 4. 更新统计
+    // 4. 更新统计（tcache 路径在 drain 时才真正递减）
     update_zmalloc_stat_free(size + PREFIX_SIZE);
+    if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
+        atomicDecr(used_memory_node[node_id], size + PREFIX_SIZE);
 }
 ```
 
@@ -233,7 +239,7 @@ typedef struct {
 } tcache_bin_t;
 
 typedef struct {
-    tcache_bin_t bins[NUMA_POOL_SIZE_CLASSES]; // 24 个 bin
+    tcache_bin_t bins[NUMA_POOL_SIZE_CLASSES]; // 33 个 bin
 } numa_tcache_t;
 
 static __thread numa_tcache_t tls_tcache;
@@ -242,10 +248,10 @@ static __thread int tls_tcache_inited = 0;
 
 ### O(1) Size Class 查找表
 
-替代原来的 O(24) 线性扫描：
+替代原来的 O(33) 线性扫描，扩展为覆盖 0-65536：
 
 ```c
-#define CLASS_LOOKUP_ENTRIES 513   // 覆盖 0..4096，步长 8 字节
+#define CLASS_LOOKUP_ENTRIES 8193   // 覆盖 0..65536，步长 8 字节
 static int g_class_lookup[CLASS_LOOKUP_ENTRIES];
 
 static inline int fast_size_class(size_t size) {
@@ -260,14 +266,12 @@ static inline int fast_size_class(size_t size) {
 
 ```
 numa_alloc_with_size(size):
-  if size <= 4096 AND lookup table ready:
+  if size <= 65536 AND lookup table ready:
     cls = fast_size_class(size)
     if bins[cls].count > 0:
       pop user_ptr from bin            ← O(1)，无锁，无 CAS
       update prefix metadata
-      update_zmalloc_stat_alloc()
-      atomicIncr(used_memory_node[])
-      return user_ptr                  ← 完成，未触碰 slab
+      return user_ptr                  ← 完成，不递增统计（统计在 put 时保留）
   ... 原有 slab/direct 路径不变 ...
 ```
 
@@ -278,9 +282,7 @@ numa_free_with_size(user_ptr):
   if prefix->from_pool AND lookup table ready:
     cls = fast_size_class(prefix->size)
     if bins[cls].count < TCACHE_BIN_MAX:
-      update_zmalloc_stat_free()
-      atomicDecr(used_memory_node[])
-      push user_ptr into bin           ← 完成，未触碰 slab
+      push user_ptr into bin           ← 完成，不递减统计
       return
     else:
       drain TCACHE_DRAIN_COUNT items back to slab
@@ -288,17 +290,28 @@ numa_free_with_size(user_ptr):
   ... 原有 slab/direct 释放路径不变 ...
 ```
 
+### tcache 计数一致性修复（v5.0 关键改进）
+
+**问题**：旧版 tcache put 时立即递减 `used_memory`/`used_memory_node`，但 tcache hit 时递增，导致统计不一致。迁移时修改 `prefix->node_id` 但未同步计数器，导致 `used_memory_node` 出现负值。
+
+**修复**：
+- **tcache put 时**：仅缓存对象，**不递减** `used_memory`/`used_memory_node` 统计
+- **tcache hit 时**：仅返回对象，**不递增** `used_memory`/`used_memory_node` 统计
+- **tcache drain/flush 时**：真正释放到 slab，**此时递减** `used_memory`/`used_memory_node` 统计
+
+**效果**：`used_memory_node` 不再出现负值，统计与 `NUMA CONFIG STATS` 扁平输出一致。
+
 ### 计数器一致性
 
 | 事件 | `used_memory` | `used_memory_node` | `numa_alloc_slab_*` |
 |------|-------------|-------------------|---------------------|
-| 从 tcache 分配 | +total_size | +total_size | 不变 |
-| 释放到 tcache | -total_size | -total_size | 不变 |
-| drain 到 slab | 不变 | 不变 | 不变 |
-| 从 slab 分配（miss） | 原有路径 | 原有路径 | 原有路径 |
-| 释放到 slab（miss） | 原有路径 | 原有路径 | 原有路径 |
+| 从 tcache 分配 | 不变 | 不变 | 不变 |
+| 释放到 tcache | 不变 | 不变 | 不变 |
+| drain 到 slab | -total_size | -total_size | -total_size |
+| 从 slab 分配（miss） | +total_size | +total_size | +total_size |
+| 释放到 slab（miss） | -total_size | -total_size | -total_size |
 
-tcache 中的对象从 Redis 视角已被释放（`used_memory` 已减），但物理上仍占用 slab 槽位。
+tcache 中的对象从 Redis 视角仍在占用内存（`used_memory` 未减），物理上也占用 slab 槽位。
 
 ### 命中率监控
 

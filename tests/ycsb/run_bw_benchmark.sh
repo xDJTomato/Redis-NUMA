@@ -64,11 +64,11 @@ PROCESS_NUMA_NODES="0,2"
 
 # Phase 参数
 PHASE1_RECORDS=1000000
-PHASE1_FIELD_LENGTH=8192
+PHASE1_FIELD_LENGTH=4096
 PHASE1_THREADS=8
 PHASE2_OPS=2000000
 PHASE2_THREADS=64
-PHASE3_OPS=2000000
+PHASE3_OPS=6000000
 PHASE3_THREADS=64
 
 # YCSB 客户端超时（CXL 高延迟环境需要更长超时）
@@ -585,6 +585,8 @@ generate_report() {
 
     "$PYTHON" "$VISUALIZE_SCRIPT" \
         --input "$METRICS_CSV" \
+        --label "Redis-NUMA" \
+        --phase-dir "$OUTPUT_DIR" \
         --output "$OUTPUT_DIR/benchmark_report.png" \
         2>&1 || log_warn "可视化失败，请查看 metrics.csv"
 

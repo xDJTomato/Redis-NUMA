@@ -34,7 +34,7 @@ int numa_slab_init(void);
 /* 清理所有Slab，释放内存 */
 void numa_slab_cleanup(void);
 
-/* 从Slab分配对象（8B-4KB）
+/* 从Slab分配对象（8B-64KB）
  * 返回含PREFIX元数据的指针，失败返回NULL */
 void *numa_slab_alloc(size_t size, int node, size_t *total_size);
 
@@ -43,7 +43,7 @@ void *numa_slab_alloc(size_t size, int node, size_t *total_size);
 void numa_slab_free(void *ptr, size_t total_size, int node);
 
 /* 判断给定大小是否应走Slab路径
- * size ≤ SLAB_MAX_OBJECT_SIZE(4KB) 时返回1，否则返回0 */
+ * size ≤ SLAB_MAX_OBJECT_SIZE(64KB) 时返回1，否则返回0 */
 static inline int should_use_slab(size_t size) {
     return size <= SLAB_MAX_OBJECT_SIZE;
 }

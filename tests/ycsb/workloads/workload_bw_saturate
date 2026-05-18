@@ -29,9 +29,9 @@ scanproportion=0
 requestdistribution=zipfian
 zipfianconstant=0.99
 
-# 数据大小：~1.8KB (走 NUMA Pool 2048 size_class, 避开间隙)
+# 数据大小：4KB value，用于 full test 4KB * 1M keys 负载
 fieldcount=1
-fieldlength=1800
+fieldlength=4096
 
 # Redis 连接
 redis.host=127.0.0.1

@@ -43,11 +43,14 @@ typedef struct {
     uint8_t  migrate_hotness_threshold; /* 触发迁移的热度阈值，默认 5 */
     uint8_t  stability_count;           /* 字典路径稳定性计数阈值，默认 3 */
     uint32_t hot_candidates_size;       /* 候选池环形缓冲区容量，默认 256 */
-    uint32_t scan_batch_size;           /* 每次 serverCron 扫描 key 数，默认 200 */
+    uint32_t scan_batch_size;           /* 每次 serverCron 扫描 key 数，默认 2500 */
+    uint32_t migration_rate_multiplier; /* 基准迁移速率倍数，默认 5 */
     double   overload_threshold;        /* 节点内存过载阈值（0~1），默认 0.8 */
     double   bandwidth_threshold;       /* 带宽饱和阈值（0~1），默认 0.9 */
     double   pressure_threshold;        /* 迁移压力阈值（0~1），默认 0.7 */
     int      auto_migrate_enabled;      /* 1=开启后台自动迁移，0=仅手动触发，默认 1 */
+    int      access_tracking_enabled;   /* 1=开启访问热度/候选统计，0=跳过访问热路径统计 */
+    int      locality_stats_enabled;    /* 1=统计本地/远端访问，0=只维护迁移热度 */
     int      debug_logging_enabled;     /* 1=打印迁移调试日志，0=关闭 */
 } composite_lru_config_t;
 
@@ -130,6 +133,8 @@ void composite_lru_decay_heat(composite_lru_data_t *data);
 /* JSON 配置加载与应用 */
 int  composite_lru_load_config(const char *path, composite_lru_config_t *out);
 int  composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_config_t *cfg);
+int  composite_lru_set_config(numa_strategy_t *strategy, const char *key, const char *value);
+int  composite_lru_get_config(numa_strategy_t *strategy, const char *key, char *buf, size_t buf_len);
 void composite_lru_config_defaults(composite_lru_config_t *cfg);
 
 /* 手动触发一轮渐进扫描（供 NUMAMIGRATE SCAN 调用）*/
