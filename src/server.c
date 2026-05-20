@@ -6500,7 +6500,10 @@ int main(int argc, char **argv) {
     
 #ifdef HAVE_NUMA
     /* 锁定主线程 NUMA 节点，防止后台线程触发迁移乒乓 */
+    int main_thread_numa_node = 0;
+    if (numa_available() >= 0) main_thread_numa_node = numa_node_of_cpu(sched_getcpu());
     composite_lru_set_main_thread();
+    tinylfu_set_main_thread_node(main_thread_numa_node);
 
     /* 初始化NUMA策略插槽框架（必须在 initServer() 之后） */
     printf("DEBUG: 调用numa_strategy_init()\n");

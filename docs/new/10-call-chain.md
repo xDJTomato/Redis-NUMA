@@ -29,9 +29,9 @@
 │  │  │                 │        │   ┌──────────────┐   │         │   │
 │  │  │ ├─ String 适配器│        │   │ Slot 0: Noop │   │         │   │
 │  │  │ ├─ Hash 适配器  │        │   │ Slot 1: C-LRU│◄──┼─────┐   │   │
-│  │  │ ├─ List 适配器  │        │   │ Slot 2-15:   │   │     │   │   │
-│  │  │ ├─ Set 适配器   │        │   │   自定义扩展  │   │     │   │   │
-│  │  │ └─ ZSet 适配器  │        │   └──────────────┘   │     │   │   │
+│  │  │ ├─ List 适配器  │        │   │ Slot 2: TLFU │   │     │   │   │
+│  │  │ ├─ Set 适配器   │        │   │ Slot 3-15:   │   │     │   │   │
+│  │  │ └─ ZSet 适配器  │        │   │   自定义扩展  │   │     │   │   │
 │  │  └────────┬────────┘        └──────────┬───────────┘     │   │   │
 │  │           │                            │                  │   │   │
 │  │           └────────────┬───────────────┘                  │   │   │
@@ -88,7 +88,8 @@ main()
     │     │
     │     ├── numa_strategy_init()                // 初始化策略插槽框架
     │     │     ├── numa_strategy_register_noop()  // 注册 Slot 0
-    │     │     └── numa_composite_lru_register()  // 注册 Slot 1
+    │     │     ├── numa_composite_lru_register()  // 注册 Slot 1
+    │     │     └── numa_tinylfu_register()        // 注册 Slot 2（默认禁用）
     │     │
     │     ├── numa_config_strategy_init()          // 初始化可配置分配策略
     │     │     └── numa_config_set_strategy(WEIGHTED_INTERLEAVE)  // 设为默认
@@ -127,19 +128,29 @@ serverCron()  // 每 100ms 执行一次
     │     │     │
     │     │     └── numa_strategy_run_all()            // 运行所有策略
     │     │             │
-    │     │             └── Slot 1: Composite LRU
+    │     │             ├── Slot 1: Composite LRU（默认启用）
+    │     │             │       │
+    │     │             │       ├── composite_lru_execute()
+    │     │             │       │       │
+    │     │             │       │       ├── 周期衰减
+    │     │             │       │       │
+    │     │             │       │       ├── 快速通道：处理候选池
+    │     │             │       │       │       │
+    │     │             │       │       │       └── numa_migrate_key_by_name()
+    │     │             │       │       │
+    │     │             │       │       └── 兜底通道：渐进扫描
+    │     │             │       │               │
+    │     │             │       │               └── numa_migrate_key_by_name()
+    │     │             │       │
+    │     │             │       └── 更新统计
+    │     │             │
+    │     │             └── Slot 2: TinyLFU（默认禁用，需手动启用）
     │     │                     │
-    │     │                     ├── composite_lru_execute()
+    │     │                     ├── tinylfu_execute()
     │     │                     │       │
-    │     │                     │       ├── 周期衰减
-    │     │                     │       │
-    │     │                     │       ├── 快速通道：处理候选池
-    │     │                     │       │       │
-    │     │                     │       │       └── numa_migrate_key_by_name()
-    │     │                     │       │
-    │     │                     │       └── 兜底通道：渐进扫描
-    │     │                     │               │
-    │     │                     │               └── numa_migrate_key_by_name()
+    │     │                     │       ├── 遍历候选环形缓冲区
+    │     │                     │       ├── 重新估计频率（CMS + Doorkeeper）
+    │     │                     │       └── 频率 ≥ 阈值 → numa_migrate_key_by_name()
     │     │                     │
     │     │                     └── 更新统计
     │     │
@@ -171,33 +182,58 @@ lookupKeyRead(c->db, c->argv[1], flags)
     │             │     composite_lru_data_t *data = clru->private_data;
     │             │     data->db = db;
     │             │
-    │             └── composite_lru_record_access(strategy, key->ptr, val, lru_clock)
-    │                     │                             ↑ SDS string
-    │                     │
-    │                     ├── 1. 读取 PREFIX 热度
-    │                     │     hotness = numa_get_hotness(val)
-    │                     │
-    │                     ├── 2. 计算空闲时间
-    │                     │     idle = now - numa_get_last_access(val)
-    │                     │
-    │                     ├── 3. 阶梯式惰性衰减
-    │                     │     decay = calculate_decay(idle)
-    │                     │     if (hotness > decay) hotness -= decay
-    │                     │     else hotness = 0
-    │                     │
-    │                     ├── 4. 热度 +1
-    │                     │     if (hotness < 7) hotness++
-    │                     │
-    │                     ├── 5. 写回 PREFIX + 同步 key_heat_map
-    │                     │     numa_set_hotness(val, hotness)
-    │                     │     numa_set_last_access(val, lru_clock)
-    │                     │
-    │                     └── 6. 判断是否写入候选池
-    │                           if (首次越过阈值 && Key 在远程节点)
-    │                               sds key_copy = sdsdup(key);  // 创建独立副本
-    │                               hot_candidates[idx].key = key_copy;
-    │                               hot_candidates[idx].val = val;
-    │                               hot_candidates[idx].target_node = current_cpu_node;
+    │             ├── composite_lru_record_access(strategy, key->ptr, val, lru_clock)
+    │             │       │                             ↑ SDS string
+    │             │       │
+    │             │       ├── 1. 读取 PREFIX 热度
+    │             │       │     hotness = numa_get_hotness(val)
+    │             │       │
+    │             │       ├── 2. 计算空闲时间
+    │             │       │     idle = now - numa_get_last_access(val)
+    │             │       │
+    │             │       ├── 3. 阶梯式惰性衰减
+    │             │       │     decay = calculate_decay(idle)
+    │             │       │     if (hotness > decay) hotness -= decay
+    │             │       │     else hotness = 0
+    │             │       │
+    │             │       ├── 4. 热度 +1
+    │             │       │     if (hotness < 7) hotness++
+    │             │       │
+    │             │       ├── 5. 写回 PREFIX + 同步 key_heat_map
+    │             │       │     numa_set_hotness(val, hotness)
+    │             │       │     numa_set_last_access(val, lru_clock)
+    │             │       │
+    │             │       └── 6. 判断是否写入候选池
+    │             │             if (首次越过阈值 && Key 在远程节点)
+    │             │                 sds key_copy = sdsdup(key);
+    │             │                 hot_candidates[idx].key = key_copy;
+    │             │
+    │             └── TinyLFU（Slot 2, 若启用）
+    │                   │
+    │                   ├── 绑定 db 到 TinyLFU（无条件赋值）
+    │                   │     tinylfu_data_t *tlfu_data = tlfu->private_data;
+    │                   │     tlfu_data->db = db;
+    │                   │
+    │                   └── tinylfu_record_access(tlfu, key->ptr, val, data_ptr)
+    │                           │
+    │                           ├── 1. Doorkeeper 检查
+    │                           │     if (!dk_test(&doorkeeper, hash))
+    │                           │         dk_add(&doorkeeper, hash)  // 首次访问
+    │                           │         统计本地/远程访问
+    │                           │
+    │                           ├── 2. CMS 递增（通过 Doorkeeper 后）
+    │                           │     cms_record(&cms, hash)
+    │                           │
+    │                           ├── 3. 频率估计
+    │                           │     freq = cms_estimate(&cms, hash)
+    │                           │
+    │                           ├── 4. 迁移条件检查
+    │                           │     if (freq >= threshold && 数据在远程节点)
+    │                           │         ring_push(key, val, target_node, freq)
+    │                           │
+    │                           └── 5. 全局衰减检查
+    │                                 if (total_ops >= reset_interval)
+    │                                     cms_halve + dk_clear
     │
     └── 返回 Value 给客户端
 ```
@@ -465,11 +501,15 @@ numa_command.c
     │     └── numa_composite_lru.c
     │           └── numa_strategy_slots.c
     │
+    ├── numa_tinylfu.c
+    │     └── numa_strategy_slots.c
+    │
     ├── numa_configurable_strategy.c
     │     └── numaGetNodePressure() (evict.h)
     │
     └── numa_strategy_slots.c
           ├── numa_composite_lru.c
+          ├── numa_tinylfu.c
           └── (自定义策略)
 
 numa_pool.c  (Slab 分配器)
@@ -492,13 +532,17 @@ zmalloc.c
 ### 读路径
 
 ```
-客户端 GET ──► lookupKey ──► composite_lru_record_access() ──► 更新 PREFIX 热度 ──► 可能写入候选池
+客户端 GET ──► lookupKey ──► Slot 1: composite_lru_record_access() ──► 更新 PREFIX 热度 ──► 可能写入候选池
+                          ──► Slot 2: tinylfu_record_access()（若启用）──► Doorkeeper → CMS ──► 可能入队环形缓冲区
 ```
 
 ### 迁移路径
 
 ```
-serverCron ──► Composite LRU ──► 选择候选 Key (SDS name)
+serverCron ──► Slot 1: Composite LRU ──► 选择候选 Key (SDS name)
+    ──► numa_migrate_key_by_name ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
+
+serverCron ──► Slot 2: TinyLFU（若启用）──► 遍历候选环形缓冲区 ──► 重估频率
     ──► numa_migrate_key_by_name ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
 ```
 

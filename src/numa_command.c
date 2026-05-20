@@ -14,6 +14,7 @@
 #include "server.h"
 #include "numa_key_migrate.h"
 #include "numa_composite_lru.h"
+#include "numa_tinylfu.h"
 #include "numa_strategy_slots.h"
 #include "numa_configurable_strategy.h"
 #include "numa_pool.h"
@@ -28,6 +29,11 @@ extern robj *lookupKeyRead(redisDb *db, robj *key);
 /* numa_configurable_strategy 内部接口（原 numa_config_command.c 使用） */
 extern const char *get_strategy_name(numa_config_strategy_type_t strategy);
 extern numa_config_strategy_type_t parse_strategy_name(const char *name);
+
+/* zmalloc.c: 分配路径统计 + direct path 大对象缓存统计 */
+extern void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes, size_t *direct_bytes,
+                                 size_t *slab_count, size_t *pool_count, size_t *direct_count);
+extern void numa_get_direct_cache_stats(size_t *hit, size_t *miss, size_t *evict);
 
 /* ========== NUMA MIGRATE 子域 ========== */
 
@@ -129,7 +135,33 @@ static void numa_cmd_migrate(client *c) {
             acc_remote = d->accesses_remote;
         }
 
-        addReplyArrayLen(c, 22);
+        /* TinyLFU 统计 */
+        uint64_t tlfu_accesses = 0, tlfu_filtered = 0, tlfu_enqueued = 0;
+        uint64_t tlfu_migrated = 0, tlfu_failed = 0, tlfu_resets = 0;
+        uint64_t tlfu_acc_local = 0, tlfu_acc_remote = 0;
+        uint64_t tlfu_acc_node0 = 0, tlfu_acc_node1 = 0, tlfu_acc_node2 = 0, tlfu_acc_node3 = 0;
+        uint64_t tlfu_acc_unknown = 0;
+        int tlfu_enabled = 0;
+        numa_strategy_t *tlfu = numa_strategy_slot_get(2);
+        if (tlfu && tlfu->private_data) {
+            tinylfu_data_t *td = tlfu->private_data;
+            tlfu_enabled = tlfu->enabled;
+            tlfu_accesses = td->stat_accesses;
+            tlfu_filtered = td->stat_doorkeeper_filtered;
+            tlfu_enqueued = td->stat_candidates_enqueued;
+            tlfu_migrated = td->stat_migrations_done;
+            tlfu_failed   = td->stat_migrations_failed;
+            tlfu_resets   = td->stat_resets;
+            tlfu_acc_local  = td->stat_accesses_local;
+            tlfu_acc_remote = td->stat_accesses_remote;
+            tlfu_acc_node0  = td->stat_accesses_node0;
+            tlfu_acc_node1  = td->stat_accesses_node1;
+            tlfu_acc_node2  = td->stat_accesses_node2;
+            tlfu_acc_node3  = td->stat_accesses_node3;
+            tlfu_acc_unknown = td->stat_accesses_unknown;
+        }
+
+        addReplyArrayLen(c, 50);
         addReplyBulkCString(c, "total_migrations");
         addReplyLongLong(c, stats.total_migrations);
         addReplyBulkCString(c, "successful_migrations");
@@ -161,6 +193,34 @@ static void numa_cmd_migrate(client *c) {
             addReplyBulkCString(c, "dbset_overwrite_seen");
             addReplyLongLong(c, sc);
         }
+        addReplyBulkCString(c, "tinylfu_enabled");
+        addReplyLongLong(c, tlfu_enabled);
+        addReplyBulkCString(c, "tinylfu_accesses");
+        addReplyLongLong(c, tlfu_accesses);
+        addReplyBulkCString(c, "tinylfu_doorkeeper_filtered");
+        addReplyLongLong(c, tlfu_filtered);
+        addReplyBulkCString(c, "tinylfu_candidates_enqueued");
+        addReplyLongLong(c, tlfu_enqueued);
+        addReplyBulkCString(c, "tinylfu_migrations_done");
+        addReplyLongLong(c, tlfu_migrated);
+        addReplyBulkCString(c, "tinylfu_migrations_failed");
+        addReplyLongLong(c, tlfu_failed);
+        addReplyBulkCString(c, "tinylfu_resets");
+        addReplyLongLong(c, tlfu_resets);
+        addReplyBulkCString(c, "tinylfu_accesses_local");
+        addReplyLongLong(c, tlfu_acc_local);
+        addReplyBulkCString(c, "tinylfu_accesses_remote");
+        addReplyLongLong(c, tlfu_acc_remote);
+        addReplyBulkCString(c, "tinylfu_accesses_node0");
+        addReplyLongLong(c, tlfu_acc_node0);
+        addReplyBulkCString(c, "tinylfu_accesses_node1");
+        addReplyLongLong(c, tlfu_acc_node1);
+        addReplyBulkCString(c, "tinylfu_accesses_node2");
+        addReplyLongLong(c, tlfu_acc_node2);
+        addReplyBulkCString(c, "tinylfu_accesses_node3");
+        addReplyLongLong(c, tlfu_acc_node3);
+        addReplyBulkCString(c, "tinylfu_accesses_unknown");
+        addReplyLongLong(c, tlfu_acc_unknown);
         return;
     }
 
@@ -564,8 +624,8 @@ static void numa_cmd_config(client *c) {
         }
         numa_config_get_statistics(allocs, bytes, cfg->num_nodes);
 
-        /* 扁平 key-value 输出：每节点 3 个字段 + 4 个路径统计 = 3*num_nodes + 4 */
-        int total_fields = cfg->num_nodes * 3 + 4;
+        /* 扁平 key-value 输出：每节点 3 个字段 + 4 个路径统计 + 3 个 direct cache 统计 = 3*num_nodes + 7 */
+        int total_fields = cfg->num_nodes * 3 + 7;
         addReplyArrayLen(c, total_fields * 2);
 
         for (int i = 0; i < cfg->num_nodes; i++) {
@@ -599,6 +659,16 @@ static void numa_cmd_config(client *c) {
         addReplyLongLong(c, slab_count);
         addReplyBulkCString(c, "alloc_direct_count");
         addReplyLongLong(c, direct_count);
+
+        /* Direct path 大对象缓存统计 */
+        size_t dc_hit, dc_miss, dc_evict;
+        numa_get_direct_cache_stats(&dc_hit, &dc_miss, &dc_evict);
+        addReplyBulkCString(c, "direct_cache_hit");
+        addReplyLongLong(c, dc_hit);
+        addReplyBulkCString(c, "direct_cache_miss");
+        addReplyLongLong(c, dc_miss);
+        addReplyBulkCString(c, "direct_cache_evict");
+        addReplyLongLong(c, dc_evict);
         return;
     }
 
@@ -609,6 +679,8 @@ static void numa_cmd_config(client *c) {
 
 /*
  * NUMA STRATEGY SLOT <slot_id> <strategy_name>  -- 向插槽插入策略
+ * NUMA STRATEGY SLOT ENABLE <slot_id>           -- 启用插槽
+ * NUMA STRATEGY SLOT DISABLE <slot_id>          -- 禁用插槽
  * NUMA STRATEGY LIST                             -- 列出所有插槽状态
  */
 static void numa_cmd_strategy(client *c) {
@@ -619,8 +691,50 @@ static void numa_cmd_strategy(client *c) {
 
     const char *sub = c->argv[2]->ptr;
 
-    /* NUMA STRATEGY SLOT <id> <name> */
+    /* NUMA STRATEGY SLOT ... */
     if (!strcasecmp(sub, "SLOT")) {
+        if (c->argc < 4) {
+            addReplyError(c, "Usage: NUMA STRATEGY SLOT <ENABLE|DISABLE|slot_id> ...");
+            return;
+        }
+
+        const char *arg3 = c->argv[3]->ptr;
+
+        /* NUMA STRATEGY SLOT ENABLE <slot_id> */
+        if (!strcasecmp(arg3, "ENABLE")) {
+            if (c->argc != 5) {
+                addReplyError(c, "Usage: NUMA STRATEGY SLOT ENABLE <slot_id>");
+                return;
+            }
+            long slot_id;
+            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
+                return;
+            int ret = numa_strategy_slot_enable((int)slot_id);
+            if (ret == NUMA_STRATEGY_OK)
+                addReplyStatus(c, "OK");
+            else
+                addReplyErrorFormat(c, "Failed to enable slot %ld (err=%d)", slot_id, ret);
+            return;
+        }
+
+        /* NUMA STRATEGY SLOT DISABLE <slot_id> */
+        if (!strcasecmp(arg3, "DISABLE")) {
+            if (c->argc != 5) {
+                addReplyError(c, "Usage: NUMA STRATEGY SLOT DISABLE <slot_id>");
+                return;
+            }
+            long slot_id;
+            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
+                return;
+            int ret = numa_strategy_slot_disable((int)slot_id);
+            if (ret == NUMA_STRATEGY_OK)
+                addReplyStatus(c, "OK");
+            else
+                addReplyErrorFormat(c, "Failed to disable slot %ld (err=%d)", slot_id, ret);
+            return;
+        }
+
+        /* NUMA STRATEGY SLOT <id> <name> — 向插槽插入策略 */
         if (c->argc != 5) {
             addReplyError(c, "Usage: NUMA STRATEGY SLOT <slot_id> <strategy_name>");
             return;
@@ -655,7 +769,7 @@ static void numa_cmd_strategy(client *c) {
 /* ========== NUMA HELP ========== */
 
 static void numa_cmd_help(client *c) {
-    addReplyArrayLen(c, 21);
+    addReplyArrayLen(c, 23);
     /* MIGRATE */
     addReplyBulkCString(c, "NUMA MIGRATE KEY <key> <node>      - Migrate a key to target NUMA node");
     addReplyBulkCString(c, "NUMA MIGRATE DB <node>             - Migrate entire database to target NUMA node");
@@ -678,6 +792,8 @@ static void numa_cmd_help(client *c) {
     addReplyBulkCString(c, "NUMA CONFIG STATS                  - Show per-node allocation statistics");
     /* STRATEGY */
     addReplyBulkCString(c, "NUMA STRATEGY SLOT <id> <name>     - Insert strategy into slot");
+    addReplyBulkCString(c, "NUMA STRATEGY SLOT ENABLE <id>     - Enable a strategy slot");
+    addReplyBulkCString(c, "NUMA STRATEGY SLOT DISABLE <id>    - Disable a strategy slot");
     addReplyBulkCString(c, "NUMA STRATEGY LIST                 - List all registered strategy slots");
     /* HELP */
     addReplyBulkCString(c, "NUMA HELP                          - Show this help message");

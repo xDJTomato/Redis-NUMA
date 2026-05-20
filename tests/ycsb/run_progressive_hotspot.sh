@@ -49,8 +49,8 @@ RECORD_COUNT=1000000
 FIELD_LENGTH=4096
 FIELD_COUNT=1
 OPERATION_COUNT=100000
-READ_PROPORTION="0.95"
-UPDATE_PROPORTION="0.05"
+READ_PROPORTION="0.5"
+UPDATE_PROPORTION="0.5"
 HOTSPOT_DATA_FRACTION="0.05"
 HOTSPOT_OPN_FRACTION="0.95"
 YCSB_TIMEOUT_MS=60000
@@ -58,8 +58,10 @@ ENABLE_LOCALITY_STATS=true
 ENABLE_ACCESS_TRACKING=true
 ENABLE_AUTO_MIGRATE=true
 NUMA_STRATEGY="interleaved"
+ENABLE_TINYLFU=false
 VANILLA_CPU_NODE="${VANILLA_CPU_NODE:-0}"
 VANILLA_MEM_NODE="${VANILLA_MEM_NODE:-0}"
+VANILLA_MEM_POLICY="${VANILLA_MEM_POLICY:-bind}"
 
 SUMMARY_CSV=""
 
@@ -86,9 +88,10 @@ usage() {
   --fieldlength BYTES      value 大小 (默认: 4096，即 4KB)
   --ops N                  每个线程点的 YCSB 操作数 (默认: 100000)
   --read-only              只读热点访问 (read=1.0, update=0)，用于纯访问带宽测试
-  --read-proportion P      读比例 (默认: 0.95)
-  --update-proportion P    更新比例 (默认: 0.05)
+  --read-proportion P      读比例 (默认: 0.5)
+  --update-proportion P    更新比例 (默认: 0.5)
   --numa-strategy NAME     NUMA 分配策略 (默认: cxl_optimized)
+  --tinylfu                启用 TinyLFU 策略 (Slot 2) 并禁用 Composite LRU (Slot 1)
   --no-locality-stats      禁用 NUMA 本地/远端访问计数
   --no-access-tracking     禁用 Composite LRU 访问热路径统计
   --no-auto-migrate        禁用 Composite LRU 后台自动迁移
@@ -97,6 +100,7 @@ usage() {
   --process-nodes NODES    Redis-NUMA 进程 NUMA 节点 (默认: 0,2；传 all 禁用绑定)
   --vanilla-cpu-node NODE   Vanilla Redis CPU 绑定节点 (默认: 0)
   --vanilla-mem-node NODE   Vanilla Redis 内存绑定节点 (默认: 0)
+  --vanilla-mem-policy P    bind 或 interleave (默认: bind)
   --host HOST              Redis host (默认: 127.0.0.1)
   --help                   显示帮助
 
@@ -124,6 +128,7 @@ parse_args() {
             --read-proportion) READ_PROPORTION="$2"; shift 2 ;;
             --update-proportion) UPDATE_PROPORTION="$2"; shift 2 ;;
             --numa-strategy) NUMA_STRATEGY="$2"; shift 2 ;;
+            --tinylfu) ENABLE_TINYLFU=true; shift ;;
             --no-locality-stats) ENABLE_LOCALITY_STATS=false; shift ;;
             --no-access-tracking) ENABLE_ACCESS_TRACKING=false; shift ;;
             --no-auto-migrate) ENABLE_AUTO_MIGRATE=false; shift ;;
@@ -132,6 +137,7 @@ parse_args() {
             --process-nodes) PROCESS_NUMA_NODES="$2"; shift 2 ;;
             --vanilla-cpu-node) VANILLA_CPU_NODE="$2"; shift 2 ;;
             --vanilla-mem-node) VANILLA_MEM_NODE="$2"; shift 2 ;;
+            --vanilla-mem-policy) VANILLA_MEM_POLICY="$2"; shift 2 ;;
             --host) REDIS_HOST="$2"; shift 2 ;;
             --locality-stats) ENABLE_LOCALITY_STATS=true; shift ;;
             --help|-h) usage ;;
@@ -181,7 +187,7 @@ save_system_info() {
             echo "Vanilla CPU node: $VANILLA_CPU_NODE"
             echo "Vanilla memory node: $VANILLA_MEM_NODE"
         fi
-        echo "NUMA 消融开关: locality_stats=$ENABLE_LOCALITY_STATS access_tracking=$ENABLE_ACCESS_TRACKING auto_migrate=$ENABLE_AUTO_MIGRATE"
+        echo "NUMA 消融开关: locality_stats=$ENABLE_LOCALITY_STATS access_tracking=$ENABLE_ACCESS_TRACKING auto_migrate=$ENABLE_AUTO_MIGRATE tinylfu=$ENABLE_TINYLFU"
         echo "热点分布: data=$HOTSPOT_DATA_FRACTION operations=$HOTSPOT_OPN_FRACTION"
         echo ""
         echo "=== 内核 ==="
@@ -231,8 +237,13 @@ start_redis() {
                 log "绑定 Redis-NUMA 进程 CPU 和内存到 NUMA Node $PROCESS_NUMA_NODES"
             fi
         elif [[ "$REDIS_VARIANT" == "vanilla" ]]; then
-            numa_cmd=(numactl --cpunodebind="$VANILLA_CPU_NODE" --membind="$VANILLA_MEM_NODE")
-            log "绑定 Vanilla Redis 进程 CPU 到 NUMA Node $VANILLA_CPU_NODE，内存到 NUMA Node $VANILLA_MEM_NODE"
+            if [[ "$VANILLA_MEM_POLICY" == "interleave" ]]; then
+                numa_cmd=(numactl --cpunodebind="$VANILLA_CPU_NODE" --interleave="$VANILLA_MEM_NODE")
+                log "绑定 Vanilla Redis CPU 到 Node $VANILLA_CPU_NODE，内存 interleave 到 Node $VANILLA_MEM_NODE"
+            else
+                numa_cmd=(numactl --cpunodebind="$VANILLA_CPU_NODE" --membind="$VANILLA_MEM_NODE")
+                log "绑定 Vanilla Redis 进程 CPU 到 NUMA Node $VANILLA_CPU_NODE，内存到 NUMA Node $VANILLA_MEM_NODE"
+            fi
         fi
     elif [[ "$REDIS_VARIANT" == "vanilla" ]]; then
         log_warn "numactl 未安装，Vanilla Redis 将不进行本地内存绑定"
@@ -276,6 +287,12 @@ init_numa() {
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET access_tracking "$([[ "$ENABLE_ACCESS_TRACKING" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET auto_migrate_enabled "$([[ "$ENABLE_AUTO_MIGRATE" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET strategy "$NUMA_STRATEGY" >/dev/null 2>&1 || true
+
+    if [[ "$ENABLE_TINYLFU" == true ]]; then
+        log "切换到 TinyLFU 策略: 禁用 Slot 1 (Composite LRU), 启用 Slot 2 (TinyLFU)"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT DISABLE 1 >/dev/null 2>&1 || true
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT ENABLE 2 >/dev/null 2>&1 || true
+    fi
 }
 
 run_load() {
@@ -339,8 +356,15 @@ collect_remote_pct() {
     [[ "$REDIS_VARIANT" == "numa" ]] || { echo "0"; return; }
     local stats acc_local acc_remote total
     stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" --raw NUMA MIGRATE STATS 2>/dev/null || echo "")
-    acc_local=$(awk '/^accesses_local$/ {getline; print; exit}' <<< "$stats")
-    acc_remote=$(awk '/^accesses_remote$/ {getline; print; exit}' <<< "$stats")
+    # 检查 TinyLFU 是否启用：启用时直接使用 TinyLFU 计数器
+    local tlfu_on=$(awk '/^tinylfu_enabled$/ {getline; print; exit}' <<< "$stats")
+    if [[ "${tlfu_on:-0}" -eq 1 ]]; then
+        acc_local=$(awk '/^tinylfu_accesses_local$/ {getline; print; exit}' <<< "$stats")
+        acc_remote=$(awk '/^tinylfu_accesses_remote$/ {getline; print; exit}' <<< "$stats")
+    else
+        acc_local=$(awk '/^accesses_local$/ {getline; print; exit}' <<< "$stats")
+        acc_remote=$(awk '/^accesses_remote$/ {getline; print; exit}' <<< "$stats")
+    fi
     [[ -z "$acc_local" ]] && acc_local=0
     [[ -z "$acc_remote" ]] && acc_remote=0
     total=$((acc_local + acc_remote))

@@ -5,6 +5,7 @@
 
 #include "numa_strategy_slots.h"
 #include "numa_composite_lru.h"
+#include "numa_tinylfu.h"
 #include "zmalloc.h"
 #include <string.h>
 #include <sys/time.h>
@@ -195,6 +196,11 @@ int numa_strategy_register_composite_lru(void) {
     return numa_composite_lru_register();
 }
 
+/* 注册2号策略（转发到tinylfu模块） */
+int numa_strategy_register_tinylfu(void) {
+    return numa_tinylfu_register();
+}
+
 /* ========== 策略管理器实现 ========== */
 
 /* 初始化策略管理器 */
@@ -231,9 +237,22 @@ int numa_strategy_init(void) {
         }
     }
     
+    /* 注册内置的2号策略（TinyLFU） */
+    if (numa_tinylfu_register() != NUMA_STRATEGY_OK) {
+        STRATEGY_LOG(LL_WARNING, "[NUMA Strategy] Failed to register tinylfu strategy");
+    } else {
+        if (numa_strategy_slot_insert(2, "tinylfu") != NUMA_STRATEGY_OK) {
+            STRATEGY_LOG(LL_WARNING, "[NUMA Strategy] Failed to insert tinylfu to slot 2");
+        } else {
+            /* 默认禁用 slot 2, 用户需手动启用 */
+            numa_strategy_slot_disable(2);
+            STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] TinyLFU strategy inserted to slot 2 (disabled by default)");
+        }
+    }
+
     strategy_manager.initialized = 1;
-    STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Strategy slot framework initialized (slots 0,1 ready)");
-    
+    STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Strategy slot framework initialized (slots 0,1,2 ready)");
+
     return NUMA_STRATEGY_OK;
 }
 

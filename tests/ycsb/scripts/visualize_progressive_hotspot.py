@@ -42,119 +42,135 @@ def parse_csv(path, label):
     return rows
 
 
-def plot(datasets, output_path, title=None, dpi=150):
+PALETTE = {
+    "Redis-NUMA (Composite LRU)": "#1565C0",
+    "Redis-NUMA (TinyLFU)": "#D32F2F",
+    "Redis-NUMA": "#1565C0",
+    "Vanilla Redis": "#2E7D32",
+    "Vanilla Redis (local memory)": "#2E7D32",
+    "Vanilla Redis (local)": "#2E7D32",
+    "Vanilla Redis (remote)": "#666666",
+    "Vanilla Redis (interleaved)": "#7B1FA2",
+    "NUMA": "#1565C0",
+    "Vanilla": "#2E7D32",
+}
+FALLBACK = ["#1565C0", "#D32F2F", "#2E7D32", "#7B1FA2", "#F57C00", "#666666"]
+
+
+def color_for(label, index):
+    return PALETTE.get(label, FALLBACK[index % len(FALLBACK)])
+
+
+def save_fig(fig, path, dpi):
+    try:
+        fig.savefig(path, dpi=dpi, facecolor="white", edgecolor="none",
+                    bbox_inches="tight", pad_inches=0.08)
+        w, h = fig.get_size_inches()
+        print(f"  Saved: {path} ({int(w*dpi)}x{int(h*dpi)}px)")
+        return True
+    except Exception as exc:
+        print(f"  ERROR saving {path}: {exc}")
+        return False
+
+
+def setup_xaxis(ax, all_threads):
+    max_threads = max(all_threads) if all_threads else 0
+    ax.set_xlim(0, max_threads)
+    ax.set_xlabel("YCSB Client Threads", fontsize=9)
+    ax.grid(True, alpha=0.3, linestyle="--")
+
+
+def plot_throughput(datasets, all_threads, output_path, title, dpi):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator
 
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    for idx, (label, rows) in enumerate(datasets):
+        threads = [r["threads"] for r in rows]
+        values = [r["throughput_ops_sec"] for r in rows]
+        ax.plot(threads, values, marker="o", linewidth=1.6, markersize=4,
+                color=color_for(label, idx), label=label)
+    ax.set_ylabel("Throughput (ops/s)", fontsize=9)
+    ax.set_title(title or "(a) Throughput Scalability vs. Thread Count", fontsize=10)
+    ax.set_ylim(bottom=0)
+    setup_xaxis(ax, all_threads)
+    ax.legend(fontsize=8, loc="best", frameon=True)
+    ax.tick_params(labelsize=7)
+    fig.tight_layout()
+    ok = save_fig(fig, output_path, dpi)
+    plt.close(fig)
+    return ok
+
+
+def plot_latency(datasets, all_threads, output_path, dpi):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    styles = [
+        ("read_avg_us", "Avg", "-", "o"),
+        ("read_p99_us", "P99", ":", "^"),
+    ]
+
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    for idx, (label, rows) in enumerate(datasets):
+        threads = [r["threads"] for r in rows]
+        color = color_for(label, idx)
+        for key, suffix, ls, marker in styles:
+            ax.plot(threads, [r[key] for r in rows], marker=marker, linewidth=1.1,
+                    markersize=3.5, linestyle=ls, color=color,
+                    label=f"{label} {suffix}")
+    ax.set_ylabel("Latency (µs)", fontsize=9)
+    ax.set_title("(b) Read Latency vs. Thread Count (Avg / P99)", fontsize=10)
+    ax.set_ylim(bottom=0)
+    setup_xaxis(ax, all_threads)
+    ax.legend(fontsize=7, loc="best", ncol=2, frameon=True)
+    ax.tick_params(labelsize=7)
+    fig.tight_layout()
+    ok = save_fig(fig, output_path, dpi)
+    plt.close(fig)
+    return ok
+
+
+def plot(datasets, output_path, title=None, dpi=150):
     datasets = [(label, rows) for label, rows in datasets if rows]
     if not datasets:
         print("ERROR: No rows to plot")
         return False
 
-    palette = {
-        "Redis-NUMA": "#1565C0",
-        "Vanilla Redis": "#D32F2F",
-        "Vanilla Redis (local memory)": "#D32F2F",
-        "NUMA": "#1565C0",
-        "Vanilla": "#D32F2F",
-    }
-    fallback = ["#1565C0", "#D32F2F", "#388E3C", "#F57C00", "#7B1FA2"]
-
-    def color_for(label, index):
-        return palette.get(label, fallback[index % len(fallback)])
-
-    def output_variant(suffix):
-        root, ext = os.path.splitext(output_path)
-        return f"{root}_{suffix}{ext or '.png'}"
-
     all_threads = sorted({r["threads"] for _, rows in datasets for r in rows})
-    max_threads = max(all_threads) if all_threads else 0
-    major_ticks = [0]
-    major_ticks.extend(t for t in all_threads if t % 32 == 0)
-    if max_threads and max_threads not in major_ticks:
-        major_ticks.append(max_threads)
-    major_ticks = sorted(set(major_ticks))
+    base, ext = os.path.splitext(output_path)
+    if not ext:
+        ext = ".png"
 
-    def style_axis(ax):
-        ax.set_xlim(0, max_threads)
-        ax.set_xticks(major_ticks)
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=6, integer=True))
-        ax.grid(True, alpha=0.28, linestyle="--", linewidth=0.7)
-        ax.tick_params(labelsize=9)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
+    ok = True
+    ok &= plot_throughput(datasets, all_threads, f"{base}_throughput{ext}", title, dpi)
+    ok &= plot_latency(datasets, all_threads, f"{base}_latency{ext}", dpi)
 
-    throughput_path = output_variant("throughput")
-    latency_path = output_variant("latency")
-
-    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.2))
-    ax.set_title(title or "Throughput under Progressive Hotspot Concurrency", fontsize=12, fontweight="bold")
-    for index, (label, rows) in enumerate(datasets):
-        threads = [r["threads"] for r in rows]
-        values = [r["throughput_ops_sec"] for r in rows]
-        color = color_for(label, index)
-        ax.plot(threads, values, marker="o", linewidth=1.8, markersize=4.0,
-                color=color, label=label)
-    ax.set_xlabel("YCSB client threads", fontsize=10)
-    ax.set_ylabel("Throughput (ops/s)", fontsize=10)
-    ax.set_ylim(bottom=0)
-    style_axis(ax)
-    ax.legend(fontsize=9, loc="best", frameon=True)
-    fig.subplots_adjust(left=0.12, right=0.90, top=0.86, bottom=0.16)
-
+    # compatibility copy: main output = throughput
     try:
-        plt.savefig(throughput_path, dpi=dpi, facecolor="white", edgecolor="none", bbox_inches="tight", pad_inches=0.08)
-        plt.savefig(output_path, dpi=dpi, facecolor="white", edgecolor="none", bbox_inches="tight", pad_inches=0.08)
-        w, h = fig.get_size_inches()
-        print(f"Throughput figure saved: {throughput_path} ({int(w*dpi)}x{int(h*dpi)}px @ {dpi} DPI)")
-        print(f"Compatibility copy saved: {output_path}")
-    except Exception as exc:
-        print(f"ERROR: Failed to save throughput figure: {exc}")
-        plt.close(fig)
-        return False
-    finally:
-        plt.close(fig)
+        import shutil
+        shutil.copy2(f"{base}_throughput{ext}", output_path)
+        print(f"  Compatibility copy: {output_path}")
+    except Exception:
+        pass
 
-    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.2))
-    ax.set_title("Read Latency under Progressive Hotspot Concurrency", fontsize=12, fontweight="bold")
-    for index, (label, rows) in enumerate(datasets):
-        threads = [r["threads"] for r in rows]
-        avg = [r["read_avg_us"] for r in rows]
-        p99 = [r["read_p99_us"] for r in rows]
-        color = color_for(label, index)
-        ax.plot(threads, avg, marker="o", linewidth=1.8, markersize=4.0,
-                color=color, label=f"{label} average")
-        ax.plot(threads, p99, marker="s", linewidth=1.4, markersize=3.5,
-                linestyle="--", color=color, alpha=0.78, label=f"{label} p99")
-    ax.set_xlabel("YCSB client threads", fontsize=10)
-    ax.set_ylabel("Read latency (µs)", fontsize=10)
-    ax.set_ylim(bottom=0)
-    style_axis(ax)
-    ax.legend(fontsize=8, loc="best", frameon=True, ncol=1)
-    fig.subplots_adjust(left=0.12, right=0.90, top=0.86, bottom=0.16)
-
-    try:
-        plt.savefig(latency_path, dpi=dpi, facecolor="white", edgecolor="none", bbox_inches="tight", pad_inches=0.08)
-        w, h = fig.get_size_inches()
-        print(f"Latency figure saved: {latency_path} ({int(w*dpi)}x{int(h*dpi)}px @ {dpi} DPI)")
-    except Exception as exc:
-        print(f"ERROR: Failed to save latency figure: {exc}")
-        return False
-    finally:
-        plt.close(fig)
-
-    return True
+    print(f"Done. Output base: {base}_*{ext}")
+    return ok
 
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize progressive YCSB hotspot benchmark")
     parser.add_argument("--input", "-i", required=True, help="progressive_summary.csv")
     parser.add_argument("--output", "-o", required=True, help="output PNG")
-    parser.add_argument("--label", default="Redis-NUMA", help="label for primary input")
+    parser.add_argument("--label", default="Redis-NUMA (Composite LRU)", help="label for primary input")
     parser.add_argument("--compare-input", help="second progressive_summary.csv")
     parser.add_argument("--compare-label", default="Vanilla Redis", help="label for compare input")
+    parser.add_argument("--compare-input2", help="third progressive_summary.csv")
+    parser.add_argument("--compare-label2", default="Vanilla Redis (interleaved)", help="label for third input")
+    parser.add_argument("--compare-input3", help="fourth progressive_summary.csv")
+    parser.add_argument("--compare-label3", default="Vanilla Redis (remote)", help="label for fourth input")
     parser.add_argument("--title", default=None, help="figure title")
     parser.add_argument("--dpi", type=int, default=150, help="DPI (default: 150)")
     args = parser.parse_args()
@@ -175,6 +191,24 @@ def main():
         datasets.append((args.compare_label, compare_rows))
         print(f"Parsing: {args.compare_input}")
         print(f"  {len(compare_rows)} thread points: {[r['threads'] for r in compare_rows]}")
+
+    if args.compare_input2:
+        if not os.path.exists(args.compare_input2):
+            print(f"ERROR: File not found: {args.compare_input2}")
+            sys.exit(1)
+        compare_rows2 = parse_csv(args.compare_input2, args.compare_label2)
+        datasets.append((args.compare_label2, compare_rows2))
+        print(f"Parsing: {args.compare_input2}")
+        print(f"  {len(compare_rows2)} thread points: {[r['threads'] for r in compare_rows2]}")
+
+    if args.compare_input3:
+        if not os.path.exists(args.compare_input3):
+            print(f"ERROR: File not found: {args.compare_input3}")
+            sys.exit(1)
+        compare_rows3 = parse_csv(args.compare_input3, args.compare_label3)
+        datasets.append((args.compare_label3, compare_rows3))
+        print(f"Parsing: {args.compare_input3}")
+        print(f"  {len(compare_rows3)} thread points: {[r['threads'] for r in compare_rows3]}")
 
     ok = plot(datasets, args.output, args.title, args.dpi)
     sys.exit(0 if ok else 1)

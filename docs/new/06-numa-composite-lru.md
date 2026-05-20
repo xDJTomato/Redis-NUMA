@@ -67,7 +67,8 @@ typedef struct {
     uint8_t  migrate_hotness_threshold; // 触发迁移的热度阈值，默认 3（v3.0 为 5）
     uint8_t  stability_count;           // 字典路径稳定性计数阈值，默认 3
     uint32_t hot_candidates_size;       // 候选池容量，默认 1024（v3.0 为 256）
-    uint32_t scan_batch_size;           // 每次扫描 Key 数，默认 500（v3.0 为 200）
+    uint32_t scan_batch_size;           // 每次扫描 Key 数，默认 2500（v3.0 为 200）
+    uint32_t migration_rate_multiplier; // 迁移速率倍增器，默认 5（每秒最多迁移 5×scan_batch_size）
     double   overload_threshold;        // 节点内存过载阈值（0~1），默认 0.8
     double   bandwidth_threshold;       // 带宽饱和阈值（0~1），默认 0.9
     double   pressure_threshold;        // 迁移压力阈值（0~1），默认 0.7
@@ -337,7 +338,8 @@ void composite_lru_record_access(strategy, key, val, lru_clock) {
 {
     "migrate_hotness_threshold": 3,
     "hot_candidates_size": 1024,
-    "scan_batch_size": 500,
+    "scan_batch_size": 2500,
+    "migration_rate_multiplier": 5,
     "decay_threshold_sec": 10,
     "auto_migrate_enabled": 1,
     "debug_logging_enabled": 0,
@@ -352,6 +354,8 @@ void composite_lru_record_access(strategy, key, val, lru_clock) {
 
 | 字段 | 说明 |
 |------|------|
+| `scan_batch_size` | 每秒扫描 Key 数。默认 2500，控制渐进扫描的速度和 CPU 开销。 |
+| `migration_rate_multiplier` | 迁移速率倍增器。默认 5，每秒最多执行 `migration_rate_multiplier × scan_batch_size` 个 Key 的迁移检查。 |
 | `debug_logging_enabled` | 1=打印 access/resource/fast-path/scan/key-migrate 调试日志，0=关闭。生产环境务必关闭，否则高频日志严重影响吞吐。 |
 | `max_bandwidth_node0_mbps` | Node 0 基线最大带宽（MB/s），用于带宽利用率计算 |
 | `max_bandwidth_node1_mbps` | Node 1 基线最大带宽（MB/s） |

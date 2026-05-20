@@ -245,6 +245,73 @@ static __thread int tls_tcache_inited = 0;
 static int g_class_lookup[CLASS_LOOKUP_ENTRIES];
 static int g_class_lookup_ready = 0;
 
+/* ── Direct Path Large Object Cache ──
+ *
+ * Thread-local FIFO cache for >64KB objects that bypass the slab allocator.
+ * Eliminates per-alloc mmap+mbind / munmap syscall overhead by reusing
+ * recently freed blocks. Matches by exact total_size + same NUMA node.
+ */
+
+#define DIRECT_CACHE_MAX      16
+#define DIRECT_CACHE_MIN_SIZE (SLAB_MAX_OBJECT_SIZE + PREFIX_SIZE + 1)
+#define DIRECT_CACHE_MAX_SIZE (2UL << 20)
+
+typedef struct {
+    void  *ptrs[DIRECT_CACHE_MAX];
+    size_t sizes[DIRECT_CACHE_MAX];
+    int    nodes[DIRECT_CACHE_MAX];
+    int    count;
+} direct_cache_t;
+
+static __thread direct_cache_t tls_direct_cache;
+
+static redisAtomic size_t numa_direct_cache_hit   = 0;
+static redisAtomic size_t numa_direct_cache_miss  = 0;
+static redisAtomic size_t numa_direct_cache_evict = 0;
+
+static inline void direct_cache_ensure_init(void) {
+    if (!tls_tcache_inited) {
+        memset(&tls_tcache, 0, sizeof(tls_tcache));
+        memset(&tls_direct_cache, 0, sizeof(tls_direct_cache));
+        tls_tcache_inited = 1;
+    }
+}
+
+static inline void *direct_cache_pop(int node, size_t total_size) {
+    direct_cache_t *dc = &tls_direct_cache;
+    for (int i = dc->count - 1; i >= 0; i--) {
+        if (dc->sizes[i] == total_size && dc->nodes[i] == node) {
+            void *ptr = dc->ptrs[i];
+            dc->count--;
+            if (i < dc->count) {
+                dc->ptrs[i]  = dc->ptrs[dc->count];
+                dc->sizes[i] = dc->sizes[dc->count];
+                dc->nodes[i] = dc->nodes[dc->count];
+            }
+            atomicIncr(numa_direct_cache_hit, 1);
+            return ptr;
+        }
+    }
+    atomicIncr(numa_direct_cache_miss, 1);
+    return NULL;
+}
+
+static inline void direct_cache_push(void *raw_ptr, size_t total_size, int node) {
+    direct_cache_t *dc = &tls_direct_cache;
+    if (dc->count >= DIRECT_CACHE_MAX) {
+        numa_free(dc->ptrs[0], dc->sizes[0]);
+        atomicIncr(numa_direct_cache_evict, 1);
+        memmove(&dc->ptrs[0],  &dc->ptrs[1],  (DIRECT_CACHE_MAX - 1) * sizeof(void *));
+        memmove(&dc->sizes[0], &dc->sizes[1], (DIRECT_CACHE_MAX - 1) * sizeof(size_t));
+        memmove(&dc->nodes[0], &dc->nodes[1], (DIRECT_CACHE_MAX - 1) * sizeof(int));
+        dc->count--;
+    }
+    dc->ptrs[dc->count]  = raw_ptr;
+    dc->sizes[dc->count] = total_size;
+    dc->nodes[dc->count] = node;
+    dc->count++;
+}
+
 static void init_class_lookup(void) {
     int cls = 0;
     for (int i = 0; i < CLASS_LOOKUP_ENTRIES; i++) {
@@ -368,10 +435,7 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
 
     /* ── tcache fast path ── */
     if (g_class_lookup_ready && should_use_slab(size)) {
-        if (!tls_tcache_inited) {
-            memset(&tls_tcache, 0, sizeof(tls_tcache));
-            tls_tcache_inited = 1;
-        }
+        direct_cache_ensure_init();
         int cls = fast_size_class(size);
         if (cls >= 0 && tls_tcache.bins[cls].count > 0) {
             tcache_bin_t *bin = &tls_tcache.bins[cls];
@@ -402,9 +466,15 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
         if (raw_ptr) used_slab = 1;
     }
 
-    /* Direct 路径（>4KB 或 Slab 失败）：直接 NUMA 分配 */
+    /* Direct 路径（>64KB 或 Slab 失败）：先查缓存，再 NUMA 分配 */
     if (!raw_ptr) {
-        raw_ptr = numa_alloc_onnode(total_size, target_node);
+        if (total_size >= DIRECT_CACHE_MIN_SIZE && total_size <= DIRECT_CACHE_MAX_SIZE) {
+            direct_cache_ensure_init();
+            raw_ptr = direct_cache_pop(target_node, total_size);
+        }
+        if (!raw_ptr) {
+            raw_ptr = numa_alloc_onnode(total_size, target_node);
+        }
         alloc_size = total_size;
     }
 
@@ -460,10 +530,7 @@ static void numa_free_with_size(void *user_ptr)
 
     /* ── tcache fast path: cache slab objects instead of returning to slab ── */
     if (prefix->from_pool && g_class_lookup_ready) {
-        if (!tls_tcache_inited) {
-            memset(&tls_tcache, 0, sizeof(tls_tcache));
-            tls_tcache_inited = 1;
-        }
+        direct_cache_ensure_init();
         int cls = fast_size_class(prefix->size);
         if (cls >= 0) {
             tcache_bin_t *bin = &tls_tcache.bins[cls];
@@ -490,8 +557,14 @@ static void numa_free_with_size(void *user_ptr)
         atomicDecr(numa_alloc_slab_bytes, total_size);
         atomicDecr(numa_alloc_slab_count, 1);
     } else {
-        /* Direct 路径：直接 NUMA 释放 */
-        numa_free(raw_ptr, total_size);
+        /* Direct 路径：尝试缓存而非立即释放 */
+        if (total_size >= DIRECT_CACHE_MIN_SIZE &&
+            total_size <= DIRECT_CACHE_MAX_SIZE) {
+            direct_cache_ensure_init();
+            direct_cache_push(raw_ptr, total_size, node_id);
+        } else {
+            numa_free(raw_ptr, total_size);
+        }
         atomicDecr(numa_alloc_direct_bytes, total_size);
         atomicDecr(numa_alloc_direct_count, 1);
     }
@@ -506,6 +579,11 @@ void numa_tcache_flush(void)
             tcache_drain_bin(cls);
         }
     }
+    /* Flush direct cache: return all cached large blocks to OS */
+    for (int i = 0; i < tls_direct_cache.count; i++) {
+        numa_free(tls_direct_cache.ptrs[i], tls_direct_cache.sizes[i]);
+    }
+    tls_direct_cache.count = 0;
 }
 
 /* NUMA感知版zmalloc：分配失败时触发OOM处理器 */
@@ -746,7 +824,13 @@ static void *numa_alloc_dram(size_t size)
     }
 
     if (!raw_ptr) {
-        raw_ptr = numa_alloc_onnode(total_size, target_node);
+        if (total_size >= DIRECT_CACHE_MIN_SIZE && total_size <= DIRECT_CACHE_MAX_SIZE) {
+            direct_cache_ensure_init();
+            raw_ptr = direct_cache_pop(target_node, total_size);
+        }
+        if (!raw_ptr) {
+            raw_ptr = numa_alloc_onnode(total_size, target_node);
+        }
         alloc_size = total_size;
     }
 
@@ -895,6 +979,13 @@ void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes,
     /* Pool 路径已移除，返回 0 */
     *pool_bytes = 0;
     *pool_count = 0;
+}
+
+void numa_get_direct_cache_stats(size_t *hit, size_t *miss, size_t *evict)
+{
+    atomicGet(numa_direct_cache_hit,   *hit);
+    atomicGet(numa_direct_cache_miss,  *miss);
+    atomicGet(numa_direct_cache_evict, *evict);
 }
 
 #endif /* HAVE_NUMA */

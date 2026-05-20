@@ -226,25 +226,82 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
 
 ### List 类型
 
+完整实现 QuickList 节点级迁移，包括 LZF 压缩和原始 ziplist 两种编码的处理：
+
 ```c
 int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
-    if (val_obj->encoding == OBJ_ENCODING_QUICKLIST) {
-        // QuickList：遍历节点，逐个迁移
-        quicklist *old_ql = val_obj->ptr;
-        // ... 迁移逻辑
+    if (val_obj->encoding != OBJ_ENCODING_QUICKLIST)
+        return NUMA_KEY_MIGRATE_ETYPE;
+
+    numa_alloc_push_node(target_node);
+    quicklist *old_ql = val_obj->ptr;
+    quicklist *new_ql = zmalloc(sizeof(quicklist));
+
+    // 复制 quicklist 头部元数据
+    new_ql->count = old_ql->count;
+    new_ql->fill = old_ql->fill;
+    new_ql->compress = old_ql->compress;
+
+    // 遍历所有节点，逐个迁移
+    quicklistNode *old_node = old_ql->head;
+    while (old_node) {
+        quicklistNode *new_node = zmalloc(sizeof(quicklistNode));
+        // 复制节点元数据（count, sz, encoding, container 等）
+
+        if (old_node->encoding == QUICKLIST_NODE_ENCODING_LZF) {
+            // LZF 压缩：复制 quicklistLZF 结构 + 压缩数据
+            quicklistLZF *old_lzf = (quicklistLZF *)old_node->zl;
+            size_t lzf_sz = sizeof(quicklistLZF) + old_lzf->sz;
+            new_node->zl = zmalloc(lzf_sz);
+            memcpy(new_node->zl, old_node->zl, lzf_sz);
+        } else {
+            // 原始 ziplist：按 sz 大小复制
+            new_node->zl = zmalloc(old_node->sz);
+            memcpy(new_node->zl, old_node->zl, old_node->sz);
+        }
+        // 链接到新 quicklist...
+        old_node = old_node->next;
     }
+
+    // 释放旧 quicklist 所有节点和 ziplist
+    val_obj->ptr = new_ql;
+    numa_alloc_pop_node();
     return NUMA_KEY_MIGRATE_OK;
 }
 ```
 
 ### Set 类型
 
+完整实现 Intset 和 Hashtable 两种编码的迁移：
+
 ```c
 int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
-    if (val_obj->encoding == OBJ_ENCODING_HT) {
-        // 哈希表编码的 Set
-    } else if (val_obj->encoding == OBJ_ENCODING_INTSET) {
-        // 整数集合：整体迁移
+    if (val_obj->encoding == OBJ_ENCODING_INTSET) {
+        // 整数集合：整体 memcpy 迁移
+        intset *old_is = val_obj->ptr;
+        size_t is_len = intsetBlobLen(old_is);
+        intset *new_is = numa_zmalloc_onnode(is_len, target_node);
+        memcpy(new_is, old_is, is_len);
+        val_obj->ptr = new_is;
+        zfree(old_is);
+    } else if (val_obj->encoding == OBJ_ENCODING_HT) {
+        // 哈希表：迁移 dict + 所有 sds 元素
+        numa_alloc_push_node(target_node);
+        dict *old_dict = val_obj->ptr;
+        dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
+        dictExpand(new_dict, dictSize(old_dict));
+
+        dictIterator *iter = dictGetIterator(old_dict);
+        dictEntry *entry;
+        while ((entry = dictNext(iter)) != NULL) {
+            sds new_member = sdsnewlen(dictGetKey(entry), sdslen(dictGetKey(entry)));
+            dictAdd(new_dict, new_member, NULL);
+        }
+        dictReleaseIterator(iter);
+
+        val_obj->ptr = new_dict;
+        dictRelease(old_dict);
+        numa_alloc_pop_node();
     }
     return NUMA_KEY_MIGRATE_OK;
 }
@@ -252,12 +309,41 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
 
 ### ZSet 类型
 
+完整实现 Ziplist 和 Skiplist 两种编码的迁移：
+
 ```c
 int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
-    if (val_obj->encoding == OBJ_ENCODING_SKIPLIST) {
-        // 跳表编码的 ZSet
-    } else if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
-        // 压缩列表编码的 ZSet
+    if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
+        // 压缩列表：整体 memcpy 迁移
+        unsigned char *old_zl = val_obj->ptr;
+        size_t zl_len = ziplistBlobLen(old_zl);
+        unsigned char *new_zl = numa_zmalloc_onnode(zl_len, target_node);
+        memcpy(new_zl, old_zl, zl_len);
+        val_obj->ptr = new_zl;
+        zfree(old_zl);
+    } else if (val_obj->encoding == OBJ_ENCODING_SKIPLIST) {
+        // 跳表：迁移 zset 结构 + dict + skiplist
+        numa_alloc_push_node(target_node);
+        zset *old_zs = val_obj->ptr;
+        zset *new_zs = zmalloc(sizeof(zset));
+        new_zs->zsl = zslCreate();
+        new_zs->dict = dictCreate(old_zs->dict->type, old_zs->dict->privdata);
+        dictExpand(new_zs->dict, dictSize(old_zs->dict));
+
+        // 从 tail 向前遍历，逐元素插入新跳表
+        zskiplistNode *old_node = old_zs->zsl->tail;
+        while (old_node) {
+            sds new_ele = sdsnewlen(old_node->ele, sdslen(old_node->ele));
+            zskiplistNode *new_sl = zslInsert(new_zs->zsl, old_node->score, new_ele);
+            dictAdd(new_zs->dict, new_ele, &new_sl->score);
+            old_node = old_node->backward;
+        }
+
+        dictRelease(old_zs->dict);
+        zslFree(old_zs->zsl);
+        zfree(old_zs);
+        val_obj->ptr = new_zs;
+        numa_alloc_pop_node();
     }
     return NUMA_KEY_MIGRATE_OK;
 }

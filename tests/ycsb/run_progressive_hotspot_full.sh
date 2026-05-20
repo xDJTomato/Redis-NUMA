@@ -31,7 +31,7 @@ LOCAL_RESULTS="${SCRIPT_DIR}/results"
 STEPS="sync,bench,fetch"
 VANILLA_MAX_MEMORY="8gb"
 RUN_VANILLA=true
-DEFAULT_BENCH_ARGS="--records 1000000 --fieldlength 4096 --ops 100000 --threads 4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128"
+DEFAULT_BENCH_ARGS="--records 10000 --fieldlength 4096 --ops 500000 --threads 4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128"
 BENCH_ARGS="$DEFAULT_BENCH_ARGS"
 DRY_RUN=false
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
@@ -116,7 +116,7 @@ do_sync() {
 
     log_sub "同步 NUMA 源码并编译..."
     local src_dir="${PROJECT_ROOT}/src"
-    for f in "$src_dir"/*.c "$src_dir"/*.h; do
+    for f in "$src_dir"/*.c "$src_dir"/*.h "$src_dir"/Makefile; do
         _scp "$f" "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_NUMA_ROOT}/src/" 2>/dev/null
     done
     log_ok "NUMA 源码已同步并编译"
@@ -136,19 +136,31 @@ do_sync() {
 
 do_bench() {
     log_step "Step: bench — 渐进并发热点访问测试"
-    log "NUMA 参数: --port $TEST_PORT $BENCH_ARGS"
-    _ssh "cd ${REMOTE_YCSB} && bash run_progressive_hotspot.sh --variant numa --port $TEST_PORT $BENCH_ARGS" || {
+    log "NUMA 参数: --port $TEST_PORT --numa-strategy interleaved $BENCH_ARGS"
+    _ssh "cd ${REMOTE_YCSB} && bash run_progressive_hotspot.sh --variant numa --port $TEST_PORT --numa-strategy interleaved $BENCH_ARGS" || {
         log_warn "NUMA 渐进测试返回非零，继续"
     }
     log_ok "NUMA 渐进测试完成"
 
     if [[ "$RUN_VANILLA" == "true" ]]; then
-        log "vanilla 参数: --port $((TEST_PORT+1)) --maxmem $VANILLA_MAX_MEMORY $BENCH_ARGS"
-        _ssh "cd ${REMOTE_YCSB} && VANILLA_REDIS_ROOT=${REMOTE_VANILLA_ROOT} bash run_progressive_hotspot.sh --variant vanilla --port $((TEST_PORT+1)) --maxmem $VANILLA_MAX_MEMORY $BENCH_ARGS" || {
-            log_warn "vanilla 渐进测试返回非零，继续 fetch"
+        log "vanilla (local) 参数: --port $((TEST_PORT+1)) --maxmem $VANILLA_MAX_MEMORY --vanilla-cpu-node 0 --vanilla-mem-node 0 $BENCH_ARGS"
+        _ssh "cd ${REMOTE_YCSB} && VANILLA_REDIS_ROOT=${REMOTE_VANILLA_ROOT} bash run_progressive_hotspot.sh --variant vanilla --port $((TEST_PORT+1)) --maxmem $VANILLA_MAX_MEMORY --vanilla-cpu-node 0 --vanilla-mem-node 0 $BENCH_ARGS" || {
+            log_warn "vanilla (local) 渐进测试返回非零，继续"
         }
-        log_ok "vanilla 渐进测试完成"
+        log_ok "vanilla (local) 渐进测试完成"
+
+        log "vanilla (interleaved) 参数: --port $((TEST_PORT+2)) --maxmem $VANILLA_MAX_MEMORY --vanilla-cpu-node 0 --vanilla-mem-node 0,2 --vanilla-mem-policy interleave $BENCH_ARGS"
+        _ssh "cd ${REMOTE_YCSB} && VANILLA_REDIS_ROOT=${REMOTE_VANILLA_ROOT} bash run_progressive_hotspot.sh --variant vanilla --port $((TEST_PORT+2)) --maxmem $VANILLA_MAX_MEMORY --vanilla-cpu-node 0 --vanilla-mem-node 0,2 --vanilla-mem-policy interleave $BENCH_ARGS" || {
+            log_warn "vanilla (interleaved) 渐进测试返回非零，继续"
+        }
+        log_ok "vanilla (interleaved) 渐进测试完成"
     fi
+
+    log "NUMA TinyLFU 参数: --variant numa --tinylfu --port $((TEST_PORT+3)) --numa-strategy interleaved $BENCH_ARGS"
+    _ssh "cd ${REMOTE_YCSB} && bash run_progressive_hotspot.sh --variant numa --tinylfu --port $((TEST_PORT+3)) --numa-strategy interleaved --output-dir ${REMOTE_YCSB}/results/progressive_hotspot_tinylfu_${TIMESTAMP} $BENCH_ARGS" || {
+        log_warn "NUMA TinyLFU 渐进测试返回非零，继续"
+    }
+    log_ok "NUMA TinyLFU 渐进测试完成"
 }
 
 do_fetch() {
@@ -156,7 +168,7 @@ do_fetch() {
     local fetch_dir="${LOCAL_RESULTS}/progressive_hotspot_full_${TIMESTAMP}"
     mkdir -p "$fetch_dir"
 
-    local latest_numa latest_vanilla
+    local latest_numa
     latest_numa=$(_ssh "ls -1 ${REMOTE_YCSB}/results/ 2>/dev/null | grep -E '^progressive_hotspot_numa_[0-9]{8}_[0-9]{6}$' | sort | tail -1" || true)
     if [[ -n "$latest_numa" ]]; then
         mkdir -p "$fetch_dir/numa"
@@ -167,11 +179,22 @@ do_fetch() {
     fi
 
     if [[ "$RUN_VANILLA" == "true" ]]; then
-        latest_vanilla=$(_ssh "ls -1 ${REMOTE_YCSB}/results/ 2>/dev/null | grep -E '^progressive_hotspot_vanilla_[0-9]{8}_[0-9]{6}$' | sort | tail -1" || true)
-        if [[ -n "$latest_vanilla" ]]; then
+        local vanilla_dirs
+        vanilla_dirs=$(_ssh "ls -1d ${REMOTE_YCSB}/results/progressive_hotspot_vanilla_* 2>/dev/null | sort" || true)
+        local dir_array
+        readarray -t dir_array <<< "$vanilla_dirs"
+        local n=${#dir_array[@]}
+
+        if (( n >= 2 )); then
+            mkdir -p "$fetch_dir/vanilla_local" "$fetch_dir/vanilla_interleaved"
+            _scp -r "${REMOTE_USER}@${REMOTE_HOST}:${dir_array[$((n-2))]}/." "$fetch_dir/vanilla_local/"
+            log_ok "vanilla (local) 结果已下载"
+            _scp -r "${REMOTE_USER}@${REMOTE_HOST}:${dir_array[$((n-1))]}/." "$fetch_dir/vanilla_interleaved/"
+            log_ok "vanilla (interleaved) 结果已下载"
+        elif (( n >= 1 )); then
             mkdir -p "$fetch_dir/vanilla"
-            _scp -r "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_YCSB}/results/${latest_vanilla}/." "$fetch_dir/vanilla/"
-            log_ok "vanilla 结果已下载: $fetch_dir/vanilla"
+            _scp -r "${REMOTE_USER}@${REMOTE_HOST}:${dir_array[$((n-1))]}/." "$fetch_dir/vanilla/"
+            log_ok "vanilla 结果已下载 (仅 $n 组)"
         else
             log_warn "远程无 vanilla progressive_hotspot 结果"
         fi
@@ -179,6 +202,25 @@ do_fetch() {
 
     generate_summary "$fetch_dir"
     generate_compare_report "$fetch_dir"
+
+    local tinylfu_dir="progressive_hotspot_tinylfu_${TIMESTAMP}"
+    local tinylfu_exists
+    tinylfu_exists=$(_ssh "test -d ${REMOTE_YCSB}/results/${tinylfu_dir} && echo yes || echo no" 2>/dev/null || echo "no")
+    if [[ "$tinylfu_exists" == "yes" ]]; then
+        mkdir -p "$fetch_dir/numa_tinylfu"
+        _scp -r "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_YCSB}/results/${tinylfu_dir}/." "$fetch_dir/numa_tinylfu/"
+        log_ok "NUMA TinyLFU 结果已下载: $fetch_dir/numa_tinylfu"
+    else
+        local latest_tinylfu
+        latest_tinylfu=$(_ssh "ls -1 ${REMOTE_YCSB}/results/ 2>/dev/null | grep -E '^progressive_hotspot_tinylfu_' | sort | tail -1" || true)
+        if [[ -n "$latest_tinylfu" ]]; then
+            mkdir -p "$fetch_dir/numa_tinylfu"
+            _scp -r "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_YCSB}/results/${latest_tinylfu}/." "$fetch_dir/numa_tinylfu/"
+            log_ok "NUMA TinyLFU 结果已下载 (fallback): $fetch_dir/numa_tinylfu"
+        else
+            log_warn "远程无 TinyLFU progressive_hotspot 结果"
+        fi
+    fi
 }
 
 generate_summary() {
@@ -190,9 +232,9 @@ generate_summary() {
         echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "远程: ${REMOTE_USER}@${REMOTE_HOST}"
         echo "NUMA 端口: ${TEST_PORT}"
-        [[ "$RUN_VANILLA" == "true" ]] && echo "vanilla 端口: $((TEST_PORT+1))"
+        [[ "$RUN_VANILLA" == "true" ]] && echo "vanilla 端口: $((TEST_PORT+1)) (local), $((TEST_PORT+2)) (interleaved)"
         echo ""
-        for variant in numa vanilla; do
+        for variant in numa vanilla_local vanilla_interleaved vanilla; do
             local csv="$dir/$variant/progressive_summary.csv"
             if [[ -f "$csv" ]]; then
                 echo "── ${variant} 线程扩展结果 ──"
@@ -209,10 +251,13 @@ generate_summary() {
 generate_compare_report() {
     local dir="$1"
     local numa_csv="$dir/numa/progressive_summary.csv"
+    local local_csv="$dir/vanilla_local/progressive_summary.csv"
+    local interleaved_csv="$dir/vanilla_interleaved/progressive_summary.csv"
     local vanilla_csv="$dir/vanilla/progressive_summary.csv"
+    local tinylfu_csv="$dir/numa_tinylfu/progressive_summary.csv"
     local output="$dir/progressive_hotspot_compare.png"
 
-    [[ -f "$numa_csv" && -f "$vanilla_csv" ]] || return 0
+    [[ -f "$numa_csv" ]] || return 0
     if ! command -v python3 &>/dev/null; then
         log_warn "python3 不可用，跳过本地叠加绘图"
         return 0
@@ -232,14 +277,39 @@ generate_compare_report() {
         python="$venv_dir/bin/python"
     fi
 
-    "$python" "$SCRIPT_DIR/scripts/visualize_progressive_hotspot.py" \
-        --input "$numa_csv" \
-        --label "Redis-NUMA" \
-        --compare-input "$vanilla_csv" \
-        --compare-label "Vanilla Redis" \
-        --output "$output" \
-        --title "YCSB Progressive Hotspot Benchmark: 1M x 4KiB" \
-        2>&1 || log_warn "叠加绘图失败，请查看 $numa_csv 和 $vanilla_csv"
+    local plot_args=(
+        "$SCRIPT_DIR/scripts/visualize_progressive_hotspot.py"
+        --input "$numa_csv"
+        --label "Redis-NUMA (Composite LRU)"
+    )
+
+    if [[ -f "$local_csv" && -f "$interleaved_csv" ]]; then
+        plot_args+=(
+            --compare-input "$local_csv"
+            --compare-label "Vanilla Redis (local)"
+            --compare-input2 "$interleaved_csv"
+            --compare-label2 "Vanilla Redis (interleaved)"
+        )
+    elif [[ -f "$vanilla_csv" ]]; then
+        plot_args+=(
+            --compare-input "$vanilla_csv"
+            --compare-label "Vanilla Redis"
+        )
+    fi
+
+    if [[ -f "$tinylfu_csv" ]]; then
+        plot_args+=(
+            --compare-input3 "$tinylfu_csv"
+            --compare-label3 "Redis-NUMA (TinyLFU)"
+        )
+    fi
+
+    plot_args+=(
+        --output "$output"
+        --title "YCSB Hotspot Read Scalability: 10K keys × 4 KiB"
+    )
+
+    "$python" "${plot_args[@]}" 2>&1 || log_warn "叠加绘图失败，请查看 CSV 文件"
     [[ -f "$output" ]] && log_ok "叠加图表已生成: $output"
 }
 

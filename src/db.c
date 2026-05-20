@@ -41,6 +41,7 @@ redisAtomic unsigned long long dbset_overwrite_seen_count = 0;
 #ifdef HAVE_NUMA
 #include "numa_strategy_slots.h"
 #include "numa_composite_lru.h"
+#include "numa_tinylfu.h"
 #include "zmalloc.h"
 
 static void *numaObjectDataAllocPtr(robj *val) {
@@ -158,6 +159,13 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
                     composite_lru_record_access(clru, key->ptr, val, data_ptr,
                                                 (uint16_t)(server.lruclock & 0xFFFF));
                 }
+            }
+            numa_strategy_t *tlfu = numa_strategy_slot_get(2);
+            if (tlfu && tlfu->enabled && tlfu->private_data) {
+                tinylfu_data_t *tlfu_data = tlfu->private_data;
+                tlfu_data->db = db;
+                void *data_ptr = numaObjectSampleAllocPtr(val);
+                tinylfu_record_access(tlfu, key->ptr, val, data_ptr);
             }
         }
 #endif

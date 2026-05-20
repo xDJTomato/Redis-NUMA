@@ -229,7 +229,7 @@ void numa_strategy_run_all(void) {
 }
 ```
 
-**调度顺序**：当前内置策略中，Composite LRU（Slot 1）优先级为 HIGH，No-op（Slot 0）优先级为 LOW，因此 Composite LRU 总是优先于 No-op 执行。
+**调度顺序**：当前内置策略中，Composite LRU（Slot 1）和 TinyLFU（Slot 2）优先级均为 HIGH，No-op（Slot 0）优先级为 LOW。同优先级的策略按插槽 ID 顺序执行。
 
 ## 内置策略
 
@@ -268,6 +268,28 @@ int numa_strategy_register_composite_lru(void) {
     return numa_strategy_register_factory(&factory);
 }
 ```
+
+### Slot 2: TinyLFU 策略（默认禁用）
+
+```c
+// 频率驱动的 NUMA 迁移策略
+// 使用 Count-Min Sketch + Doorkeeper Bloom Filter
+// 固定内存 ~56KB，O(1) 热点发现
+int numa_tinylfu_register(void) {
+    numa_strategy_factory_t factory = {
+        .name = "tinylfu",
+        .description = "TinyLFU frequency-based hot data migration (CMS + Doorkeeper)",
+        .type = STRATEGY_TYPE_PERIODIC,
+        .default_priority = STRATEGY_PRIORITY_HIGH,
+        .default_interval_us = 1000000,  // 1 秒
+        .create = tinylfu_create,
+        .destroy = tinylfu_destroy
+    };
+    return numa_strategy_register_factory(&factory);
+}
+```
+
+> **注意**：TinyLFU 在 `numa_strategy_init()` 中注册并插入 Slot 2 后，立即调用 `numa_strategy_slot_disable(2)` 禁用。用户需通过 `NUMA STRATEGY SLOT 2 tinylfu` 手动启用，以避免与 Composite LRU 冲突。
 
 ## 自定义策略开发指南
 
@@ -350,7 +372,7 @@ int numa_strategy_init(void) {
     numa_strategy_register_my_strategy();
 
     // 插入到空闲插槽
-    numa_strategy_slot_insert(2, "my-strategy");
+    numa_strategy_slot_insert(3, "my-strategy");  // 注意: Slot 0-2 已被占用
 
     return NUMA_STRATEGY_OK;
 }
@@ -360,14 +382,14 @@ int numa_strategy_init(void) {
 
 ```
 插槽布局：
-┌───────────────────────────────────────────┐
-│ Slot 0:  Noop（兜底策略，默认启用）        │
-│ Slot 1:  Composite LRU（默认策略，启用）   │
-│ Slot 2:  空闲（可插入自定义策略）          │
-│ Slot 3:  空闲                             │
-│ ...                                       │
-│ Slot 15: 空闲                             │
-└───────────────────────────────────────────┘
+┌───────────────────────────────────────────────────┐
+│ Slot 0:  Noop（兜底策略，默认启用）                │
+│ Slot 1:  Composite LRU（默认策略，启用）           │
+│ Slot 2:  TinyLFU（CMS + Doorkeeper，默认禁用）    │
+│ Slot 3:  空闲（可插入自定义策略）                  │
+│ ...                                               │
+│ Slot 15: 空闲                                     │
+└───────────────────────────────────────────────────┘
 ```
 
 ## 错误码
@@ -393,12 +415,18 @@ run_with_period(1000) {  // 每秒
 }
 ```
 
-### 与 Composite LRU 的关系
+### 与 Composite LRU / TinyLFU 的关系
 
 Composite LRU 是插槽 1 的具体实现：
 - 通过 `composite_lru_create()` 创建实例
 - 通过 `composite_lru_execute()` 执行迁移决策
 - 通过 `composite_lru_destroy()` 释放资源
+
+TinyLFU 是插槽 2 的具体实现：
+- 通过 `tinylfu_create()` 创建实例
+- 通过 `tinylfu_execute()` 处理候选环形缓冲区
+- 通过 `tinylfu_destroy()` 释放 CMS/Doorkeeper/Ring 资源
+- 默认禁用，需手动启用
 
 ### 与统一命令接口的关系
 
@@ -421,9 +449,19 @@ numa_strategy_slot_insert(slot_id, strategy_name);
 
 ## 配置参数
 
-通过虚函数表的 `set_config`/`get_config` 接口，每个策略可以定义自己的配置项。Composite LRU 的配置项包括：
+通过虚函数表的 `set_config`/`get_config` 接口，每个策略可以定义自己的配置项。
+
+### Composite LRU (Slot 1) 配置项
 
 - `migrate_hotness_threshold`: 热度阈值
 - `hot_candidates_size`: 候选池大小
 - `scan_batch_size`: 扫描批次大小
 - `auto_migrate_enabled`: 自动迁移开关
+
+### TinyLFU (Slot 2) 配置项
+
+- `migrate_threshold`: 触发迁移的最低频率（1-15）
+- `reset_interval`: 全局衰减间隔（操作次数，≥1000）
+- `migration_budget`: 每次 serverCron 最多迁移数
+- `auto_migrate_enabled`: 自动迁移开关
+- `debug_logging_enabled`: 调试日志开关

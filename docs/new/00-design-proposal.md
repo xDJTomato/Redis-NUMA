@@ -51,8 +51,9 @@
 | 静态加权 | Weighted | 持锁读权重数组，锁外加权随机 |
 | 压力感知 | Pressure-Aware | 选择利用率最低的节点 |
 | CXL 优化 | CXL-Optimized | 小对象本地、大对象远端 |
-| 压力权重交错 | Weighted-Interleave | **默认策略**，atomicGet 读压力权重，分配路径无锁 |
-| Slot 1 | Composite LRU | 双通道热冷识别 + 自动迁移 |
+| 压力权重交错 | Weighted-Interleave | **默认分配策略**，atomicGet 读压力权重，分配路径无锁 |
+| Slot 1 | Composite LRU | 双通道热冷识别 + 自动迁移（默认启用） |
+| Slot 2 | TinyLFU | Count-Min Sketch + Doorkeeper Bloom Filter 频率驱动迁移（默认禁用） |
 
 此外，考虑到内存碎片对性能的影响较大，因此选择固定内存分配大小进行测试。由于不同的分块策略，其内存占用和碎片率不同，无法保证每种策略的内存开销完全相同。因此，本项目设计对碎片率的测量如表 1 所示。
 
@@ -107,11 +108,14 @@
 
 此外，本项目设计已取得的初步进展还包括：
 
-1. **NUMA Slab 分配器**：实现 Slab + Direct 两层分配器，24 级 jemalloc 风格 size class
-2. **Composite LRU 策略**：实现双通道热冷识别架构（快速通道 + 渐进扫描）
-3. **Key 级别迁移模块**：实现 5 种数据类型的专用迁移适配器
-4. **统一命令接口**：实现 NUMA MIGRATE/CONFIG/STRATEGY 命令集
-5. **数据集自动收集脚本**：实现 YCSB 工作负载自动化测试框架
+1. **NUMA Slab 分配器**：实现 Slab + Direct 两层分配器，33 级 jemalloc 风格 size class（8B-64KB），small slab 64KB + large slab 2MB
+2. **Composite LRU 策略**：实现双通道热冷识别架构（快速通道 + 渐进扫描），Slot 1 默认启用
+3. **TinyLFU 频率迁移策略**：Count-Min Sketch + Doorkeeper Bloom Filter，固定 ~56KB 内存，O(1) 热点发现，Slot 2 默认禁用
+4. **Key 级别迁移模块**：实现 5 种数据类型（String/Hash/List/Set/ZSet）的完整迁移适配器
+5. **统一命令接口**：实现 NUMA MIGRATE/CONFIG/STRATEGY 命令集
+6. **带宽监控模块**：实时 per-node 带宽监控（resctrl/numastat/manual 后端）
+7. **NUMA 感知淘汰**：加权评分（距离 40% + 压力 30% + 带宽 30%），优先降级到低压节点
+8. **数据集自动收集脚本**：实现 YCSB 工作负载自动化测试框架
 
 ---
 
@@ -162,8 +166,10 @@
 
 | 层级 | 对象大小 | 分配器 | 碎片率 | 性能 |
 |-----|---------|-------|-------|------|
-| Slab | ≤ 4KB | 64KB slab + 3072bit 位图 + 原子 CAS | ~1% | O(1) 无锁操作 |
-| Direct | > 4KB | numa_alloc_onnode | - | 系统调用 |
+| Slab (small) | ≤ 4KB | 64KB slab + 位图 + 原子 CAS | ~1% | O(1) 无锁操作 |
+| Slab (large) | 4KB–64KB | 2MB slab + 位图 + 原子 CAS | ~1% | O(1) 无锁操作 |
+| Direct Cache | > 64KB | 线程本地 FIFO 缓存池（16 槽） | - | 复用已有内存 |
+| Direct | > 64KB（缓存未命中） | numa_alloc_onnode | - | 系统调用 |
 
 ### 6.2 PREFIX 元数据内联设计
 
@@ -203,15 +209,14 @@
 ## 8 文档导航
 
 - [项目概览](01-overview.md) - 整体架构与核心模块
-- [NUMA Slab 分配器](02-numa-pool.md) - jemalloc 风格 Slab 分配器
-- [zmalloc 适配](03-zmalloc-numa.md) - PREFIX 元数据设计
+- [NUMA Slab 分配器](02-numa-pool.md) - jemalloc 风格 Slab 分配器（33 级 size class）
+- [zmalloc 适配](03-zmalloc-numa.md) - PREFIX 元数据设计、tcache、Direct Cache
 - [内存迁移](04-numa-migrate.md) - 块级内存迁移
-- [策略插槽框架](05-numa-strategy-slots.md) - 16 插槽插件系统
-- [Composite LRU](06-numa-composite-lru.md) - 双通道迁移决策
-- [Key 级别迁移](07-numa-key-migrate.md) - 细粒度 Key 迁移
-- [可配置策略](08-numa-configurable.md) - JSON 热加载配置
+- [策略插槽框架](05-numa-strategy-slots.md) - 16 插槽插件系统（Slot 0/1/2）
+- [Composite LRU](06-numa-composite-lru.md) - 双通道迁移决策（Slot 1）
+- [Key 级别迁移](07-numa-key-migrate.md) - 5 种类型完整迁移适配器
+- [可配置策略](08-numa-configurable.md) - 10 种分配策略、无锁分配路径
 - [统一命令接口](09-numa-command.md) - NUMA 命令详解
 - [调用链与模块交互](10-call-chain.md) - 完整调用链路
-- [分配路径埋点](11-alloc-path-instrumentation.md) - RSS 差异调查
-- [性能根因分析](12-perf-root-cause-analysis.md) - 吞吐腰斩与 RSS 膨胀
-- [无锁分配设计](13-lockfree-alloc-design.md) - 分配路径无锁化
+- [TieredMemDB 对比分析](14-tieredmemdb-analysis.md) - 外部系统对比参考
+- [TinyLFU 频率迁移](16-numa-tinylfu.md) - Count-Min Sketch + Doorkeeper 策略（Slot 2）

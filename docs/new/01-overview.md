@@ -40,19 +40,26 @@
 │  │  │  ┌───────────────┐  │  └───────────────────────┘  │   │
 │  │  │  │ Slot 0: Noop  │  │                             │   │
 │  │  │  │ Slot 1: C-LRU │  │  ┌───────────────────────┐  │   │
-│  │  │  │ Slot 2-15:    │  │  │  NUMA Slab 分配器      │  │   │
-│  │  │  │   自定义扩展   │  │  │  ├─ Slab (≤64KB)     │  │   │
-│  │  │  └───────────────┘  │  │  └─ Direct (>64KB)   │  │   │
-│  │  └─────────────────────┘  └───────────────────────┘  │   │
-│  │                            └───────────────────────┘  │   │
+│  │  │  │ Slot 2: TLFU  │  │  │  NUMA Slab 分配器      │  │   │
+│  │  │  │ Slot 3-15:    │  │  │  ├─ Slab (≤64KB)     │  │   │
+│  │  │  │   自定义扩展   │  │  │  └─ Direct (>64KB)   │  │   │
+│  │  │  └───────────────┘  │  └───────────────────────┘  │   │
+│  │  └─────────────────────┘                             │   │
 │  │                                                      │   │
 │  │  ┌─────────────────────┐  ┌───────────────────────┐  │   │
-│  │  │ Composite LRU       │  │ Key 迁移 (key_migrate)│  │   │
-│  │  │ ├─ 快速通道         │  │ ├─ String 适配器      │  │   │
-│  │  │ │  (候选池)         │  │ ├─ Hash 适配器        │  │   │
-│  │  │ └─ 兜底通道         │  │ ├─ List 适配器        │  │   │
-│  │  │    (渐进扫描)       │  │ ├─ Set 适配器         │  │   │
-│  │  └─────────────────────┘  │ └─ ZSet 适配器        │  │   │
+│  │  │ Composite LRU       │  │ TinyLFU (Slot 2)     │  │   │
+│  │  │ ├─ 快速通道         │  │ ├─ CMS 频率估计       │  │   │
+│  │  │ │  (候选池)         │  │ ├─ Doorkeeper 过滤    │  │   │
+│  │  │ └─ 兜底通道         │  │ └─ 候选环形缓冲区     │  │   │
+│  │  │    (渐进扫描)       │  └───────────────────────┘  │   │
+│  │  └─────────────────────┘                             │   │
+│  │                           ┌───────────────────────┐  │   │
+│  │                           │ Key 迁移 (key_migrate)│  │   │
+│  │                           │ ├─ String 适配器      │  │   │
+│  │                           │ ├─ Hash 适配器        │  │   │
+│  │                           │ ├─ List 适配器        │  │   │
+│  │                           │ ├─ Set 适配器         │  │   │
+│  │                           │ └─ ZSet 适配器        │  │   │
 │  │                           └───────────────────────┘  │   │
 │  └──────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
@@ -71,7 +78,8 @@
 | **NUMA Slab 分配器** | `numa_pool.c/h` | 节点粒度内存分配，33 级 jemalloc 风格大小 class（8B-64KB），小 Slab（≤4KB）+ 大 Slab（>4KB-64KB）+ Direct（>64KB）三层分配 |
 | **NUMA 内存迁移** | `numa_migrate.c/h` | 块级内存跨节点迁移，统计追踪 |
 | **策略插槽框架** | `numa_strategy_slots.c/h` | 16 个策略插槽，工厂模式，虚函数表，支持动态扩展 |
-| **Composite LRU** | `numa_composite_lru.c/h` | 默认迁移策略，双通道架构（快速通道 + 兜底通道），阶梯式惰性衰减 |
+| **Composite LRU** | `numa_composite_lru.c/h` | 默认迁移策略（Slot 1），双通道架构（快速通道 + 兜底通道），阶梯式惰性衰减 |
+| **TinyLFU** | `numa_tinylfu.c/h` | 频率驱动迁移策略（Slot 2），CMS + Doorkeeper Bloom Filter，固定 ~56KB 内存，O(1) 热点发现，默认禁用 |
 | **Key 级别迁移** | `numa_key_migrate.c/h` | 单 Key 迁移，5 种数据类型适配器，原子指针切换 |
 | **可配置策略** | `numa_configurable_strategy.c/h` | 10 种分配策略（含 WEIGHTED_INTERLEAVE 默认策略），无锁分配路径，压力权重原子更新 |
 | **统一命令接口** | `numa_command.c` | NUMA MIGRATE / CONFIG / STRATEGY 三域路由 |
@@ -112,12 +120,19 @@ zmalloc(size) ──────────────────────
     ▼
 lookupKey()
     │
-    ├── 调用 composite_lru_record_access()
+    ├── Slot 1: composite_lru_record_access()
     │       │
     │       ├── 读取 PREFIX 中的热度字段
     │       ├── 根据空闲时间执行阶梯式惰性衰减
     │       ├── 热度 +1（若未衰减）
     │       └── 若热度首次越过阈值 → 写入候选池（快速通道）
+    │
+    ├── Slot 2: tinylfu_record_access()（若启用）
+    │       │
+    │       ├── Doorkeeper 检查：过滤一次性访问
+    │       ├── CMS 递增：4 行计数器递增
+    │       ├── 频率估计：取 4 行最小值
+    │       └── 若频率 ≥ 阈值且数据在远程 → 入队候选环形缓冲区
     │
     └── 返回 Key 数据
 ```
@@ -130,19 +145,25 @@ serverCron() [每秒]
     ▼
 numa_strategy_run_all()
     │
-    ├── 遍历所有启用的策略插槽
+    ├── 遍历所有启用的策略插槽（按优先级 HIGH → LOW）
     │
-    └── Slot 1: Composite LRU
+    ├── Slot 1: Composite LRU（默认启用）
+    │       │
+    │       ├── 快速通道：处理候选池中的 Key
+    │       │       ├─ 重读 PREFIX 当前热度
+    │       │       ├─ 检查资源状态（过载/带宽/压力）
+    │       │       └── 满足条件 → 触发 numa_migrate_key_by_name()
+    │       │
+    │       └── 兜底通道：渐进扫描 key_heat_map
+    │               ├─ 每次扫描 scan_batch_size 个 Key（默认 500）
+    │               ├─ 评估热度 ≥ 阈值？
+    │               └── 满足条件 → 触发迁移
+    │
+    └── Slot 2: TinyLFU（默认禁用，需手动启用）
             │
-            ├── 快速通道：处理候选池中的 Key
-            │       ├─ 重读 PREFIX 当前热度
-            │       ├─ 检查资源状态（过载/带宽/压力）
-            │       └── 满足条件 → 触发 numa_migrate_single_key()
-            │
-            └── 兜底通道：渐进扫描 key_heat_map
-                    ├─ 每次扫描 scan_batch_size 个 Key（默认 500）
-                    ├─ 评估热度 ≥ 阈值？
-                    └── 满足条件 → 触发迁移
+            ├── 遍历候选环形缓冲区
+            ├── 重新估计频率（确认仍是热点）
+            └── 频率 ≥ 阈值 → numa_migrate_key_by_name()
 ```
 
 ## 关键设计决策
@@ -161,10 +182,10 @@ numa_strategy_run_all()
 - **O(1) 访问**：指针偏移即可读取
 - **线程安全**：原子操作更新热度字段
 
-### 3. 双通道迁移决策
+### 3. 双策略迁移架构
 
-- **快速通道**：低延迟，专注热点数据，毫秒级响应
-- **兜底通道**：全覆盖，不遗漏冷门热点，渐进式扫描
+- **Composite LRU（Slot 1）**：热度阶梯 + 双通道（快速通道/兜底扫描），适合稳定访问模式
+- **TinyLFU（Slot 2）**：CMS 频率估计 + Doorkeeper 过滤，固定内存 ~56KB，适合访问模式剧烈变化的场景
 
 ### 4. 阶梯式惰性衰减
 
@@ -229,6 +250,7 @@ redis-cli NUMA CONFIG GET
 - [NUMA 内存迁移](04-numa-migrate.md) - 块级内存迁移
 - [策略插槽框架](05-numa-strategy-slots.md) - 16 插槽插件系统
 - [Composite LRU 策略](06-numa-composite-lru.md) - 双通道迁移决策
+- [TinyLFU 策略](16-numa-tinylfu.md) - CMS + Doorkeeper 频率驱动迁移
 - [Key 级别迁移](07-numa-key-migrate.md) - 细粒度 Key 迁移
 - [可配置策略框架](08-numa-configurable.md) - 10 种分配策略，WEIGHTED_INTERLEAVE 默认策略
 - [统一命令接口](09-numa-command.md) - NUMA 命令详解

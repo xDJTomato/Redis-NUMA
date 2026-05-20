@@ -341,3 +341,87 @@ tcache 上线后 NUMA 版与 vanilla 的 Phase 2 差距从 ~11.5% 缩小到 ~5.9
 - **numa_configurable_strategy.c**：调用 `numa_config_get_best_node()` 选择目标节点
 - **numa_composite_lru.c**：通过 PREFIX 接口读写热度信息
 - **db.c**：在 `lookupKey()` 中调用 `composite_lru_record_access()` 更新热度
+
+## Direct Cache（大对象 FIFO 缓存池）
+
+### 问题
+
+当 value size 超过 64KB 时，每次分配/释放都走 `numa_alloc_onnode()` / `numa_free()` 系统调用路径（mmap + mbind + page fault），在高频大对象负载下成为性能瓶颈。Size Sweep 测试显示 128KB-1MiB 区间 Redis-NUMA 吞吐仅为 Vanilla Redis 的 40%-50%。
+
+### 设计
+
+在 Direct 分配路径上增加 `__thread` 线程本地 FIFO 缓存池，释放大对象时不立即归还系统，而是缓存以供后续同节点、同大小分配复用：
+
+```c
+#define DIRECT_CACHE_MAX      16
+#define DIRECT_CACHE_MIN_SIZE (SLAB_MAX_OBJECT_SIZE + PREFIX_SIZE + 1)  // >64KB
+#define DIRECT_CACHE_MAX_SIZE (2UL << 20)                               // ≤2MB
+
+typedef struct {
+    void  *ptrs[DIRECT_CACHE_MAX];    // 缓存的原始指针（含 PREFIX）
+    size_t sizes[DIRECT_CACHE_MAX];   // 每个缓存项的总大小
+    int    nodes[DIRECT_CACHE_MAX];   // 每个缓存项的 NUMA 节点
+    int    count;                     // 当前缓存数量
+} direct_cache_t;
+
+static __thread direct_cache_t tls_direct_cache;
+```
+
+### 缓存命中（释放路径）
+
+释放大对象时，若总大小在 `DIRECT_CACHE_MIN_SIZE` 到 `DIRECT_CACHE_MAX_SIZE` 范围内，将其推入 FIFO 缓存。缓存满时驱逐最早的条目（FIFO 头部）：
+
+```c
+static inline void direct_cache_push(void *raw_ptr, size_t total_size, int node) {
+    direct_cache_t *dc = &tls_direct_cache;
+    if (dc->count >= DIRECT_CACHE_MAX) {
+        // 驱逐 FIFO 头部
+        numa_free(dc->ptrs[0], dc->sizes[0]);
+        memmove(&dc->ptrs[0], &dc->ptrs[1], ...);
+        dc->count--;
+    }
+    dc->ptrs[dc->count] = raw_ptr;
+    dc->sizes[dc->count] = total_size;
+    dc->nodes[dc->count] = node;
+    dc->count++;
+}
+```
+
+### 缓存命中（分配路径）
+
+分配大对象时，先在缓存中查找同节点、同大小的条目。命中则直接复用，避免系统调用：
+
+```c
+static inline void *direct_cache_pop(int node, size_t total_size) {
+    direct_cache_t *dc = &tls_direct_cache;
+    for (int i = dc->count - 1; i >= 0; i--) {
+        if (dc->nodes[i] == node && dc->sizes[i] == total_size) {
+            void *ptr = dc->ptrs[i];
+            // 移除该条目
+            dc->ptrs[i] = dc->ptrs[--dc->count];
+            dc->sizes[i] = dc->sizes[dc->count];
+            dc->nodes[i] = dc->nodes[dc->count];
+            return ptr;  // 命中
+        }
+    }
+    return NULL;  // 未命中，走 numa_alloc_onnode
+}
+```
+
+### 监控统计
+
+```c
+static redisAtomic size_t numa_direct_cache_hit   = 0;
+static redisAtomic size_t numa_direct_cache_miss  = 0;
+static redisAtomic size_t numa_direct_cache_evict = 0;
+```
+
+可通过 `NUMA CONFIG STATS` 查看命中率。
+
+### 分配路径总结（含 Direct Cache）
+
+| 大小 | 路径 | 函数 | 锁依赖 |
+|------|------|------|--------|
+| ≤ 64KB | tcache → Slab | `fast_size_class()` → `tcache_bin_t` → `numa_slab_alloc()` | 无锁（TLS + CAS） |
+| > 64KB, ≤ 2MB | Direct Cache → Direct | `direct_cache_pop()` → `numa_alloc_onnode()` | 无锁（TLS） |
+| > 2MB | Direct | `numa_alloc_onnode()` | 系统调用 |

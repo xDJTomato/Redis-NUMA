@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Visualize YCSB value-size sweep benchmark."""
+"""Visualize YCSB value-size sweep benchmark — academic single-figure outputs."""
 
 import argparse
 import csv
 import os
 import sys
-from datetime import datetime
 
 
 def safe_float(value, default=0.0):
@@ -44,138 +43,149 @@ def parse_csv(path, label):
                 "numa_node2_live_mb": safe_float(row.get("numa_node2_live_mb")),
                 "remote_pct": safe_float(row.get("remote_pct")),
             })
+    rows = [r for r in rows if r["value_size_bytes"] != 1310720]
     rows.sort(key=lambda r: r["value_size_bytes"])
     return rows
 
 
-def plot(datasets, output_path, title=None, dpi=150):
+PALETTE = {
+    "Redis-NUMA (Composite LRU)": "#1565C0",
+    "Redis-NUMA interleaved": "#1565C0",
+    "Redis-NUMA (TinyLFU)": "#D32F2F",
+    "Redis-NUMA": "#1565C0",
+    "Vanilla Redis": "#2E7D32",
+    "Vanilla Redis (local)": "#2E7D32",
+    "Vanilla Redis (remote)": "#666666",
+    "Vanilla Redis (interleaved)": "#7B1FA2",
+    "NUMA": "#1565C0",
+    "Vanilla": "#2E7D32",
+}
+FALLBACK = ["#1565C0", "#D32F2F", "#2E7D32", "#7B1FA2", "#F57C00", "#666666"]
+
+
+def color_for(label, index):
+    return PALETTE.get(label, FALLBACK[index % len(FALLBACK)])
+
+
+def size_labels(all_sizes):
+    labels = []
+    for size in all_sizes:
+        if size >= 1048576:
+            mib = size / 1048576
+            labels.append(f"{mib:.2f}M" if mib != int(mib) else f"{int(mib)}M")
+        elif size >= 1024:
+            labels.append(f"{size // 1024}K" if size % 1024 == 0
+                          else f"{size/1024:.1f}K")
+        else:
+            labels.append(f"{size}B")
+    return labels
+
+
+def setup_xaxis(ax, all_sizes, labels):
+    ax.set_xscale("log", base=2)
+    ax.set_xticks(all_sizes)
+    ax.set_xticklabels(labels, rotation=0, ha="center", fontsize=7)
+    ax.set_xlabel("Value Size", fontsize=9)
+    ax.grid(True, alpha=0.3, linestyle="--")
+
+
+def save_fig(fig, path, dpi):
+    try:
+        fig.savefig(path, dpi=dpi, facecolor="white", edgecolor="none",
+                    bbox_inches="tight", pad_inches=0.08)
+        w, h = fig.get_size_inches()
+        print(f"  Saved: {path} ({int(w*dpi)}x{int(h*dpi)}px)")
+        return True
+    except Exception as exc:
+        print(f"  ERROR saving {path}: {exc}")
+        return False
+
+
+def plot_throughput(datasets, all_sizes, labels, output_path, dpi):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    datasets = [(label, rows) for label, rows in datasets if rows]
-    if not datasets:
-        print("ERROR: No rows to plot")
-        return False
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    for idx, (label, rows) in enumerate(datasets):
+        sizes = [r["value_size_bytes"] for r in rows]
+        values = [r["throughput_ops_sec"] for r in rows]
+        ax.plot(sizes, values, marker="o", linewidth=1.6, markersize=4,
+                color=color_for(label, idx), label=label)
+    ax.set_ylabel("Throughput (ops/s)", fontsize=9)
+    ax.set_title("(a) Request Throughput vs. Value Size", fontsize=10)
+    setup_xaxis(ax, all_sizes, labels)
+    ax.legend(fontsize=8, loc="best", frameon=True)
+    ax.tick_params(labelsize=7)
+    fig.tight_layout()
+    ok = save_fig(fig, output_path, dpi)
+    plt.close(fig)
+    return ok
 
-    fig, axes = plt.subplots(2, 2, figsize=(15, 8.5))
-    if title is None:
-        title = "YCSB Hotspot Read Value Size Sweep"
-    fig.suptitle(f"{title}  ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})",
-                 fontsize=13, fontweight="bold")
 
-    palette = {
-        "Redis-NUMA": "#1565C0",
-        "Vanilla Redis": "#D32F2F",
-        "NUMA": "#1565C0",
-        "Vanilla": "#D32F2F",
-    }
-    fallback = ["#1565C0", "#D32F2F", "#388E3C", "#F57C00", "#7B1FA2"]
+def plot_bandwidth(datasets, all_sizes, labels, output_path, dpi):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    def color_for(label, index):
-        return palette.get(label, fallback[index % len(fallback)])
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    for idx, (label, rows) in enumerate(datasets):
+        sizes = [r["value_size_bytes"] for r in rows]
+        values = [r["bandwidth_mib_sec"] for r in rows]
+        ax.plot(sizes, values, marker="o", linewidth=1.6, markersize=4,
+                color=color_for(label, idx), label=label)
+    ax.set_ylabel("Bandwidth (MiB/s)", fontsize=9)
+    ax.set_title("(b) Application-Level Read Bandwidth vs. Value Size", fontsize=10)
+    setup_xaxis(ax, all_sizes, labels)
+    ax.legend(fontsize=8, loc="best", frameon=True)
+    ax.tick_params(labelsize=7)
+    fig.tight_layout()
+    ok = save_fig(fig, output_path, dpi)
+    plt.close(fig)
+    return ok
 
-    all_sizes = sorted({r["value_size_bytes"] for _, rows in datasets for r in rows})
-    labels = []
-    for size in all_sizes:
-        if size >= 1048576:
-            labels.append("1MiB")
-        elif size >= 1024:
-            labels.append(f"{size // 1024}KiB" if size % 1024 == 0 else f"{size/1024:.1f}KiB")
-        else:
-            labels.append(f"{size}B")
 
-    def setup_xaxis(ax):
-        ax.set_xscale("log", base=2)
-        ax.set_xticks(all_sizes)
-        ax.set_xticklabels(labels, rotation=45, ha="right")
-        ax.grid(True, alpha=0.3, linestyle="--")
+def plot_latency(datasets, all_sizes, labels, output_path, dpi):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
-    def draw_metric(ax, key, ylabel, panel_title):
-        for index, (label, rows) in enumerate(datasets):
-            sizes = [r["value_size_bytes"] for r in rows]
-            values = [r[key] for r in rows]
-            color = color_for(label, index)
-            ax.plot(sizes, values, marker="o", linewidth=1.6, markersize=4,
-                    color=color, label=label)
-        ax.set_title(panel_title, fontsize=10)
-        ax.set_xlabel("Value size", fontsize=8)
-        ax.set_ylabel(ylabel, fontsize=8)
-        setup_xaxis(ax)
-        ax.legend(fontsize=7, loc="best")
-
-    draw_metric(axes[0, 0], "throughput_ops_sec", "ops/sec", "Request Processing Speed")
-    draw_metric(axes[0, 1], "bandwidth_mib_sec", "MiB/sec", "Application-level Read Bandwidth")
-
-    ax = axes[1, 0]
     styles = [
-        ("read_avg_us", "avg", "-", "o"),
-        ("read_p95_us", "p95", "--", "s"),
-        ("read_p99_us", "p99", ":", "^"),
+        ("read_avg_us", "Avg", "-", "o"),
+        ("read_p99_us", "P99", ":", "^"),
     ]
-    for index, (label, rows) in enumerate(datasets):
+
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    for idx, (label, rows) in enumerate(datasets):
         sizes = [r["value_size_bytes"] for r in rows]
-        color = color_for(label, index)
-        for key, suffix, linestyle, marker in styles:
+        color = color_for(label, idx)
+        for key, suffix, ls, marker in styles:
             ax.plot(sizes, [r[key] for r in rows], marker=marker, linewidth=1.1,
-                    markersize=3.5, linestyle=linestyle, color=color,
+                    markersize=3.5, linestyle=ls, color=color,
                     label=f"{label} {suffix}")
-    ax.set_title("Read Latency", fontsize=10)
-    ax.set_xlabel("Value size", fontsize=8)
-    ax.set_ylabel("microseconds", fontsize=8)
-    setup_xaxis(ax)
-    ax.legend(fontsize=6.5, loc="best", ncol=2)
-
-    ax = axes[1, 1]
-    for index, (label, rows) in enumerate(datasets):
-        sizes = [r["value_size_bytes"] for r in rows]
-        color = color_for(label, index)
-        local_pct = []
-        remote_pct = []
-        for r in rows:
-            total = r["numa_local_live_mb"] + r["numa_remote_live_mb"]
-            if total > 0:
-                local_pct.append(r["numa_local_live_mb"] * 100.0 / total)
-                remote_pct.append(r["numa_remote_live_mb"] * 100.0 / total)
-            else:
-                local_pct.append(0.0)
-                remote_pct.append(0.0)
-        ax.plot(sizes, local_pct, marker="o", linewidth=1.2,
-                markersize=3.5, color=color, label=f"{label} local")
-        ax.plot(sizes, remote_pct, marker="s", linewidth=1.2,
-                markersize=3.5, linestyle="--", color=color, label=f"{label} remote")
-    ax.set_title("Local / Remote Memory Share", fontsize=10)
-    ax.set_xlabel("Value size", fontsize=8)
-    ax.set_ylabel("percent of NUMA live memory", fontsize=8)
-    ax.set_ylim(-2, 102)
-    setup_xaxis(ax)
-    ax.legend(fontsize=6.5, loc="best", ncol=2)
-
-    for ax in axes.flat:
-        ax.tick_params(labelsize=7)
-
-    fig.subplots_adjust(left=0.07, right=0.93, top=0.91, bottom=0.13, hspace=0.36, wspace=0.28)
-
-    try:
-        plt.savefig(output_path, dpi=dpi, facecolor="white", edgecolor="none")
-        w, h = fig.get_size_inches()
-        print(f"Report saved: {output_path} ({int(w*dpi)}x{int(h*dpi)}px @ {dpi} DPI)")
-        return True
-    except Exception as exc:
-        print(f"ERROR: Failed to save report: {exc}")
-        return False
-    finally:
-        plt.close(fig)
+    ax.set_ylabel("Latency (µs)", fontsize=9)
+    ax.set_title("(c) Read Latency vs. Value Size", fontsize=10)
+    setup_xaxis(ax, all_sizes, labels)
+    ax.legend(fontsize=7, loc="best", ncol=2, frameon=True)
+    ax.tick_params(labelsize=7)
+    fig.tight_layout()
+    ok = save_fig(fig, output_path, dpi)
+    plt.close(fig)
+    return ok
 
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize YCSB value-size sweep benchmark")
     parser.add_argument("--input", "-i", required=True, help="size_sweep_summary.csv")
-    parser.add_argument("--output", "-o", required=True, help="output PNG")
-    parser.add_argument("--label", default="Redis-NUMA", help="label for primary input")
+    parser.add_argument("--output", "-o", required=True, help="output PNG base path (suffix auto-added)")
+    parser.add_argument("--label", default="Redis-NUMA (Composite LRU)", help="label for primary input")
     parser.add_argument("--compare-input", help="second size_sweep_summary.csv")
     parser.add_argument("--compare-label", default="Vanilla Redis", help="label for compare input")
-    parser.add_argument("--title", default=None, help="figure title")
+    parser.add_argument("--compare-input2", help="third size_sweep_summary.csv")
+    parser.add_argument("--compare-label2", default="Vanilla Redis (remote)", help="label for third input")
+    parser.add_argument("--compare-input3", help="fourth size_sweep_summary.csv")
+    parser.add_argument("--compare-label3", default="Vanilla Redis (interleaved)", help="label for fourth input")
+    parser.add_argument("--title", default=None, help="(unused, kept for CLI compat)")
     parser.add_argument("--dpi", type=int, default=150, help="DPI (default: 150)")
     args = parser.parse_args()
 
@@ -185,7 +195,7 @@ def main():
 
     datasets = [(args.label, parse_csv(args.input, args.label))]
     print(f"Parsing: {args.input}")
-    print(f"  {len(datasets[0][1])} size points: {[r['value_size_bytes'] for r in datasets[0][1]]}")
+    print(f"  {len(datasets[0][1])} size points")
 
     if args.compare_input:
         if not os.path.exists(args.compare_input):
@@ -194,9 +204,38 @@ def main():
         compare_rows = parse_csv(args.compare_input, args.compare_label)
         datasets.append((args.compare_label, compare_rows))
         print(f"Parsing: {args.compare_input}")
-        print(f"  {len(compare_rows)} size points: {[r['value_size_bytes'] for r in compare_rows]}")
+        print(f"  {len(compare_rows)} size points")
 
-    ok = plot(datasets, args.output, args.title, args.dpi)
+    if args.compare_input2:
+        if not os.path.exists(args.compare_input2):
+            print(f"ERROR: File not found: {args.compare_input2}")
+            sys.exit(1)
+        compare_rows2 = parse_csv(args.compare_input2, args.compare_label2)
+        datasets.append((args.compare_label2, compare_rows2))
+        print(f"Parsing: {args.compare_input2}")
+        print(f"  {len(compare_rows2)} size points")
+
+    if args.compare_input3:
+        if not os.path.exists(args.compare_input3):
+            print(f"ERROR: File not found: {args.compare_input3}")
+            sys.exit(1)
+        compare_rows3 = parse_csv(args.compare_input3, args.compare_label3)
+        datasets.append((args.compare_label3, compare_rows3))
+        print(f"Parsing: {args.compare_input3}")
+        print(f"  {len(compare_rows3)} size points")
+
+    all_sizes = sorted({r["value_size_bytes"] for _, rows in datasets for r in rows})
+    labels = size_labels(all_sizes)
+
+    base, ext = os.path.splitext(args.output)
+    if not ext:
+        ext = ".png"
+
+    ok = True
+    ok &= plot_throughput(datasets, all_sizes, labels, f"{base}_throughput{ext}", args.dpi)
+    ok &= plot_bandwidth(datasets, all_sizes, labels, f"{base}_bandwidth{ext}", args.dpi)
+    ok &= plot_latency(datasets, all_sizes, labels, f"{base}_latency{ext}", args.dpi)
+    print(f"Done. Output base: {base}_*{ext}")
     sys.exit(0 if ok else 1)
 
 

@@ -72,7 +72,7 @@ size_t getStringObjectLen(robj *o) {
 /* Client.reply list dup and free methods. */
 void *dupClientReplyValue(void *o) {
     clientReplyBlock *old = o;
-    clientReplyBlock *buf = zmalloc(sizeof(clientReplyBlock) + old->size);
+    clientReplyBlock *buf = zmalloc_local(sizeof(clientReplyBlock) + old->size);
     memcpy(buf, o, sizeof(clientReplyBlock) + old->size);
     return buf;
 }
@@ -337,7 +337,7 @@ void _addReplyProtoToList(client *c, const char *s, size_t len) {
         /* Create a new node, make sure it is allocated to at
          * least PROTO_REPLY_CHUNK_BYTES */
         size_t size = len < PROTO_REPLY_CHUNK_BYTES? PROTO_REPLY_CHUNK_BYTES: len;
-        tail = zmalloc(size + sizeof(clientReplyBlock));
+        tail = zmalloc_local(size + sizeof(clientReplyBlock));
         /* take over the allocation's internal fragmentation */
         tail->size = zmalloc_usable_size(tail) - sizeof(clientReplyBlock);
         tail->used = len;
@@ -632,7 +632,7 @@ void setDeferredReply(client *c, void *node, const char *s, size_t length) {
         listDelNode(c->reply,ln);
     } else {
         /* Create a new node */
-        clientReplyBlock *buf = zmalloc(length + sizeof(clientReplyBlock));
+        clientReplyBlock *buf = zmalloc_local(length + sizeof(clientReplyBlock));
         /* Take over the allocation's internal fragmentation */
         buf->size = zmalloc_usable_size(buf) - sizeof(clientReplyBlock);
         buf->used = length;

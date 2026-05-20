@@ -120,7 +120,20 @@ PHASE_LABELS = {
 }
 
 
-PALETTE = ['#1565C0', '#D32F2F', '#388E3C', '#F57C00']
+NAMED_PALETTE = {
+    "Redis-NUMA (Composite LRU)": "#1565C0",
+    "Redis-NUMA (TinyLFU)": "#D32F2F",
+    "Redis-NUMA": "#1565C0",
+    "Vanilla Redis": "#2E7D32",
+    "Vanilla Redis (local)": "#2E7D32",
+    "Vanilla Redis (remote)": "#666666",
+    "Vanilla Redis (interleaved)": "#7B1FA2",
+}
+PALETTE = ['#1565C0', '#D32F2F', '#2E7D32', '#7B1FA2', '#F57C00', '#666666']
+
+
+def color_for_label(label, index):
+    return NAMED_PALETTE.get(label, PALETTE[index % len(PALETTE)])
 
 
 def get_phase_ranges(data):
@@ -138,43 +151,10 @@ def get_phase_ranges(data):
     return ranges
 
 
-def add_phase_markers(ax, datasets):
-    ymax = ax.get_ylim()[1]
-    if ymax <= 0:
-        ymax = 1
-    for i, data in enumerate(datasets):
-        ranges = get_phase_ranges(data)
-        color = PALETTE[i % len(PALETTE)]
-        label = data['label']
-        y = ymax * (0.92 - i * 0.08)
-        for phase_name in ('1_fill', '2_hotspot', '3_sustain'):
-            if phase_name not in ranges:
-                continue
-            start, end = ranges[phase_name]
-            ax.hlines(y, start, end, color=color, linewidth=2.0, alpha=0.55)
-            ax.vlines([start, end], y - ymax * 0.015, y + ymax * 0.015,
-                      color=color, linewidth=0.8, alpha=0.45)
-            ax.text((start + end) / 2, y + ymax * 0.018,
-                    f"{label} {PHASE_LABELS.get(phase_name, phase_name)}",
-                    ha='center', va='bottom', fontsize=6.5, color=color, alpha=0.75)
-
-
-def common_time_axis(ax, max_t, phase_ranges):
-    ax.set_xlim(0, max_t)
-    ax.grid(True, alpha=0.3, linestyle='--')
-
-
 PHASE_ORDER = ['1_fill', '2_hotspot', '3_sustain']
 
 
 def normalize_time_by_phase(data):
-    """Normalize elapsed time so that each phase maps to a common grid.
-
-    Returns (norm_time, phase_boundaries) where phase_boundaries maps
-    phase_name -> (norm_start, norm_end) on the unified axis.
-    The unified axis uses the maximum observed phase duration across all
-    callers, but this function first computes per-dataset durations.
-    """
     ranges = get_phase_ranges(data)
     durations = {}
     for p in PHASE_ORDER:
@@ -187,7 +167,6 @@ def normalize_time_by_phase(data):
 
 
 def build_unified_grid(all_durations):
-    """Build a common time grid from the max duration of each phase."""
     grid = {}
     offset = 0
     for p in PHASE_ORDER:
@@ -198,7 +177,6 @@ def build_unified_grid(all_durations):
 
 
 def remap_time(data, own_ranges, unified_grid):
-    """Remap a dataset's raw elapsed time to the unified phase-aligned axis."""
     norm = []
     for t, phase in zip(data['time'], data['phase']):
         if phase in own_ranges and phase in unified_grid:
@@ -243,7 +221,8 @@ def plot_report(datasets, latency_sets, output_path, title=None, dpi=150):
 
     for i, data in enumerate(datasets):
         nt = remap_time(data, all_ranges[i], unified_grid)
-        ax.plot(nt, data['ops_sec'], color=PALETTE[i % len(PALETTE)], linewidth=0.9,
+        color = color_for_label(data['label'], i)
+        ax.plot(nt, data['ops_sec'], color=color, linewidth=0.9,
                 label=f"{data['label']} ops/sec")
 
     for phase in PHASE_ORDER:
@@ -272,12 +251,12 @@ def plot_report(datasets, latency_sets, output_path, title=None, dpi=150):
     for i, data in enumerate(datasets):
         if any(v > 0 for v in data['local_access_pct']):
             nt = remap_time(data, all_ranges[i], unified_grid)
-            ax2.plot(nt, data['local_access_pct'], color='#2E7D32', linewidth=1.0,
+            color = color_for_label(data['label'], i)
+            ax2.plot(nt, data['local_access_pct'], color=color, linewidth=1.0,
                      linestyle=':', label=f"{data['label']} local access %")
             ratio_plotted = True
-            break
-    ax2.set_ylabel('Local NUMA Access Ratio (%)', fontsize=10, color='#2E7D32')
-    ax2.tick_params(axis='y', labelcolor='#2E7D32', labelsize=7)
+    ax2.set_ylabel('Local NUMA Access Ratio (%)', fontsize=10)
+    ax2.tick_params(axis='y', labelsize=7)
     ax2.set_ylim(0, 100)
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
@@ -306,11 +285,17 @@ def main():
     parser = argparse.ArgumentParser(description='NUMA Bandwidth Benchmark Visualizer')
     parser.add_argument('--input', '-i', required=True, help='Path to primary metrics.csv')
     parser.add_argument('--output', '-o', required=True, help='Output PNG path')
-    parser.add_argument('--label', default='Redis-NUMA', help='Label for primary input')
+    parser.add_argument('--label', default='Redis-NUMA (Composite LRU)', help='Label for primary input')
     parser.add_argument('--phase-dir', help='Directory containing primary phase*.txt files')
     parser.add_argument('--compare-input', help='Path to comparison metrics.csv')
     parser.add_argument('--compare-label', default='Vanilla Redis', help='Label for comparison input')
     parser.add_argument('--compare-phase-dir', help='Directory containing comparison phase*.txt files')
+    parser.add_argument('--compare-input2', help='Path to third metrics.csv')
+    parser.add_argument('--compare-label2', default='Vanilla Redis (interleaved)', help='Label for third input')
+    parser.add_argument('--compare-phase-dir2', help='Directory containing third phase*.txt files')
+    parser.add_argument('--compare-input3', help='Path to fourth metrics.csv')
+    parser.add_argument('--compare-label3', default='Redis-NUMA (TinyLFU)', help='Label for fourth input')
+    parser.add_argument('--compare-phase-dir3', help='Directory containing fourth phase*.txt files')
     parser.add_argument('--title', default=None, help='Figure title')
     parser.add_argument('--dpi', type=int, default=150, help='DPI (default: 150)')
     args = parser.parse_args()
@@ -342,6 +327,34 @@ def main():
             'latencies': parse_phase_latency(args.compare_phase_dir or os.path.dirname(args.compare_input)),
         })
         print(f"  {len(compare['time'])} points")
+
+    if args.compare_input2:
+        if not os.path.exists(args.compare_input2):
+            print(f"ERROR: File not found: {args.compare_input2}")
+            sys.exit(1)
+        print(f"Parsing: {args.compare_input2}")
+        compare2, _, compare2_first_ts = parse_csv(args.compare_input2, args.compare_label2)
+        compare2['first_ts'] = compare2_first_ts
+        datasets.append(compare2)
+        latency_sets.append({
+            'label': args.compare_label2,
+            'latencies': parse_phase_latency(args.compare_phase_dir2 or os.path.dirname(args.compare_input2)),
+        })
+        print(f"  {len(compare2['time'])} points")
+
+    if args.compare_input3:
+        if not os.path.exists(args.compare_input3):
+            print(f"ERROR: File not found: {args.compare_input3}")
+            sys.exit(1)
+        print(f"Parsing: {args.compare_input3}")
+        compare3, _, compare3_first_ts = parse_csv(args.compare_input3, args.compare_label3)
+        compare3['first_ts'] = compare3_first_ts
+        datasets.append(compare3)
+        latency_sets.append({
+            'label': args.compare_label3,
+            'latencies': parse_phase_latency(args.compare_phase_dir3 or os.path.dirname(args.compare_input3)),
+        })
+        print(f"  {len(compare3['time'])} points")
 
     ok = plot_report(datasets, latency_sets, args.output, args.title, args.dpi)
     sys.exit(0 if ok else 1)

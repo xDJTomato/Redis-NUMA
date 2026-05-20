@@ -60,15 +60,16 @@ RUN_PHASE="all"
 SKIP_FILL=false
 NO_RESTART=false
 ENABLE_LOCALITY_STATS=true
+ENABLE_TINYLFU=false
 PROCESS_NUMA_NODES="0,2"
 
 # Phase 参数
 PHASE1_RECORDS=1000000
 PHASE1_FIELD_LENGTH=4096
 PHASE1_THREADS=8
-PHASE2_OPS=2000000
+PHASE2_OPS=4000000
 PHASE2_THREADS=64
-PHASE3_OPS=6000000
+PHASE3_OPS=4000000
 PHASE3_THREADS=64
 
 # YCSB 客户端超时（CXL 高延迟环境需要更长超时）
@@ -109,6 +110,7 @@ usage() {
   --no-restart         不重启 Redis
   --process-nodes NODES Redis 进程可用 NUMA 节点 (默认: 0,2；传 all 禁用绑定)
   --locality-stats     开启访问本地/远端统计（默认开启）
+  --tinylfu            启用 TinyLFU 策略 (Slot 2) 并禁用 Composite LRU (Slot 1)
   --help               显示此帮助
 
 阶段说明:
@@ -164,6 +166,10 @@ parse_args() {
                 ;;
             --locality-stats)
                 ENABLE_LOCALITY_STATS=true
+                shift
+                ;;
+            --tinylfu)
+                ENABLE_TINYLFU=true
                 shift
                 ;;
             --help|-h)
@@ -375,8 +381,15 @@ start_collector() {
         local migrate_stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" --raw NUMA MIGRATE STATS 2>/dev/null || echo "")
         if [[ -n "$migrate_stats" ]]; then
             migrate_total=$(awk '/^successful_migrations$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-            acc_local=$(awk '/^accesses_local$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-            acc_remote=$(awk '/^accesses_remote$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+            # 检查 TinyLFU 是否启用：启用时直接使用 TinyLFU 计数器
+            local tlfu_on=$(awk '/^tinylfu_enabled$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+            if [[ "${tlfu_on:-0}" -eq 1 ]]; then
+                acc_local=$(awk '/^tinylfu_accesses_local$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+                acc_remote=$(awk '/^tinylfu_accesses_remote$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+            else
+                acc_local=$(awk '/^accesses_local$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+                acc_remote=$(awk '/^accesses_remote$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
+            fi
         fi
         [[ -z "$migrate_total" ]] && migrate_total=0
         [[ -z "$acc_local" ]] && acc_local=0
@@ -493,7 +506,11 @@ run_phase1_fill() {
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
         NUMA CONFIG SET strategy local_first >/dev/null 2>&1 || \
         log_warn "无法将 Phase 2/3 分配策略切回 local_first"
-    
+
+    if [[ "$ENABLE_TINYLFU" == true ]]; then
+        log "TinyLFU 策略已在填充前启用，保持 Slot 2 运行"
+    fi
+
     local throughput
     throughput=$(grep 'OVERALL.*Throughput' "$OUTPUT_DIR/phase1_load.txt" 2>/dev/null || echo "See phase1_load.txt")
     log_ok "Phase 1 完成. $throughput"
@@ -738,6 +755,13 @@ main() {
     else
         log_warn "composite_lru.json 未找到，使用默认配置"
     fi
+    # TinyLFU 变体必须在填充前启用，避免在已由 Composite LRU 运行过的实例上切换策略。
+    if [[ "$ENABLE_TINYLFU" == true ]]; then
+        log "启用 TinyLFU 策略: 禁用 Slot 1 (Composite LRU), 启用 Slot 2 (TinyLFU)"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT DISABLE 1 >/dev/null 2>&1 || true
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT ENABLE 2 >/dev/null 2>&1 || true
+    fi
+
     # 验证策略插槽状态
     local slot_info
     slot_info=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY LIST 2>/dev/null || echo "")

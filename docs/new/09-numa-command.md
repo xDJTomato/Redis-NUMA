@@ -202,7 +202,7 @@ void numa_cmd_migrate_scan(client *c) {
 NUMA MIGRATE STATS
 ```
 
-**返回**（12 个字段）：
+**返回**（36 个元素，18 个 key-value 对）：
 ```
  1) "total_migrations"
  2) (integer) 1234
@@ -216,7 +216,42 @@ NUMA MIGRATE STATS
 10) (integer) 5230000
 11) "peak_concurrent_migrations"
 12) (integer) 3
+13) "accesses_local"
+14) (integer) 50000
+15) "accesses_remote"
+16) (integer) 12000
+17) "dboverwrite_checks"
+18) (integer) 0
+19) "dboverwrite_reallocs"
+20) (integer) 0
+21) "dbset_overwrite_seen"
+22) (integer) 0
+23) "tinylfu_enabled"
+24) (integer) 0
+25) "tinylfu_accesses"
+26) (integer) 0
+27) "tinylfu_doorkeeper_filtered"
+28) (integer) 0
+29) "tinylfu_candidates_enqueued"
+30) (integer) 0
+31) "tinylfu_migrations_done"
+32) (integer) 0
+33) "tinylfu_migrations_failed"
+34) (integer) 0
+35) "tinylfu_resets"
+36) (integer) 0
 ```
+
+其中 TinyLFU 相关字段：
+| 字段 | 说明 |
+|------|------|
+| `tinylfu_enabled` | 策略是否启用（0=禁用, 1=启用） |
+| `tinylfu_accesses` | TinyLFU 记录的总访问次数 |
+| `tinylfu_doorkeeper_filtered` | 被 Doorkeeper 过滤的一次性访问次数 |
+| `tinylfu_candidates_enqueued` | 入队候选环形缓冲区的次数 |
+| `tinylfu_migrations_done` | TinyLFU 触发的成功迁移数 |
+| `tinylfu_migrations_failed` | TinyLFU 触发的迁移失败数 |
+| `tinylfu_resets` | CMS 全局衰减执行次数 |
 
 ### NUMA MIGRATE RESET
 
@@ -420,7 +455,7 @@ NUMA STRATEGY LIST
  3) "slot_1"
  4) "name: composite-lru, enabled: yes, executions: 100"
  5) "slot_2"
- 6) "empty"
+ 6) "name: tinylfu, enabled: no, executions: 0"
  7) "slot_3"
  8) "empty"
 ...

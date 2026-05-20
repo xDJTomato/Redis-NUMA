@@ -56,6 +56,7 @@ REDIS_HOST="127.0.0.1"
 MAX_MEMORY="8gb"
 VANILLA_CPU_NODE="${VANILLA_CPU_NODE:-0}"
 VANILLA_MEM_NODE="${VANILLA_MEM_NODE:-0}"
+VANILLA_MEM_POLICY="${VANILLA_MEM_POLICY:-bind}"
 OUTPUT_DIR=""
 RUN_PHASE="all"
 SKIP_FILL=false
@@ -236,6 +237,7 @@ save_system_info() {
         echo "Redis 最大内存: $MAX_MEMORY"
         echo "Vanilla CPU node: $VANILLA_CPU_NODE"
         echo "Vanilla memory node: $VANILLA_MEM_NODE"
+        echo "Vanilla memory policy: $VANILLA_MEM_POLICY"
         echo "Phase 1 记录数: $PHASE1_RECORDS"
         echo "Phase 1 字段大小: $PHASE1_FIELD_LENGTH bytes"
         echo "Phase 2 操作数: $PHASE2_OPS"
@@ -257,7 +259,7 @@ start_redis() {
     pkill -f "redis-server.*:${REDIS_PORT}" 2>/dev/null || true
     sleep 1
 
-    log "启动 Redis (port=$REDIS_PORT, maxmemory=$MAX_MEMORY, cpu_node=$VANILLA_CPU_NODE, mem_node=$VANILLA_MEM_NODE)..."
+    log "启动 Redis (port=$REDIS_PORT, maxmemory=$MAX_MEMORY, cpu_node=$VANILLA_CPU_NODE, mem_node=$VANILLA_MEM_NODE, mem_policy=$VANILLA_MEM_POLICY)..."
     local redis_cmd=(
         "$REDIS_SERVER"
         --port "$REDIS_PORT"
@@ -272,7 +274,11 @@ start_redis() {
     )
 
     if command -v numactl &>/dev/null; then
-        numactl --cpunodebind="$VANILLA_CPU_NODE" --membind="$VANILLA_MEM_NODE" "${redis_cmd[@]}"
+        if [[ "$VANILLA_MEM_POLICY" == "interleave" ]]; then
+            numactl --cpunodebind="$VANILLA_CPU_NODE" --interleave="$VANILLA_MEM_NODE" "${redis_cmd[@]}"
+        else
+            numactl --cpunodebind="$VANILLA_CPU_NODE" --membind="$VANILLA_MEM_NODE" "${redis_cmd[@]}"
+        fi
     else
         log_warn "numactl 未安装，原版 Redis 将不进行本地内存绑定"
         "${redis_cmd[@]}"
