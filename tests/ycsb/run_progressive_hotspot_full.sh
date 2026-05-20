@@ -200,9 +200,6 @@ do_fetch() {
         fi
     fi
 
-    generate_summary "$fetch_dir"
-    generate_compare_report "$fetch_dir"
-
     local tinylfu_dir="progressive_hotspot_tinylfu_${TIMESTAMP}"
     local tinylfu_exists
     tinylfu_exists=$(_ssh "test -d ${REMOTE_YCSB}/results/${tinylfu_dir} && echo yes || echo no" 2>/dev/null || echo "no")
@@ -221,6 +218,9 @@ do_fetch() {
             log_warn "远程无 TinyLFU progressive_hotspot 结果"
         fi
     fi
+
+    generate_summary "$fetch_dir"
+    generate_compare_report "$fetch_dir"
 }
 
 generate_summary() {
@@ -306,7 +306,7 @@ generate_compare_report() {
 
     plot_args+=(
         --output "$output"
-        --title "YCSB Hotspot Read Scalability: 10K keys × 4 KiB"
+        --title "Concurrency Scaling under YCSB Hotspot Workload (10K Keys × 4 KiB)"
     )
 
     "$python" "${plot_args[@]}" 2>&1 || log_warn "叠加绘图失败，请查看 CSV 文件"
