@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+typedef struct aeEventLoop aeEventLoop;
+
 /* 策略插槽配置 */
 #define NUMA_MAX_STRATEGY_SLOTS 16       /* 最大插槽数 */
 #define NUMA_SLOT_DEFAULT_ID    1        /* 默认策略插槽ID */
@@ -14,6 +16,18 @@
 #define NUMA_STRATEGY_ENOENT   -2        /* 策略不存在 */
 #define NUMA_STRATEGY_EINVAL   -3        /* 参数无效 */
 #define NUMA_STRATEGY_EEXIST   -4        /* 插槽已被占用 */
+
+/* 策略执行步进返回值 */
+#define NUMA_STRATEGY_STEP_IDLE       0
+#define NUMA_STRATEGY_STEP_PROGRESS   1
+#define NUMA_STRATEGY_STEP_DONE       2
+#define NUMA_STRATEGY_STEP_AGAIN      3
+#define NUMA_STRATEGY_STEP_ERROR     -1
+#define NUMA_STRATEGY_STEP_TIMEOUT   -2
+
+/* 策略调度模式 */
+#define NUMA_STRATEGY_SCHED_SERVERCRON 0
+#define NUMA_STRATEGY_SCHED_AE         1
 
 /* 策略类型 */
 typedef enum {
@@ -39,7 +53,8 @@ typedef struct {
     
     /* 执行策略逻辑 */
     int (*execute)(numa_strategy_t *strategy);
-    
+    int (*execute_step)(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget);
+
     /* 清理策略资源 */
     void (*cleanup)(numa_strategy_t *strategy);
     
@@ -76,6 +91,15 @@ struct numa_strategy {
     uint64_t total_executions;           /* 总执行次数 */
     uint64_t total_failures;             /* 失败次数 */
     uint64_t total_execution_time_us;    /* 总执行时间(微秒) */
+
+    /* AE 调度统计 */
+    int scheduler_mode;                  /* 调度模式 */
+    long long ae_time_event_id;          /* AE time event ID */
+    uint32_t step_budget;                /* 单步预算 */
+    uint32_t max_runtime_us_per_step;    /* 单步最大执行时间 */
+    uint64_t max_execution_time_us;      /* 最大单次执行时间 */
+    uint64_t timeout_count;              /* 超时次数 */
+    uint64_t last_ae_run_us;             /* AE 上次执行时间 */
 };
 
 /* 策略工厂结构 */
@@ -119,6 +143,10 @@ int numa_strategy_slot_status(int slot_id, char *buf, size_t buf_len);
 /* 执行调度 */
 void numa_strategy_run_all(void);                    /* 执行所有启用的策略 */
 int numa_strategy_run_slot(int slot_id);            /* 执行指定插槽策略 */
+int numa_strategy_scheduler_init(aeEventLoop *el);  /* 初始化 AE 调度器 */
+int numa_strategy_slot_schedule_ae(int slot_id);    /* 注册插槽 AE time event */
+int numa_strategy_slot_unschedule_ae(int slot_id);  /* 注销插槽 AE time event */
+void numa_strategy_scheduler_cron(void);            /* AE 调度健康检查 */
 
 /* 内置策略注册函数 */
 int numa_strategy_register_noop(void);               /* 注册0号兜底策略 */

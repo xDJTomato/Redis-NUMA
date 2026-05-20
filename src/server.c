@@ -2272,6 +2272,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Run NUMA strategy slot framework */
     run_with_period(1000) {
         numa_strategy_run_all();
+        numa_strategy_scheduler_cron();
     }
 #endif
 
@@ -6508,6 +6509,7 @@ int main(int argc, char **argv) {
     /* 初始化NUMA策略插槽框架（必须在 initServer() 之后） */
     printf("DEBUG: 调用numa_strategy_init()\n");
     numa_strategy_init();
+    numa_strategy_scheduler_init(server.el);
     printf("DEBUG: numa_strategy_init()完成\n");
 
     /* 初始化可配置分配策略，默认使用 INTERLEAVE，benchmark 可在运行时切换策略 */

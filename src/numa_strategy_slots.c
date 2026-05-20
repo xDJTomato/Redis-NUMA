@@ -7,6 +7,7 @@
 #include "numa_composite_lru.h"
 #include "numa_tinylfu.h"
 #include "zmalloc.h"
+#include "ae.h"
 #include <string.h>
 #include <sys/time.h>
 #include <pthread.h>
@@ -39,9 +40,14 @@ typedef struct {
     /* 统计信息 */
     uint64_t total_runs;                          /* 总调度次数 */
     uint64_t total_strategy_executions;           /* 总策略执行次数 */
+
+    /* AE 调度器 */
+    aeEventLoop *event_loop;
 } numa_strategy_manager_t;
 
 static numa_strategy_manager_t strategy_manager = {0};
+
+static int numa_strategy_slot_time_proc(aeEventLoop *eventLoop, long long id, void *clientData);
 
 /* ========== 辅助函数 ========== */
 
@@ -161,6 +167,10 @@ static numa_strategy_t* noop_strategy_create(void) {
     strategy->priority = STRATEGY_PRIORITY_LOW;
     strategy->enabled = 1;  /* 默认启用 */
     strategy->execute_interval_us = 1000000;  /* 1秒执行间隔 */
+    strategy->scheduler_mode = NUMA_STRATEGY_SCHED_SERVERCRON;
+    strategy->ae_time_event_id = AE_DELETED_EVENT_ID;
+    strategy->step_budget = 64;
+    strategy->max_runtime_us_per_step = 500;
     strategy->vtable = &noop_strategy_vtable;
     
     return strategy;
@@ -371,6 +381,12 @@ int numa_strategy_slot_insert(int slot_id, const char *strategy_name) {
     pthread_mutex_lock(&strategy_manager.lock);
     strategy->slot_id = slot_id;
     strategy_manager.slots[slot_id] = strategy;
+    if (strategy->ae_time_event_id == 0)
+        strategy->ae_time_event_id = AE_DELETED_EVENT_ID;
+    if (strategy->step_budget == 0)
+        strategy->step_budget = 64;
+    if (strategy->max_runtime_us_per_step == 0)
+        strategy->max_runtime_us_per_step = 500;
     pthread_mutex_unlock(&strategy_manager.lock);
     
     STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Inserted strategy '%s' to slot %d", 
@@ -392,10 +408,15 @@ int numa_strategy_slot_remove(int slot_id) {
         pthread_mutex_unlock(&strategy_manager.lock);
         return NUMA_STRATEGY_ENOENT;
     }
-    
+
+    long long ae_id = strategy->ae_time_event_id;
+    strategy->ae_time_event_id = AE_DELETED_EVENT_ID;
     strategy_manager.slots[slot_id] = NULL;
     pthread_mutex_unlock(&strategy_manager.lock);
-    
+
+    if (ae_id != AE_DELETED_EVENT_ID && strategy_manager.event_loop)
+        aeDeleteTimeEvent(strategy_manager.event_loop, ae_id);
+
     numa_strategy_destroy(strategy);
     STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Removed strategy from slot %d", slot_id);
     
@@ -417,8 +438,14 @@ int numa_strategy_slot_enable(int slot_id) {
     }
     
     strategy->enabled = 1;
+    int schedule_ae = (strategy->scheduler_mode == NUMA_STRATEGY_SCHED_AE &&
+                       strategy->ae_time_event_id == AE_DELETED_EVENT_ID &&
+                       strategy_manager.event_loop != NULL);
     pthread_mutex_unlock(&strategy_manager.lock);
-    
+
+    if (schedule_ae)
+        numa_strategy_slot_schedule_ae(slot_id);
+
     STRATEGY_LOG(LL_VERBOSE, "[NUMA Strategy] Enabled slot %d", slot_id);
     return NUMA_STRATEGY_OK;
 }
@@ -438,8 +465,13 @@ int numa_strategy_slot_disable(int slot_id) {
     }
     
     strategy->enabled = 0;
+    long long ae_id = strategy->ae_time_event_id;
+    strategy->ae_time_event_id = AE_DELETED_EVENT_ID;
     pthread_mutex_unlock(&strategy_manager.lock);
-    
+
+    if (ae_id != AE_DELETED_EVENT_ID && strategy_manager.event_loop)
+        aeDeleteTimeEvent(strategy_manager.event_loop, ae_id);
+
     STRATEGY_LOG(LL_VERBOSE, "[NUMA Strategy] Disabled slot %d", slot_id);
     return NUMA_STRATEGY_OK;
 }
@@ -522,15 +554,27 @@ int numa_strategy_slot_status(int slot_id, char *buf, size_t buf_len) {
              "Slot %d: %s\n"
              "  Description: %s\n"
              "  Status: %s\n"
+             "  Scheduler: %s\n"
+             "  AE time event: %lld\n"
+             "  Step budget: %u\n"
+             "  Max runtime per step: %u us\n"
              "  Executions: %llu\n"
              "  Failures: %llu\n"
-             "  Total time: %llu us\n",
+             "  Total time: %llu us\n"
+             "  Max time: %llu us\n"
+             "  Timeouts: %llu\n",
              slot_id, strategy->name,
              strategy->description,
              strategy->enabled ? "enabled" : "disabled",
+             strategy->scheduler_mode == NUMA_STRATEGY_SCHED_AE ? "ae" : "servercron",
+             strategy->ae_time_event_id,
+             strategy->step_budget,
+             strategy->max_runtime_us_per_step,
              (unsigned long long)strategy->total_executions,
              (unsigned long long)strategy->total_failures,
-             (unsigned long long)strategy->total_execution_time_us);
+             (unsigned long long)strategy->total_execution_time_us,
+             (unsigned long long)strategy->max_execution_time_us,
+             (unsigned long long)strategy->timeout_count);
     
     pthread_mutex_unlock(&strategy_manager.lock);
     return NUMA_STRATEGY_OK;
@@ -575,6 +619,10 @@ int numa_strategy_run_slot(int slot_id) {
     strategy->last_execute_time = now;
     strategy->total_executions++;
     strategy->total_execution_time_us += elapsed;
+    if (elapsed > strategy->max_execution_time_us)
+        strategy->max_execution_time_us = elapsed;
+    if (strategy->max_runtime_us_per_step && elapsed >= strategy->max_runtime_us_per_step)
+        strategy->timeout_count++;
     if (result != NUMA_STRATEGY_OK) {
         strategy->total_failures++;
     }
@@ -583,10 +631,164 @@ int numa_strategy_run_slot(int slot_id) {
     return result;
 }
 
+/* AE 调度器 */
+int numa_strategy_scheduler_init(aeEventLoop *el) {
+    if (!el) return NUMA_STRATEGY_EINVAL;
+
+    pthread_mutex_lock(&strategy_manager.lock);
+    strategy_manager.event_loop = el;
+    pthread_mutex_unlock(&strategy_manager.lock);
+
+    STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] AE scheduler initialized");
+    return NUMA_STRATEGY_OK;
+}
+
+int numa_strategy_slot_schedule_ae(int slot_id) {
+    if (slot_id < 0 || slot_id >= NUMA_MAX_STRATEGY_SLOTS) {
+        return NUMA_STRATEGY_EINVAL;
+    }
+
+    pthread_mutex_lock(&strategy_manager.lock);
+
+    numa_strategy_t *strategy = strategy_manager.slots[slot_id];
+    if (!strategy || !strategy->enabled) {
+        pthread_mutex_unlock(&strategy_manager.lock);
+        return NUMA_STRATEGY_ENOENT;
+    }
+    if (!strategy_manager.event_loop) {
+        pthread_mutex_unlock(&strategy_manager.lock);
+        return NUMA_STRATEGY_ERR;
+    }
+    if (strategy->ae_time_event_id != AE_DELETED_EVENT_ID) {
+        pthread_mutex_unlock(&strategy_manager.lock);
+        return NUMA_STRATEGY_OK;
+    }
+
+    long long delay_ms = strategy->execute_interval_us / 1000;
+    if (delay_ms <= 0) delay_ms = 1;
+    aeEventLoop *el = strategy_manager.event_loop;
+    pthread_mutex_unlock(&strategy_manager.lock);
+
+    long long id = aeCreateTimeEvent(el, delay_ms, numa_strategy_slot_time_proc,
+                                     (void*)(intptr_t)slot_id, NULL);
+    if (id == AE_ERR) return NUMA_STRATEGY_ERR;
+
+    pthread_mutex_lock(&strategy_manager.lock);
+    strategy = strategy_manager.slots[slot_id];
+    if (strategy && strategy->enabled) {
+        strategy->scheduler_mode = NUMA_STRATEGY_SCHED_AE;
+        strategy->ae_time_event_id = id;
+    }
+    pthread_mutex_unlock(&strategy_manager.lock);
+
+    STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Scheduled slot %d as AE time event %lld", slot_id, id);
+    return NUMA_STRATEGY_OK;
+}
+
+int numa_strategy_slot_unschedule_ae(int slot_id) {
+    if (slot_id < 0 || slot_id >= NUMA_MAX_STRATEGY_SLOTS) {
+        return NUMA_STRATEGY_EINVAL;
+    }
+
+    pthread_mutex_lock(&strategy_manager.lock);
+
+    numa_strategy_t *strategy = strategy_manager.slots[slot_id];
+    if (!strategy) {
+        pthread_mutex_unlock(&strategy_manager.lock);
+        return NUMA_STRATEGY_ENOENT;
+    }
+
+    long long id = strategy->ae_time_event_id;
+    strategy->ae_time_event_id = AE_DELETED_EVENT_ID;
+    strategy->scheduler_mode = NUMA_STRATEGY_SCHED_SERVERCRON;
+    aeEventLoop *el = strategy_manager.event_loop;
+    pthread_mutex_unlock(&strategy_manager.lock);
+
+    if (id != AE_DELETED_EVENT_ID && el)
+        aeDeleteTimeEvent(el, id);
+
+    STRATEGY_LOG(LL_NOTICE, "[NUMA Strategy] Unscheduled slot %d from AE", slot_id);
+    return NUMA_STRATEGY_OK;
+}
+
+void numa_strategy_scheduler_cron(void) {
+    if (!strategy_manager.initialized || !strategy_manager.event_loop) return;
+
+    for (int slot_id = 0; slot_id < NUMA_MAX_STRATEGY_SLOTS; slot_id++) {
+        pthread_mutex_lock(&strategy_manager.lock);
+        numa_strategy_t *strategy = strategy_manager.slots[slot_id];
+        int needs_schedule = strategy && strategy->enabled &&
+                             strategy->scheduler_mode == NUMA_STRATEGY_SCHED_AE &&
+                             strategy->ae_time_event_id == AE_DELETED_EVENT_ID;
+        pthread_mutex_unlock(&strategy_manager.lock);
+
+        if (needs_schedule)
+            numa_strategy_slot_schedule_ae(slot_id);
+    }
+}
+
+static int numa_strategy_slot_time_proc(aeEventLoop *eventLoop, long long id, void *clientData) {
+    (void)eventLoop;
+    int slot_id = (int)(intptr_t)clientData;
+
+    pthread_mutex_lock(&strategy_manager.lock);
+    numa_strategy_t *strategy = strategy_manager.slots[slot_id];
+    if (!strategy || !strategy->enabled || strategy->ae_time_event_id != id) {
+        pthread_mutex_unlock(&strategy_manager.lock);
+        return AE_NOMORE;
+    }
+
+    uint32_t budget = strategy->step_budget;
+    uint32_t max_runtime_us = strategy->max_runtime_us_per_step;
+    uint64_t interval_us = strategy->execute_interval_us;
+    pthread_mutex_unlock(&strategy_manager.lock);
+
+    uint64_t start_time = get_current_time_us();
+    uint64_t deadline_us = start_time + max_runtime_us;
+    int result = NUMA_STRATEGY_STEP_IDLE;
+
+    if (strategy->vtable && strategy->vtable->execute_step) {
+        result = strategy->vtable->execute_step(strategy, deadline_us, budget);
+    } else if (strategy->vtable && strategy->vtable->execute) {
+        result = strategy->vtable->execute(strategy);
+    }
+
+    uint64_t elapsed = get_current_time_us() - start_time;
+
+    pthread_mutex_lock(&strategy_manager.lock);
+    strategy = strategy_manager.slots[slot_id];
+    if (!strategy || !strategy->enabled || strategy->ae_time_event_id != id) {
+        pthread_mutex_unlock(&strategy_manager.lock);
+        return AE_NOMORE;
+    }
+
+    strategy->last_ae_run_us = start_time;
+    strategy->last_execute_time = start_time;
+    strategy->total_executions++;
+    strategy->total_execution_time_us += elapsed;
+    if (elapsed > strategy->max_execution_time_us)
+        strategy->max_execution_time_us = elapsed;
+    if (max_runtime_us && elapsed >= max_runtime_us)
+        strategy->timeout_count++;
+    if (result < 0)
+        strategy->total_failures++;
+
+    int next_ms;
+    if (result == NUMA_STRATEGY_STEP_AGAIN || result == NUMA_STRATEGY_STEP_TIMEOUT) {
+        next_ms = 1;
+    } else {
+        next_ms = interval_us / 1000;
+        if (next_ms <= 0) next_ms = 1;
+    }
+
+    pthread_mutex_unlock(&strategy_manager.lock);
+    return next_ms;
+}
+
 /* 执行所有启用的策略 */
 void numa_strategy_run_all(void) {
     if (!strategy_manager.initialized) return;
-    
+
     strategy_manager.total_runs++;
     
     /* 按优先级执行：HIGH -> NORMAL -> LOW */
@@ -598,7 +800,8 @@ void numa_strategy_run_all(void) {
             pthread_mutex_lock(&strategy_manager.lock);
             numa_strategy_t *strategy = strategy_manager.slots[slot_id];
             
-            if (strategy && strategy->enabled && strategy->priority == priority) {
+            if (strategy && strategy->enabled && strategy->priority == priority &&
+                strategy->scheduler_mode == NUMA_STRATEGY_SCHED_SERVERCRON) {
                 pthread_mutex_unlock(&strategy_manager.lock);
                 numa_strategy_run_slot(slot_id);
                 strategy_manager.total_strategy_executions++;

@@ -734,6 +734,50 @@ static void numa_cmd_strategy(client *c) {
             return;
         }
 
+        /* NUMA STRATEGY SLOT SCHEDULE <slot_id> ae|servercron */
+        if (!strcasecmp(arg3, "SCHEDULE")) {
+            if (c->argc != 6) {
+                addReplyError(c, "Usage: NUMA STRATEGY SLOT SCHEDULE <slot_id> ae|servercron");
+                return;
+            }
+            long slot_id;
+            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
+                return;
+            const char *mode = c->argv[5]->ptr;
+            int ret;
+            if (!strcasecmp(mode, "ae")) {
+                ret = numa_strategy_slot_schedule_ae((int)slot_id);
+            } else if (!strcasecmp(mode, "servercron")) {
+                ret = numa_strategy_slot_unschedule_ae((int)slot_id);
+            } else {
+                addReplyError(c, "Invalid scheduler mode, expected ae or servercron");
+                return;
+            }
+            if (ret == NUMA_STRATEGY_OK)
+                addReplyStatus(c, "OK");
+            else
+                addReplyErrorFormat(c, "Failed to switch slot %ld scheduler to %s (err=%d)", slot_id, mode, ret);
+            return;
+        }
+
+        /* NUMA STRATEGY SLOT STATUS <slot_id> */
+        if (!strcasecmp(arg3, "STATUS")) {
+            if (c->argc != 5) {
+                addReplyError(c, "Usage: NUMA STRATEGY SLOT STATUS <slot_id>");
+                return;
+            }
+            long slot_id;
+            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
+                return;
+            char buf[1024];
+            int ret = numa_strategy_slot_status((int)slot_id, buf, sizeof(buf));
+            if (ret == NUMA_STRATEGY_OK || ret == NUMA_STRATEGY_ENOENT)
+                addReplyBulkCString(c, buf);
+            else
+                addReplyErrorFormat(c, "Failed to read slot %ld status (err=%d)", slot_id, ret);
+            return;
+        }
+
         /* NUMA STRATEGY SLOT <id> <name> — 向插槽插入策略 */
         if (c->argc != 5) {
             addReplyError(c, "Usage: NUMA STRATEGY SLOT <slot_id> <strategy_name>");
@@ -769,7 +813,7 @@ static void numa_cmd_strategy(client *c) {
 /* ========== NUMA HELP ========== */
 
 static void numa_cmd_help(client *c) {
-    addReplyArrayLen(c, 23);
+    addReplyArrayLen(c, 25);
     /* MIGRATE */
     addReplyBulkCString(c, "NUMA MIGRATE KEY <key> <node>      - Migrate a key to target NUMA node");
     addReplyBulkCString(c, "NUMA MIGRATE DB <node>             - Migrate entire database to target NUMA node");
@@ -794,6 +838,8 @@ static void numa_cmd_help(client *c) {
     addReplyBulkCString(c, "NUMA STRATEGY SLOT <id> <name>     - Insert strategy into slot");
     addReplyBulkCString(c, "NUMA STRATEGY SLOT ENABLE <id>     - Enable a strategy slot");
     addReplyBulkCString(c, "NUMA STRATEGY SLOT DISABLE <id>    - Disable a strategy slot");
+    addReplyBulkCString(c, "NUMA STRATEGY SLOT SCHEDULE <id> ae|servercron - Switch slot scheduler");
+    addReplyBulkCString(c, "NUMA STRATEGY SLOT STATUS <id>     - Show one strategy slot status");
     addReplyBulkCString(c, "NUMA STRATEGY LIST                 - List all registered strategy slots");
     /* HELP */
     addReplyBulkCString(c, "NUMA HELP                          - Show this help message");
