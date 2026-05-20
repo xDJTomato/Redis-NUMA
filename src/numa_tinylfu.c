@@ -26,6 +26,7 @@
 #include <pthread.h>
 #include <numa.h>
 #include <sched.h>
+#include <sys/time.h>
 
 extern void _serverLog(int level, const char *fmt, ...);
 extern uint64_t dictGenHashFunction(const void *key, int len);
@@ -39,6 +40,12 @@ extern uint64_t dictGenHashFunction(const void *key, int len);
 
 /* 主线程 NUMA 节点（与 composite_lru 共享） */
 static int g_main_thread_node = 0;
+
+static uint64_t tinylfu_now_us(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
 
 /* ========== CMS 4-bit packed 操作 ========== */
 
@@ -151,6 +158,7 @@ static inline void dk_add(tinylfu_doorkeeper_t *dk, uint64_t hash) {
 static int ring_alloc(tinylfu_data_t *d) {
     d->ring = zcalloc(sizeof(tinylfu_candidate_t) * d->config.ring_size);
     d->ring_head = 0;
+    d->ring_tail = 0;
     d->ring_count = 0;
     return d->ring ? 0 : -1;
 }
@@ -173,8 +181,27 @@ static void ring_push(tinylfu_data_t *d, sds key, void *val, void *data_ptr,
     d->ring[slot].data_ptr = data_ptr;
     d->ring[slot].target_node = target_node;
     d->ring[slot].freq_snapshot = freq;
-    d->ring_head++;
-    if (d->ring_count < d->config.ring_size) d->ring_count++;
+    d->ring_head = (slot + 1) % d->config.ring_size;
+    if (d->ring_count < d->config.ring_size) {
+        d->ring_count++;
+    } else {
+        d->ring_tail = (d->ring_tail + 1) % d->config.ring_size;
+    }
+}
+
+static int ring_pop(tinylfu_data_t *d, tinylfu_candidate_t *out) {
+    if (d->ring_count == 0) return 0;
+
+    tinylfu_candidate_t *c = &d->ring[d->ring_tail];
+    *out = *c;
+    memset(c, 0, sizeof(*c));
+    d->ring_tail = (d->ring_tail + 1) % d->config.ring_size;
+    d->ring_count--;
+    if (d->ring_count == 0) {
+        d->ring_head = 0;
+        d->ring_tail = 0;
+    }
+    return 1;
 }
 
 /* ========== 访问记录（热路径，在 lookupKey 中调用） ========== */
@@ -245,40 +272,37 @@ decay_check:
 
 /* ========== 策略执行（serverCron 每秒调用） ========== */
 
-int tinylfu_execute(numa_strategy_t *strategy) {
+int tinylfu_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget) {
     tinylfu_data_t *d = strategy->private_data;
-    if (!d || !d->config.auto_migrate_enabled || !d->db) return 0;
-    if (d->ring_count == 0) return 0;
+    if (!d || !d->config.auto_migrate_enabled || !d->db) return NUMA_STRATEGY_STEP_IDLE;
+    if (d->ring_count == 0) return NUMA_STRATEGY_STEP_IDLE;
 
-    uint32_t budget = d->config.migration_budget;
+    if (budget == 0) budget = d->config.migration_budget;
+
     uint32_t migrated = 0;
     uint32_t processed = 0;
+    uint32_t failed_before = d->stat_migrations_failed;
+    int hit_deadline = 0;
 
-    /* 从最旧的候选开始处理 */
-    uint32_t size = d->config.ring_size;
-    uint32_t start;
-    if (d->ring_count >= size)
-        start = d->ring_head % size;
-    else
-        start = (d->ring_head - d->ring_count + size) % size;
+    while (d->ring_count > 0 && processed < budget) {
+        if (deadline_us && tinylfu_now_us() >= deadline_us) {
+            hit_deadline = 1;
+            break;
+        }
 
-    uint32_t count = d->ring_count;
-
-    for (uint32_t i = 0; i < count && migrated < budget; i++) {
-        uint32_t idx = (start + i) % size;
-        tinylfu_candidate_t *c = &d->ring[idx];
-        if (!c->key) continue;
+        tinylfu_candidate_t c;
+        if (!ring_pop(d, &c)) break;
+        if (!c.key) continue;
 
         processed++;
 
-        /* 重新估计频率以确认仍然是热点 */
-        uint64_t hash = dictGenHashFunction(c->key, sdslen(c->key));
+        uint64_t hash = dictGenHashFunction(c.key, sdslen(c.key));
         uint8_t current_freq = cms_estimate(&d->cms, hash);
         if (dk_test(&d->doorkeeper, hash) && current_freq < TINYLFU_COUNTER_MAX)
             current_freq++;
 
         if (current_freq >= d->config.migrate_threshold) {
-            int ret = numa_migrate_key_by_name(d->db, c->key, c->target_node);
+            int ret = numa_migrate_key_by_name(d->db, c.key, c.target_node);
             if (ret == 0) {
                 migrated++;
                 d->stat_migrations_done++;
@@ -287,22 +311,27 @@ int tinylfu_execute(numa_strategy_t *strategy) {
             }
         }
 
-        sdsfree(c->key);
-        c->key = NULL;
-        c->val = NULL;
-        c->data_ptr = NULL;
+        sdsfree(c.key);
     }
 
-    d->ring_count = 0;
-    d->ring_head = 0;
-
-    if (migrated > 0 && d->config.debug_logging_enabled) {
+    if (processed > 0 && d->config.debug_logging_enabled) {
         TLFU_LOG(LL_NOTICE,
-            "[TinyLFU] cycle: processed=%u migrated=%u failed=%lu",
-            processed, migrated, (unsigned long)d->stat_migrations_failed);
+            "[TinyLFU] step: processed=%u migrated=%u failed_delta=%u pending=%u",
+            processed, migrated,
+            (uint32_t)(d->stat_migrations_failed - failed_before),
+            d->ring_count);
     }
 
-    return (int)migrated;
+    if (hit_deadline) return NUMA_STRATEGY_STEP_TIMEOUT;
+    if (d->ring_count > 0) return NUMA_STRATEGY_STEP_AGAIN;
+    if (processed > 0) return NUMA_STRATEGY_STEP_PROGRESS;
+    return NUMA_STRATEGY_STEP_IDLE;
+}
+
+int tinylfu_execute(numa_strategy_t *strategy) {
+    tinylfu_data_t *d = strategy->private_data;
+    if (!d) return NUMA_STRATEGY_STEP_IDLE;
+    return tinylfu_execute_step(strategy, 0, d->config.migration_budget);
 }
 
 /* ========== vtable 实现 ========== */
@@ -447,6 +476,7 @@ static int tinylfu_get_config(numa_strategy_t *strategy,
 static const numa_strategy_vtable_t tinylfu_vtable = {
     .init = tinylfu_init,
     .execute = tinylfu_execute,
+    .execute_step = tinylfu_execute_step,
     .cleanup = tinylfu_cleanup,
     .get_name = tinylfu_get_name,
     .get_description = tinylfu_get_description,
@@ -463,6 +493,8 @@ numa_strategy_t* tinylfu_create(void) {
     s->type = STRATEGY_TYPE_PERIODIC;
     s->priority = STRATEGY_PRIORITY_HIGH;
     s->execute_interval_us = 1000000; /* 1 秒 */
+    s->step_budget = TINYLFU_DEFAULT_MIGRATION_BUDGET;
+    s->max_runtime_us_per_step = 500;
     s->enabled = 1;
     s->name = "tinylfu";
     s->description = "TinyLFU frequency-based hot data migration";

@@ -86,6 +86,7 @@ typedef struct {
     /* 候选环形缓冲区 */
     tinylfu_candidate_t *ring;
     uint32_t ring_head;
+    uint32_t ring_tail;
     uint32_t ring_count;
 
     /* 统计 */
@@ -123,6 +124,7 @@ void tinylfu_set_main_thread_node(int node);
 /* vtable 实现 */
 int  tinylfu_init(numa_strategy_t *strategy);
 int  tinylfu_execute(numa_strategy_t *strategy);
+int  tinylfu_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget);
 void tinylfu_cleanup(numa_strategy_t *strategy);
 
 #endif /* NUMA_TINYLFU_H */

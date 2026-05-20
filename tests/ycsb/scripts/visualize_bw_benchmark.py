@@ -194,6 +194,65 @@ def remap_time(data, own_ranges, unified_grid):
     return norm
 
 
+def plot_latency_comparison(latency_sets, output_path, title=None, dpi=150):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    latency_sets = [s for s in latency_sets if s.get('latencies')]
+    if not latency_sets:
+        print("WARN: No latency data to plot")
+        return True
+
+    phases = []
+    for s in latency_sets:
+        for phase, _ in s['latencies']:
+            if phase not in phases:
+                phases.append(phase)
+
+    values = []
+    for s in latency_sets:
+        by_phase = dict(s['latencies'])
+        values.append([by_phase.get(phase, 0) for phase in phases])
+
+    x = np.arange(len(phases))
+    width = min(0.18, 0.8 / max(len(latency_sets), 1))
+
+    fig, ax = plt.subplots(1, 1, figsize=(8.5, 4.8))
+    if title is None:
+        title = 'Phase-Level Memory-Access Latency under Sustained Hotspot Discovery Workload'
+    fig.suptitle(title, fontsize=13, fontweight='bold')
+
+    for i, s in enumerate(latency_sets):
+        offset = (i - (len(latency_sets) - 1) / 2) * width
+        color = color_for_label(s['label'], i)
+        ax.bar(x + offset, values[i], width=width, label=s['label'], color=color, alpha=0.88)
+
+    ax.set_title('Average Operation Latency by Phase', fontsize=11)
+    ax.set_xlabel('Benchmark Phase', fontsize=10)
+    ax.set_ylabel('Average Latency (µs)', fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(phases)
+    ax.grid(True, axis='y', alpha=0.3, linestyle='--')
+    ax.legend(fontsize=8, frameon=True)
+    ax.tick_params(labelsize=8)
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.86, bottom=0.14)
+
+    try:
+        plt.savefig(output_path, dpi=dpi, facecolor='white', edgecolor='none',
+                    bbox_inches='tight', pad_inches=0.08)
+        w, h = fig.get_size_inches()
+        print(f"Latency report saved: {output_path} ({int(w*dpi)}x{int(h*dpi)}px @ {dpi} DPI)")
+    except Exception as exc:
+        print(f"ERROR: Failed to save latency report: {exc}")
+        return False
+    finally:
+        plt.close(fig)
+
+    return True
+
+
 def plot_report(datasets, latency_sets, output_path, title=None, dpi=150):
     import matplotlib
     matplotlib.use('Agg')
@@ -357,6 +416,8 @@ def main():
         print(f"  {len(compare3['time'])} points")
 
     ok = plot_report(datasets, latency_sets, args.output, args.title, args.dpi)
+    latency_output = os.path.splitext(args.output)[0] + '_latency.png'
+    ok = plot_latency_comparison(latency_sets, latency_output, args.title, args.dpi) and ok
     sys.exit(0 if ok else 1)
 
 

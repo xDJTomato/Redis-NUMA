@@ -134,11 +134,11 @@ NUMA STRATEGY SLOT STATUS <slot>
 
 可先用 slot 0 或 slot 2 做低风险验证，确认 AE event 注册、注销和状态统计符合预期。
 
-### Step 2：TinyLFU execute_step
+### Step 2：TinyLFU execute_step（已实现）
 
-TinyLFU 已经有 candidate ring 和迁移预算，更适合作为第一批改造对象。下一步应将一次 `execute()` 中的 ring 消费改为按 `budget` 分批处理，并在处理若干候选后检查 `deadline_us`。
+TinyLFU 已经接入 `execute_step(deadline_us, budget)`：candidate ring 现在维护 `head/tail/count`，策略执行时通过 `ring_pop()` 分批消费候选，并在每轮开始检查 `deadline_us`。当达到预算或 deadline 时，函数通过 `AGAIN` / `TIMEOUT` 通知 AE scheduler 尽快继续，而不是一次性清空 ring。
 
-目标返回值：
+返回值语义：
 
 ```text
 IDLE      本轮无候选
@@ -147,6 +147,8 @@ AGAIN     ring 中仍有积压，希望尽快继续
 TIMEOUT   达到 deadline，主动让出
 ERROR     策略执行失败
 ```
+
+为兼容 `serverCron` 路径，策略执行统计只将负返回值计为 failure；`PROGRESS` / `AGAIN` 等正向 step 状态不再被误判为失败。
 
 ### Step 3：Composite LRU execute_step
 
@@ -163,7 +165,17 @@ AE migration executor -> process limited tasks
 
 这样可以避免多策略同时迁移导致主线程单轮占用过长。
 
-## 6. 验证标准
+## 6. 验证结果
+
+本轮实现后的验证结果如下：
+
+1. `/home/xdjtomato/下载/Redis-NUMA/Redis-NUMA/src` 下执行 `make -j$(nproc)` 编译通过；
+2. 重新运行 full_test，生成四组对比图 `benchmark_compare.png`，并新增阶段级平均访存/操作延迟对比图 `benchmark_compare_latency.png`；
+3. 重新运行 progressive hotspot，生成 `progressive_hotspot_compare_throughput.png`、`progressive_hotspot_compare_latency.png` 与兼容副本 `progressive_hotspot_compare.png`；
+4. 重新运行 size sweep，生成 `size_sweep_compare_throughput.png`、`size_sweep_compare_bandwidth.png` 和 `size_sweep_compare_latency.png`；
+5. TinyLFU full_test 统计中 `tinylfu_migrations_done=19812`、`tinylfu_migrations_failed=0`，且 `tinylfu_accesses_local` / `tinylfu_accesses_remote` 已输出，可用于本地命中率曲线。
+
+## 7. 验证标准
 
 当前骨架阶段的验证标准：
 
@@ -174,6 +186,6 @@ AE migration executor -> process limited tasks
 5. 禁用或移除 slot 时，已注册的 AE time event 会被删除；
 6. 未实现 `execute_step()` 的策略能够回退到 `execute()`。
 
-## 7. 预期收益
+## 8. 预期收益
 
 该骨架完成后，Redis-NUMA 策略框架具备从“所有策略挤在 `serverCron` 中串行执行”演进到“每个策略 slot 独立 AE time event 调度”的基础能力。真正的性能收益需要在 TinyLFU / Composite LRU 小步化之后体现：策略执行可以被 deadline 和 budget 限制，减少单次主线程阻塞，并为后续异步迁移队列提供调度入口。

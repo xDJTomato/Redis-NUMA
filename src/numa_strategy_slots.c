@@ -623,7 +623,7 @@ int numa_strategy_run_slot(int slot_id) {
         strategy->max_execution_time_us = elapsed;
     if (strategy->max_runtime_us_per_step && elapsed >= strategy->max_runtime_us_per_step)
         strategy->timeout_count++;
-    if (result != NUMA_STRATEGY_OK) {
+    if (result < 0) {
         strategy->total_failures++;
     }
     pthread_mutex_unlock(&strategy_manager.lock);
