@@ -86,6 +86,7 @@ typedef struct {
     /* 热点候选池（环形缓冲区，快速通道）*/
     hot_candidate_t *hot_candidates;    /* 大小 = config.hot_candidates_size */
     uint32_t  candidates_head;          /* 写入游标（模 size 取 slot，覆盖最旧）*/
+    uint32_t  candidates_tail;          /* 消费游标（指向最旧有效候选）*/
     uint32_t  candidates_count;         /* 当前有效数量（最多 = hot_candidates_size）*/
 
     /* 渐进扫描游标（兜底通道）*/
@@ -124,6 +125,7 @@ void composite_lru_destroy(numa_strategy_t *strategy);
 /* 策略操作函数 */
 int  composite_lru_init(numa_strategy_t *strategy);
 int  composite_lru_execute(numa_strategy_t *strategy);
+int  composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget);
 void composite_lru_cleanup(numa_strategy_t *strategy);
 
 /* 热度管理 */

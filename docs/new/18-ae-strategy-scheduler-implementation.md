@@ -2,9 +2,9 @@
 
 ## 1. 实现目标
 
-本次改动在现有 `serverCron` 策略 slot 调度路径之外，增加一套可选的 Redis AE time event 调度骨架。目标不是一次性把 Composite LRU 和 TinyLFU 全部改成真正异步迁移，而是先把调度入口接入 Redis 原生事件循环，为后续 `execute_step(deadline_us, budget)` 小步执行和迁移预算控制提供基础。
+本次实现把调度入口接入 Redis 原生事件循环，并逐步完成 TinyLFU 与 Composite LRU 的 `execute_step(deadline_us, budget)` 小步化，为迁移预算控制提供基础。
 
-当前默认行为仍保持 `serverCron` 调度，避免影响已有 benchmark 结果。AE 调度能力通过新增接口显式启用。
+本次实现保留 `serverCron` 作为默认调度路径，避免影响已有 benchmark 入口。AE 调度能力通过新增接口显式启用。
 
 ## 2. 本次代码改动
 
@@ -111,9 +111,9 @@ AGAIN / TIMEOUT -> 1ms 后再次调度
 
 ## 4. 当前边界
 
-本次实现只是调度骨架，不改变迁移语义：
+本轮实现仍不改变默认调度语义：
 
-1. Composite LRU 和 TinyLFU 尚未实现真正的 `execute_step()`；
+1. TinyLFU 和 Composite LRU 均已实现 `execute_step()`，但默认仍由 `serverCron` 触发；
 2. 大对象迁移仍可能在主线程同步执行；
 3. AE time event 本身仍运行在 Redis 主线程，不等价于后台并行；
 4. 默认不自动把 slot 1 或 slot 2 切到 AE 模式；
@@ -150,9 +150,11 @@ ERROR     策略执行失败
 
 为兼容 `serverCron` 路径，策略执行统计只将负返回值计为 failure；`PROGRESS` / `AGAIN` 等正向 step 状态不再被误判为失败。
 
-### Step 3：Composite LRU execute_step
+### Step 3：Composite LRU execute_step（已实现）
 
-Composite LRU 需要将 candidate ring 消费、渐进 scan 和迁移分别小步化。迁移操作仍在主线程执行，但每轮必须限制迁移数量和执行时间。
+Composite LRU 已经将 candidate ring 消费和渐进 scan 接入 `execute_step(deadline_us, budget)`。热点候选池现在维护 `head/tail/count`，执行路径从 `tail` 分批消费候选，迁移前重读 key 当前热度和 NUMA 位置；当候选处理后仍有预算时，再推进有限数量的渐进扫描。
+
+`composite_lru_execute()` 保留为 `serverCron` 兼容入口，内部调用 `composite_lru_execute_step(strategy, 0, 0)`，并将非负 step 状态转换为成功返回。
 
 ### Step 4：统一 migration queue
 
@@ -171,9 +173,12 @@ AE migration executor -> process limited tasks
 
 1. `/home/xdjtomato/下载/Redis-NUMA/Redis-NUMA/src` 下执行 `make -j$(nproc)` 编译通过；
 2. 重新运行 full_test，生成四组对比图 `benchmark_compare.png`，并新增阶段级平均访存/操作延迟对比图 `benchmark_compare_latency.png`；
-3. 重新运行 progressive hotspot，生成 `progressive_hotspot_compare_throughput.png`、`progressive_hotspot_compare_latency.png` 与兼容副本 `progressive_hotspot_compare.png`；
-4. 重新运行 size sweep，生成 `size_sweep_compare_throughput.png`、`size_sweep_compare_bandwidth.png` 和 `size_sweep_compare_latency.png`；
-5. TinyLFU full_test 统计中 `tinylfu_migrations_done=19812`、`tinylfu_migrations_failed=0`，且 `tinylfu_accesses_local` / `tinylfu_accesses_remote` 已输出，可用于本地命中率曲线。
+3. 清理残留 benchmark 进程后重新运行 progressive hotspot，生成 `progressive_hotspot_compare_throughput.png`、`progressive_hotspot_compare_latency.png` 与兼容副本 `progressive_hotspot_compare.png`；
+4. 清理残留 benchmark 进程后重新运行 size sweep，生成 `size_sweep_compare_throughput.png`、`size_sweep_compare_bandwidth.png` 和 `size_sweep_compare_latency.png`；
+5. Composite LRU `execute_step()` 接入后重新执行本地编译，编译通过；
+6. 修复 TinyLFU 小对象 HASH 迁移重复计数后，32B/64B/128B/512B/1024B/4096B 小对象复测未再出现 `SocketTimeoutException`；
+7. 在当前修改基础上重新运行完整 progressive hotspot，最新目录为 `tests/ycsb/results/progressive_hotspot_full_20260521_002028/`，四组变体均完成 32 个线程点并生成吞吐和延迟对比图；
+8. 在当前修改基础上重新运行完整 size sweep，最新目录为 `tests/ycsb/results/size_sweep_full_20260521_003836/`，四组变体均完成 17 个 value size 点并生成吞吐、带宽和延迟对比图。
 
 ## 7. 验证标准
 

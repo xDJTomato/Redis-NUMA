@@ -255,6 +255,7 @@ int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_co
             return NUMA_STRATEGY_ERR;
         }
         data->candidates_head  = 0;
+        data->candidates_tail  = 0;
         data->candidates_count = 0;
     }
 
@@ -415,14 +416,18 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
         if (mem_node != current_node &&
             hotness_before < thr && hotness >= thr) {
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
+            if (data->hot_candidates[idx].key) sdsfree(data->hot_candidates[idx].key);
             data->hot_candidates[idx].key             = sdsdup((sds)key);
             data->hot_candidates[idx].val             = val;
             data->hot_candidates[idx].data_ptr        = data_ptr;
             data->hot_candidates[idx].target_node     = current_node;
             data->hot_candidates[idx].hotness_snapshot = hotness;
-            data->candidates_head++;
-            if (data->candidates_count < data->config.hot_candidates_size)
+            data->candidates_head = (idx + 1) % data->config.hot_candidates_size;
+            if (data->candidates_count < data->config.hot_candidates_size) {
                 data->candidates_count++;
+            } else {
+                data->candidates_tail = (data->candidates_tail + 1) % data->config.hot_candidates_size;
+            }
             data->candidates_written++;
             _serverLog(LL_DEBUG,
                 "[Composite LRU] Candidate written: val=%p mem_node=%d cpu_node=%d hotness=%d",
@@ -491,13 +496,17 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             hotness_before < thr && info->hotness >= thr) {
             info->preferred_node = current_node;
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
+            if (data->hot_candidates[idx].key) sdsfree(data->hot_candidates[idx].key);
             data->hot_candidates[idx].key             = sdsdup((sds)key);
             data->hot_candidates[idx].val             = NULL;  /* 字典路径无 val 指针 */
             data->hot_candidates[idx].target_node     = current_node;
             data->hot_candidates[idx].hotness_snapshot = info->hotness;
-            data->candidates_head++;
-            if (data->candidates_count < data->config.hot_candidates_size)
+            data->candidates_head = (idx + 1) % data->config.hot_candidates_size;
+            if (data->candidates_count < data->config.hot_candidates_size) {
                 data->candidates_count++;
+            } else {
+                data->candidates_tail = (data->candidates_tail + 1) % data->config.hot_candidates_size;
+            }
             data->candidates_written++;
         }
     }
@@ -661,56 +670,48 @@ int composite_lru_init(numa_strategy_t *strategy) {
 }
 
 /*
- * composite_lru_execute - serverCron 每秒调用
+ * composite_lru_execute_step - 小步执行 Composite LRU 迁移策略
  *
  * 流程：
  *   1. 若 auto_migrate_enabled == 0，直接返回
- *   2. 快速通道：处理候选池，重读 PREFIX 热度，仍满足条件则迁移
- *   3. 兜底通道：渐进扫描 key_heat_map，每次 scan_batch_size 个 key
+ *   2. 快速通道：按预算处理候选池，重读 PREFIX 热度，仍满足条件则迁移
+ *   3. 兜底通道：在剩余预算内推进 key_heat_map 渐进扫描
  */
-int composite_lru_execute(numa_strategy_t *strategy) {
-    if (!strategy || !strategy->private_data) return NUMA_STRATEGY_ERR;
+int composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget) {
+    if (!strategy || !strategy->private_data) return NUMA_STRATEGY_STEP_ERROR;
     composite_lru_data_t *data = strategy->private_data;
 
-    /* 自动迁移开关 */
-    if (!data->config.auto_migrate_enabled) return NUMA_STRATEGY_OK;
+    if (!data->config.auto_migrate_enabled) return NUMA_STRATEGY_STEP_IDLE;
 
-    /* 定期执行日志（每10秒一次）*/
-    {
-        static uint64_t last_log_time = 0;
-        static uint64_t exec_count = 0;
-        exec_count++;
-        uint64_t now = get_current_time_us();
-        if (now - last_log_time > 10000000) {  /* 10秒 */
-            _serverLog(LL_VERBOSE,
-                "[NUMA Strategy Slot 1] Composite LRU executed "
-                "(count: %llu, candidates: %u, heat_updates: %llu, "
-                "migrations: %llu, bw_blocked: %llu, overloaded: %llu, "
-                "candidates_written: %llu, scan_checked: %llu, heat_map_size: %lu, "
-                "local: %llu, remote: %llu)",
-                (unsigned long long)exec_count,
-                data->candidates_count,
-                (unsigned long long)data->heat_updates,
-                (unsigned long long)data->migrations_triggered,
-                (unsigned long long)data->migrations_bw_blocked,
-                (unsigned long long)data->migrations_overloaded,
-                (unsigned long long)data->candidates_written,
-                (unsigned long long)data->scan_keys_checked,
-                (unsigned long)dictSize(data->key_heat_map),
-                (unsigned long long)data->accesses_local,
-                (unsigned long long)data->accesses_remote);
-            last_log_time = now;
-        }
+    static uint64_t last_log_time = 0;
+    static uint64_t exec_count = 0;
+    exec_count++;
+    uint64_t now = get_current_time_us();
+    if (now - last_log_time > 10000000) {
+        _serverLog(LL_VERBOSE,
+            "[NUMA Strategy Slot 1] Composite LRU executed "
+            "(count: %llu, candidates: %u, heat_updates: %llu, "
+            "migrations: %llu, bw_blocked: %llu, overloaded: %llu, "
+            "candidates_written: %llu, scan_checked: %llu, heat_map_size: %lu, "
+            "local: %llu, remote: %llu)",
+            (unsigned long long)exec_count,
+            data->candidates_count,
+            (unsigned long long)data->heat_updates,
+            (unsigned long long)data->migrations_triggered,
+            (unsigned long long)data->migrations_bw_blocked,
+            (unsigned long long)data->migrations_overloaded,
+            (unsigned long long)data->candidates_written,
+            (unsigned long long)data->scan_keys_checked,
+            (unsigned long)dictSize(data->key_heat_map),
+            (unsigned long long)data->accesses_local,
+            (unsigned long long)data->accesses_remote);
+        last_log_time = now;
     }
 
-    /* ---- 快速通道：处理热点候选池 ---- */
-    uint32_t pool_size   = data->config.hot_candidates_size;
-    uint32_t count       = data->candidates_count;
-    /* 起始槽：最旧的条目（环形缓冲区从 head-count 开始）*/
-    uint32_t start_slot  = (count < pool_size)
-                           ? 0
-                           : (data->candidates_head % pool_size);
-    uint32_t processed   = 0;
+    uint32_t pool_size = data->config.hot_candidates_size;
+    uint32_t processed = 0;
+    uint32_t migrated = 0;
+    int hit_deadline = 0;
 
     int main_node = get_current_numa_node();
     int load_weight = numa_config_get_cached_pressure_weight(main_node);
@@ -719,23 +720,39 @@ int composite_lru_execute(numa_strategy_t *strategy) {
     uint32_t migration_multiplier = data->config.migration_rate_multiplier;
     if (migration_multiplier < 1) migration_multiplier = 1;
     if (migration_multiplier > 100) migration_multiplier = 100;
-    uint32_t migration_budget = (pool_size * (uint32_t)load_weight * migration_multiplier + 99) / 100;
-    if (migration_budget < 64) migration_budget = 64;
+
+    uint32_t migration_budget;
+    if (budget > 0) {
+        migration_budget = budget;
+    } else {
+        migration_budget = (pool_size * (uint32_t)load_weight * migration_multiplier + 99) / 100;
+        if (migration_budget < 64) migration_budget = 64;
+    }
     if (migration_budget > pool_size) migration_budget = pool_size;
 
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t idx = (start_slot + i) % pool_size;
-        hot_candidate_t *cand = &data->hot_candidates[idx];
-        if (!cand->key) continue;
+    while (data->candidates_count > 0 && processed < migration_budget) {
+        if (deadline_us && get_current_time_us() >= deadline_us) {
+            hit_deadline = 1;
+            break;
+        }
 
-        /* 从字典重新查找 key，获取当前 robj（避免 use-after-free） */
+        hot_candidate_t *cand = &data->hot_candidates[data->candidates_tail];
+        data->candidates_tail = (data->candidates_tail + 1) % pool_size;
+        data->candidates_count--;
+        processed++;
+
+        if (!cand->key) {
+            memset(cand, 0, sizeof(*cand));
+            continue;
+        }
+
         uint8_t cur_hotness;
         int mem_node;
         if (data->db) {
             dictEntry *de = dictFind(data->db->dict, cand->key);
             if (!de) {
                 sdsfree(cand->key);
-                cand->key = NULL;
+                memset(cand, 0, sizeof(*cand));
                 continue;
             }
             robj *cur_val = dictGetVal(de);
@@ -749,14 +766,13 @@ int composite_lru_execute(numa_strategy_t *strategy) {
             composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, cand->key);
             if (!info) {
                 sdsfree(cand->key);
-                cand->key = NULL;
+                memset(cand, 0, sizeof(*cand));
                 continue;
             }
             cur_hotness = info->hotness;
-            mem_node    = info->current_node;
+            mem_node = info->current_node;
         }
 
-        /* 带宽感知：源节点繁忙时降低迁移门槛 */
         int effective_threshold = data->config.migrate_hotness_threshold;
         double src_bw = (double)numa_config_get_cached_bw(mem_node) / 100.0;
         if (src_bw > 0.7 && effective_threshold > 1) {
@@ -765,7 +781,7 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                 "[Composite LRU] Source node %d bw=%.2f > 0.7, lowering threshold to %d",
                 mem_node, src_bw, effective_threshold);
         }
-        if (processed < migration_budget && cur_hotness >= effective_threshold && mem_node != cand->target_node) {
+        if (cur_hotness >= effective_threshold && mem_node != cand->target_node) {
             int status = check_resource_status(data, cand->target_node);
             if (status == RESOURCE_BANDWIDTH_SATURATED) {
                 data->migrations_bw_blocked++;
@@ -789,7 +805,7 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                     }
                     if (rc == 0) {
                         data->migrations_completed++;
-                        processed++;
+                        migrated++;
                     } else {
                         data->migrations_failed++;
                     }
@@ -801,23 +817,41 @@ int composite_lru_execute(numa_strategy_t *strategy) {
                 data->migrations_triggered++;
             }
         }
-        /* 清空已处理槽位 */
+
         sdsfree(cand->key);
-        cand->key = NULL;
-        cand->val = NULL;
-    }
-    /* 处理后重置候选池计数 */
-    if (count > 0) {
-        data->candidates_count = 0;
-        data->candidates_head  = 0;
+        memset(cand, 0, sizeof(*cand));
     }
 
-    /* ---- 兜底通道：渐进扫描 key_heat_map ---- */
-    uint32_t scan_budget = data->config.scan_batch_size * (uint32_t)load_weight * migration_multiplier / 100;
-    if (scan_budget < 64) scan_budget = 64;
-    composite_lru_scan_once(strategy, scan_budget, NULL, NULL);
+    if (data->candidates_count == 0) {
+        data->candidates_head = 0;
+        data->candidates_tail = 0;
+    }
 
-    return NUMA_STRATEGY_OK;
+    if (!hit_deadline && processed < migration_budget) {
+        uint32_t scan_budget = data->config.scan_batch_size * (uint32_t)load_weight * migration_multiplier / 100;
+        if (scan_budget < 64) scan_budget = 64;
+        uint32_t remaining = migration_budget - processed;
+        if (scan_budget > remaining) scan_budget = remaining;
+        if (deadline_us && get_current_time_us() >= deadline_us) {
+            hit_deadline = 1;
+        } else if (scan_budget > 0) {
+            uint64_t scanned = 0, scan_migrated = 0;
+            int ret = composite_lru_scan_once(strategy, scan_budget, &scanned, &scan_migrated);
+            if (ret < 0) return NUMA_STRATEGY_STEP_ERROR;
+            processed += (uint32_t)scanned;
+            migrated += (uint32_t)scan_migrated;
+        }
+    }
+
+    if (hit_deadline) return NUMA_STRATEGY_STEP_TIMEOUT;
+    if (data->candidates_count > 0) return NUMA_STRATEGY_STEP_AGAIN;
+    if (processed > 0 || migrated > 0) return NUMA_STRATEGY_STEP_PROGRESS;
+    return NUMA_STRATEGY_STEP_IDLE;
+}
+
+int composite_lru_execute(numa_strategy_t *strategy) {
+    int ret = composite_lru_execute_step(strategy, 0, 0);
+    return ret < 0 ? NUMA_STRATEGY_ERR : NUMA_STRATEGY_OK;
 }
 
 /* 策略清理 */
@@ -972,6 +1006,7 @@ int composite_lru_get_config(numa_strategy_t *strategy,
 static const numa_strategy_vtable_t composite_lru_vtable = {
     .init = composite_lru_init,
     .execute = composite_lru_execute,
+    .execute_step = composite_lru_execute_step,
     .cleanup = composite_lru_cleanup,
     .get_name = composite_lru_get_name,
     .get_description = composite_lru_get_description,
@@ -994,6 +1029,8 @@ numa_strategy_t* composite_lru_create(void) {
     strategy->priority = STRATEGY_PRIORITY_HIGH;
     strategy->enabled = 1;
     strategy->execute_interval_us = 1000000;  /* 1秒 */
+    strategy->step_budget = 512;
+    strategy->max_runtime_us_per_step = 500;
     strategy->vtable = &composite_lru_vtable;
     
     return strategy;

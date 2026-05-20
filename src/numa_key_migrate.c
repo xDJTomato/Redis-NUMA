@@ -299,6 +299,46 @@ void numa_perform_heat_decay(void) {
 
 /* ========== 类型特定迁移适配器 ========== */
 
+void *numa_object_sample_alloc_ptr(robj *val) {
+    if (!val || !val->ptr) return NULL;
+
+    if (val->type == OBJ_STRING) {
+        if (val->encoding == OBJ_ENCODING_RAW) return sdsAllocPtr(val->ptr);
+        return NULL;
+    }
+
+    switch (val->encoding) {
+    case OBJ_ENCODING_ZIPLIST:
+    case OBJ_ENCODING_INTSET:
+    case OBJ_ENCODING_QUICKLIST:
+    case OBJ_ENCODING_SKIPLIST:
+    case OBJ_ENCODING_STREAM:
+        return val->ptr;
+    case OBJ_ENCODING_HT: {
+        dict *d = val->ptr;
+        dictEntry *sample = NULL;
+        for (int t = 0; t <= 1 && !sample; t++) {
+            if (!d->ht[t].table || d->ht[t].used == 0) continue;
+            for (unsigned long i = 0; i < d->ht[t].size && i < 8; i++) {
+                if (d->ht[t].table[i]) { sample = d->ht[t].table[i]; break; }
+            }
+        }
+        if (!sample) return val->ptr;
+        if (val->type == OBJ_HASH) {
+            sds value = dictGetVal(sample);
+            return value ? sdsAllocPtr(value) : val->ptr;
+        }
+        if (val->type == OBJ_SET) {
+            sds member = dictGetKey(sample);
+            return member ? sdsAllocPtr(member) : val->ptr;
+        }
+        return val->ptr;
+    }
+    default:
+        return val->ptr;
+    }
+}
+
 /* 迁移 STRING 类型 */
 int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
     (void)key_obj;
@@ -336,29 +376,37 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
     (void)key_obj;  /* 未使用参数 */
     
     if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
-        /* Ziplist编码：整体迁移 */
         unsigned char *old_zl = val_obj->ptr;
+        int cur_node = numa_get_node_id(old_zl);
+        if (cur_node == target_node)
+            return NUMA_KEY_MIGRATE_OK;
+
         size_t zl_len = ziplistBlobLen(old_zl);
-        
+
         unsigned char *new_zl = numa_zmalloc_onnode(zl_len, target_node);
         if (!new_zl) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
+
         memcpy(new_zl, old_zl, zl_len);
         val_obj->ptr = new_zl;
         zfree(old_zl);
-        
-        KEY_MIGRATE_LOG(LL_DEBUG, 
+        numa_set_node_id(val_obj, target_node);
+        numa_set_migrated(val_obj, 1);
+
+        KEY_MIGRATE_LOG(LL_DEBUG,
             "[NUMA Key Migrate] Hash (ziplist) migrated, size: %zu bytes", zl_len);
         return NUMA_KEY_MIGRATE_OK;
-        
+
     } else if (val_obj->encoding == OBJ_ENCODING_HT) {
+        dict *old_dict = val_obj->ptr;
+        int cur_node = numa_get_node_id(old_dict);
+        if (cur_node == target_node)
+            return NUMA_KEY_MIGRATE_OK;
+
         /* 哈希表编码：迁移dict及所有sds字段/値对
          * 因SDS头部结构复杂，使用标准sds函数 */
         numa_alloc_push_node(target_node);
-
-        dict *old_dict = val_obj->ptr;
         dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
         if (!new_dict) {
             numa_alloc_pop_node();
@@ -418,6 +466,8 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
         dictRelease(old_dict);
 
         numa_alloc_pop_node();
+        numa_set_node_id(val_obj, target_node);
+        numa_set_migrated(val_obj, 1);
 
         KEY_MIGRATE_LOG(LL_DEBUG,
             "[NUMA Key Migrate] Hash (hashtable) migrated, %zu pairs", migrated_pairs);
@@ -853,6 +903,11 @@ int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node) 
     }
 
     uint64_t start_time = get_current_time_us();
+    void *before_ptr = numa_object_sample_alloc_ptr(val);
+    int before_node = numa_get_node_id(before_ptr);
+    if (before_node == target_node)
+        return NUMA_KEY_MIGRATE_OK;
+
     int result = NUMA_KEY_MIGRATE_OK;
 
     KEY_MIGRATE_LOG(LL_DEBUG,
@@ -879,18 +934,24 @@ int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node) 
             result = NUMA_KEY_MIGRATE_ETYPE;
     }
 
+    uint64_t elapsed = get_current_time_us() - start_time;
+    void *after_ptr = numa_object_sample_alloc_ptr(val);
+    int after_node = numa_get_node_id(after_ptr);
+
     KEY_MIGRATE_LOG(LL_DEBUG,
         "[NUMA Key Migrate][debug] by-name end key=%s result=%d elapsed_us=%llu",
-        keyname, result, (unsigned long long)(get_current_time_us() - start_time));
+        keyname, result, (unsigned long long)elapsed);
 
     pthread_mutex_lock(&global_ctx.mutex);
-    global_ctx.stats.total_migrations++;
-    if (result == NUMA_KEY_MIGRATE_OK) {
+    if (result == NUMA_KEY_MIGRATE_OK && after_node == target_node) {
+        global_ctx.stats.total_migrations++;
         global_ctx.stats.successful_migrations++;
-    } else {
+        global_ctx.stats.total_migration_time_us += elapsed;
+    } else if (result != NUMA_KEY_MIGRATE_OK) {
+        global_ctx.stats.total_migrations++;
         global_ctx.stats.failed_migrations++;
+        global_ctx.stats.total_migration_time_us += elapsed;
     }
-    global_ctx.stats.total_migration_time_us += (get_current_time_us() - start_time);
     pthread_mutex_unlock(&global_ctx.mutex);
 
     return result;
