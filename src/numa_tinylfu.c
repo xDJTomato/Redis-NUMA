@@ -181,6 +181,8 @@ static void ring_push(tinylfu_data_t *d, sds key, void *val, void *data_ptr,
     d->ring[slot].data_ptr = data_ptr;
     d->ring[slot].target_node = target_node;
     d->ring[slot].freq_snapshot = freq;
+    d->ring[slot].cost_units = val ? numa_object_migration_cost_units(val) : 1;
+    if (d->ring[slot].cost_units == 0) d->ring[slot].cost_units = 1;
     d->ring_head = (slot + 1) % d->config.ring_size;
     if (d->ring_count < d->config.ring_size) {
         d->ring_count++;
@@ -281,10 +283,11 @@ int tinylfu_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32
 
     uint32_t migrated = 0;
     uint32_t processed = 0;
+    uint32_t budget_used = 0;
     uint32_t failed_before = d->stat_migrations_failed;
     int hit_deadline = 0;
 
-    while (d->ring_count > 0 && processed < budget) {
+    while (d->ring_count > 0 && budget_used < budget) {
         if (deadline_us && tinylfu_now_us() >= deadline_us) {
             hit_deadline = 1;
             break;
@@ -294,6 +297,17 @@ int tinylfu_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32
         if (!ring_pop(d, &c)) break;
         if (!c.key) continue;
 
+        uint32_t cost_units = c.cost_units ? c.cost_units : 1;
+        if (cost_units > budget) cost_units = budget;
+        if (budget_used > 0 && budget_used + cost_units > budget) {
+            uint32_t slot = (d->ring_tail + d->config.ring_size - 1) % d->config.ring_size;
+            if (d->ring[slot].key) sdsfree(d->ring[slot].key);
+            d->ring[slot] = c;
+            d->ring_tail = slot;
+            d->ring_count++;
+            break;
+        }
+        budget_used += cost_units;
         processed++;
 
         uint64_t hash = dictGenHashFunction(c.key, sdslen(c.key));

@@ -517,7 +517,7 @@ void composite_lru_decay_heat(composite_lru_data_t *data) {
     if (!data || !data->key_heat_map) return;
 
     dictIterator *di = dictGetSafeIterator(data->key_heat_map);
-    dictEntry *de;
+    dictEntry *de = NULL;
     uint16_t current_time = get_lru_clock();
     uint16_t decay_thr_sec = (uint16_t)data->config.decay_threshold_sec;
 
@@ -571,12 +571,14 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
 
     uint64_t scanned  = 0;
     uint64_t migrated = 0;
+    uint64_t budget_used = 0;
     uint8_t  thr = data->config.migrate_hotness_threshold;
-    dictEntry *de;
+    dictEntry *de = NULL;
 
-    while (scanned < batch_size && (de = dictNext(data->scan_iter)) != NULL) {
+    while (budget_used < batch_size && (de = dictNext(data->scan_iter)) != NULL) {
         composite_lru_heat_info_t *info = dictGetVal(de);
         scanned++;
+        budget_used++;
         data->scan_keys_checked++;
 
         /* 执行时重读热度（不依赖快照） */
@@ -589,6 +591,18 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
                 data->migrations_bw_blocked++;
             }
             if (status == RESOURCE_AVAILABLE) {
+                if (data->db) {
+                    dictEntry *live = dictFind(data->db->dict, dictGetKey(de));
+                    if (live) {
+                        robj *cur_val = dictGetVal(live);
+                        uint32_t cost_units = numa_object_migration_cost_units(cur_val);
+                        if (cost_units > batch_size) cost_units = batch_size;
+                        if (budget_used > 1 && budget_used + cost_units - 1 > batch_size) {
+                            break;
+                        }
+                        budget_used += cost_units - 1;
+                    }
+                }
                 _serverLog(LL_DEBUG,
                     "[Composite LRU] Scan migrate (dict): key=%p node=%d->%d hotness=%d",
                     dictGetKey(de), info->current_node, info->preferred_node, info->hotness);
@@ -710,6 +724,7 @@ int composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, 
 
     uint32_t pool_size = data->config.hot_candidates_size;
     uint32_t processed = 0;
+    uint32_t budget_used = 0;
     uint32_t migrated = 0;
     int hit_deadline = 0;
 
@@ -730,7 +745,7 @@ int composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, 
     }
     if (migration_budget > pool_size) migration_budget = pool_size;
 
-    while (data->candidates_count > 0 && processed < migration_budget) {
+    while (data->candidates_count > 0 && budget_used < migration_budget) {
         if (deadline_us && get_current_time_us() >= deadline_us) {
             hit_deadline = 1;
             break;
@@ -757,6 +772,14 @@ int composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, 
             }
             robj *cur_val = dictGetVal(de);
             cur_hotness = numa_get_hotness(cur_val);
+            uint32_t cost_units = numa_object_migration_cost_units(cur_val);
+            if (cost_units > migration_budget) cost_units = migration_budget;
+            if (budget_used > 0 && budget_used + cost_units > migration_budget) {
+                data->candidates_tail = (data->candidates_tail + pool_size - 1) % pool_size;
+                data->candidates_count++;
+                break;
+            }
+            budget_used += cost_units;
             void *cur_data_ptr = NULL;
             if (cur_val->encoding == OBJ_ENCODING_RAW && cur_val->ptr)
                 cur_data_ptr = sdsAllocPtr(cur_val->ptr);
@@ -771,6 +794,7 @@ int composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, 
             }
             cur_hotness = info->hotness;
             mem_node = info->current_node;
+            budget_used++;
         }
 
         int effective_threshold = data->config.migrate_hotness_threshold;
@@ -827,10 +851,10 @@ int composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, 
         data->candidates_tail = 0;
     }
 
-    if (!hit_deadline && processed < migration_budget) {
+    if (!hit_deadline && budget_used < migration_budget) {
         uint32_t scan_budget = data->config.scan_batch_size * (uint32_t)load_weight * migration_multiplier / 100;
         if (scan_budget < 64) scan_budget = 64;
-        uint32_t remaining = migration_budget - processed;
+        uint32_t remaining = migration_budget - budget_used;
         if (scan_budget > remaining) scan_budget = remaining;
         if (deadline_us && get_current_time_us() >= deadline_us) {
             hit_deadline = 1;

@@ -136,8 +136,8 @@ do_sync() {
 
 do_bench() {
     log_step "Step: bench — 渐进并发热点访问测试"
-    log "NUMA 参数: --port $TEST_PORT --numa-strategy interleaved $BENCH_ARGS"
-    _ssh "cd ${REMOTE_YCSB} && bash run_progressive_hotspot.sh --variant numa --port $TEST_PORT --numa-strategy interleaved $BENCH_ARGS" || {
+    log "NUMA 参数: --port $TEST_PORT --numa-strategy interleaved --ae-scheduler $BENCH_ARGS"
+    _ssh "cd ${REMOTE_YCSB} && bash run_progressive_hotspot.sh --variant numa --port $TEST_PORT --numa-strategy interleaved --ae-scheduler $BENCH_ARGS" || {
         log_warn "NUMA 渐进测试返回非零，继续"
     }
     log_ok "NUMA 渐进测试完成"
@@ -156,8 +156,8 @@ do_bench() {
         log_ok "vanilla (interleaved) 渐进测试完成"
     fi
 
-    log "NUMA TinyLFU 参数: --variant numa --tinylfu --port $((TEST_PORT+3)) --numa-strategy interleaved $BENCH_ARGS"
-    _ssh "cd ${REMOTE_YCSB} && bash run_progressive_hotspot.sh --variant numa --tinylfu --port $((TEST_PORT+3)) --numa-strategy interleaved --output-dir ${REMOTE_YCSB}/results/progressive_hotspot_tinylfu_${TIMESTAMP} $BENCH_ARGS" || {
+    log "NUMA TinyLFU 参数: --variant numa --tinylfu --ae-scheduler --port $((TEST_PORT+3)) --numa-strategy interleaved $BENCH_ARGS"
+    _ssh "cd ${REMOTE_YCSB} && bash run_progressive_hotspot.sh --variant numa --tinylfu --ae-scheduler --port $((TEST_PORT+3)) --numa-strategy interleaved --output-dir ${REMOTE_YCSB}/results/progressive_hotspot_tinylfu_${TIMESTAMP} $BENCH_ARGS" || {
         log_warn "NUMA TinyLFU 渐进测试返回非零，继续"
     }
     log_ok "NUMA TinyLFU 渐进测试完成"
@@ -306,7 +306,7 @@ generate_compare_report() {
 
     plot_args+=(
         --output "$output"
-        --title "Concurrency Scaling under YCSB Hotspot Workload (10K Keys × 4 KiB)"
+        --title "Concurrency Scaling under YCSB Hotspot Workload"
     )
 
     "$python" "${plot_args[@]}" 2>&1 || log_warn "叠加绘图失败，请查看 CSV 文件"

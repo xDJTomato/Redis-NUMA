@@ -59,6 +59,7 @@ ENABLE_ACCESS_TRACKING=true
 ENABLE_AUTO_MIGRATE=true
 NUMA_STRATEGY="interleaved"
 ENABLE_TINYLFU=false
+ENABLE_AE_SCHEDULER=false
 VANILLA_CPU_NODE="${VANILLA_CPU_NODE:-0}"
 VANILLA_MEM_NODE="${VANILLA_MEM_NODE:-0}"
 VANILLA_MEM_POLICY="${VANILLA_MEM_POLICY:-bind}"
@@ -91,6 +92,7 @@ usage() {
   --read-proportion P      读比例 (默认: 0.5)
   --update-proportion P    更新比例 (默认: 0.5)
   --numa-strategy NAME     NUMA 分配策略 (默认: cxl_optimized)
+  --ae-scheduler           将启用的 NUMA 策略 slot 切换到 AE time event 调度
   --tinylfu                启用 TinyLFU 策略 (Slot 2) 并禁用 Composite LRU (Slot 1)
   --no-locality-stats      禁用 NUMA 本地/远端访问计数
   --no-access-tracking     禁用 Composite LRU 访问热路径统计
@@ -128,6 +130,7 @@ parse_args() {
             --read-proportion) READ_PROPORTION="$2"; shift 2 ;;
             --update-proportion) UPDATE_PROPORTION="$2"; shift 2 ;;
             --numa-strategy) NUMA_STRATEGY="$2"; shift 2 ;;
+            --ae-scheduler) ENABLE_AE_SCHEDULER=true; shift ;;
             --tinylfu) ENABLE_TINYLFU=true; shift ;;
             --no-locality-stats) ENABLE_LOCALITY_STATS=false; shift ;;
             --no-access-tracking) ENABLE_ACCESS_TRACKING=false; shift ;;
@@ -187,7 +190,7 @@ save_system_info() {
             echo "Vanilla CPU node: $VANILLA_CPU_NODE"
             echo "Vanilla memory node: $VANILLA_MEM_NODE"
         fi
-        echo "NUMA 消融开关: locality_stats=$ENABLE_LOCALITY_STATS access_tracking=$ENABLE_ACCESS_TRACKING auto_migrate=$ENABLE_AUTO_MIGRATE tinylfu=$ENABLE_TINYLFU"
+        echo "NUMA 消融开关: locality_stats=$ENABLE_LOCALITY_STATS access_tracking=$ENABLE_ACCESS_TRACKING auto_migrate=$ENABLE_AUTO_MIGRATE tinylfu=$ENABLE_TINYLFU ae_scheduler=$ENABLE_AE_SCHEDULER"
         echo "热点分布: data=$HOTSPOT_DATA_FRACTION operations=$HOTSPOT_OPN_FRACTION"
         echo ""
         echo "=== 内核 ==="
@@ -292,6 +295,16 @@ init_numa() {
         log "切换到 TinyLFU 策略: 禁用 Slot 1 (Composite LRU), 启用 Slot 2 (TinyLFU)"
         "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT DISABLE 1 >/dev/null 2>&1 || true
         "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT ENABLE 2 >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$ENABLE_AE_SCHEDULER" == true ]]; then
+        if [[ "$ENABLE_TINYLFU" == true ]]; then
+            log "启用 AE time event 调度: Slot 2 (TinyLFU)"
+            "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT SCHEDULE 2 ae >/dev/null 2>&1 || true
+        else
+            log "启用 AE time event 调度: Slot 1 (Composite LRU)"
+            "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT SCHEDULE 1 ae >/dev/null 2>&1 || true
+        fi
     fi
 }
 
@@ -437,7 +450,7 @@ generate_report() {
     "$python" "$VISUALIZE_SCRIPT" \
         --input "$SUMMARY_CSV" \
         --output "$OUTPUT_DIR/progressive_hotspot_report.png" \
-        --title "YCSB Progressive Hotspot Benchmark (1M x 4KiB)" \
+        --title "YCSB Progressive Hotspot Benchmark" \
         2>&1 || log_warn "绘图失败，请查看 $SUMMARY_CSV"
     [[ -f "$OUTPUT_DIR/progressive_hotspot_report.png" ]] && log_ok "图表: $OUTPUT_DIR/progressive_hotspot_report.png"
 }

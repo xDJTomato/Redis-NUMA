@@ -339,6 +339,78 @@ void *numa_object_sample_alloc_ptr(robj *val) {
     }
 }
 
+size_t numa_object_sample_alloc_size(robj *val) {
+    void *sample = numa_object_sample_alloc_ptr(val);
+    if (!sample) return 0;
+
+    if (val->type == OBJ_STRING && val->encoding == OBJ_ENCODING_RAW)
+        return sdsAllocSize(val->ptr);
+
+    if (val->encoding == OBJ_ENCODING_ZIPLIST)
+        return ziplistBlobLen(val->ptr);
+
+    if (val->encoding == OBJ_ENCODING_INTSET)
+        return intsetBlobLen(val->ptr);
+
+    if (val->encoding == OBJ_ENCODING_HT) {
+        dict *d = val->ptr;
+        dictEntry *sample_de = NULL;
+        uint64_t sample_bytes = 0;
+        uint64_t sample_count = 0;
+        for (int t = 0; t <= 1 && !sample_de; t++) {
+            if (!d->ht[t].table || d->ht[t].used == 0) continue;
+            for (unsigned long i = 0; i < d->ht[t].size && i < 8; i++) {
+                if (d->ht[t].table[i]) { sample_de = d->ht[t].table[i]; break; }
+            }
+        }
+        for (int t = 0; t <= 1 && sample_count < 8; t++) {
+            if (!d->ht[t].table || d->ht[t].used == 0) continue;
+            for (unsigned long i = 0; i < d->ht[t].size && sample_count < 8; i++) {
+                dictEntry *de = d->ht[t].table[i];
+                while (de && sample_count < 8) {
+                    if (val->type == OBJ_HASH) {
+                        sds field = dictGetKey(de);
+                        sds value = dictGetVal(de);
+                        if (field) sample_bytes += sdsAllocSize(field);
+                        if (value) sample_bytes += sdsAllocSize(value);
+                    } else if (val->type == OBJ_SET) {
+                        sds member = dictGetKey(de);
+                        if (member) sample_bytes += sdsAllocSize(member);
+                    }
+                    sample_bytes += sizeof(dictEntry);
+                    sample_count++;
+                    de = de->next;
+                }
+            }
+        }
+        if (sample_count > 0) {
+            uint64_t elements = dictSize(d);
+            uint64_t avg = (sample_bytes + sample_count - 1) / sample_count;
+            uint64_t estimated = avg * elements;
+            uint64_t table_slots = d->ht[0].size + d->ht[1].size;
+            estimated += table_slots * sizeof(dictEntry *);
+            if (estimated > SIZE_MAX) return SIZE_MAX;
+            return (size_t)estimated;
+        }
+        (void)sample_de;
+    }
+
+    return 0;
+}
+
+uint32_t numa_object_migration_cost_units(robj *val) {
+    size_t size = numa_object_sample_alloc_size(val);
+    if (size == 0) return 1;
+
+    /* 64KiB is the baseline direct-path boundary. Larger objects consume
+     * proportionally more step budget but are still eligible for migration. */
+    const size_t unit = 64 * 1024;
+    uint64_t units = (size + unit - 1) / unit;
+    if (units < 1) units = 1;
+    if (units > 1024) units = 1024;
+    return (uint32_t)units;
+}
+
 /* 迁移 STRING 类型 */
 int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
     (void)key_obj;
@@ -445,6 +517,7 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
                 numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
+            numa_set_migrated(sdsAllocPtr(new_value), 1);
 
             /* 添加到新dict（所有权new_field和new_value） */
             if (dictAdd(new_dict, new_field, new_value) != DICT_OK) {
@@ -1005,8 +1078,8 @@ int numa_migrate_entire_database(redisDb *db, int target_node) {
     int fail_count = 0;
     
     while ((entry = dictNext(iter)) != NULL) {
-        robj *key = dictGetKey(entry);
-        int result = numa_migrate_single_key(db, key, target_node);
+        sds key = dictGetKey(entry);
+        int result = numa_migrate_key_by_name(db, key, target_node);
         
         if (result == NUMA_KEY_MIGRATE_OK) {
             success_count++;

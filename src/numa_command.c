@@ -365,7 +365,7 @@ static void numa_cmd_config(client *c) {
             addReplyError(c, "NUMA configuration not available");
             return;
         }
-        addReplyArrayLen(c, 24);
+        addReplyArrayLen(c, 32);
         addReplyBulkCString(c, "strategy");
         addReplyBulkCString(c, get_strategy_name(cfg->strategy_type));
         addReplyBulkCString(c, "nodes");
@@ -408,6 +408,26 @@ static void numa_cmd_config(client *c) {
             addReplyBulkCString(c, "unavailable");
         addReplyBulkCString(c, "debug_logging_enabled");
         if (strat && composite_lru_get_config(strat, "debug_logging_enabled", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
+            addReplyBulkCString(c, vbuf);
+        else
+            addReplyBulkCString(c, "unavailable");
+        addReplyBulkCString(c, "composite_heat_updates");
+        if (strat && composite_lru_get_config(strat, "heat_updates", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
+            addReplyBulkCString(c, vbuf);
+        else
+            addReplyBulkCString(c, "unavailable");
+        addReplyBulkCString(c, "composite_migrations_triggered");
+        if (strat && composite_lru_get_config(strat, "migrations_triggered", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
+            addReplyBulkCString(c, vbuf);
+        else
+            addReplyBulkCString(c, "unavailable");
+        addReplyBulkCString(c, "composite_candidates_written");
+        if (strat && composite_lru_get_config(strat, "candidates_written", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
+            addReplyBulkCString(c, vbuf);
+        else
+            addReplyBulkCString(c, "unavailable");
+        addReplyBulkCString(c, "composite_scan_keys_checked");
+        if (strat && composite_lru_get_config(strat, "scan_keys_checked", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
             addReplyBulkCString(c, vbuf);
         else
             addReplyBulkCString(c, "unavailable");

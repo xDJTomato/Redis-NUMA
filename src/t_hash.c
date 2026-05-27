@@ -241,13 +241,42 @@ int hashTypeSet(robj *o, sds field, sds value, int flags) {
     } else if (o->encoding == OBJ_ENCODING_HT) {
         dictEntry *de = dictFind(o->ptr,field);
         if (de) {
-            sdsfree(dictGetVal(de));
+            sds old = dictGetVal(de);
+#ifdef HAVE_NUMA
+            int old_node = -1;
+            int old_migrated = 0;
+            if (old) {
+                void *old_base = sdsAllocPtr(old);
+                old_node = numa_get_node_id(old_base);
+                old_migrated = numa_get_migrated(old_base);
+            }
+#endif
+            sds new_value;
             if (flags & HASH_SET_TAKE_VALUE) {
-                dictGetVal(de) = value;
+                new_value = value;
                 value = NULL;
             } else {
-                dictGetVal(de) = sdsdup(value);
+                new_value = sdsdup(value);
             }
+#ifdef HAVE_NUMA
+            if (new_value && old_migrated && old_node >= 0 &&
+                sdslen(new_value) <= (size_t)(512)) {
+                void *new_base = sdsAllocPtr(new_value);
+                int new_node = numa_get_node_id(new_base);
+                if (new_node >= 0 && new_node != old_node) {
+                    numa_alloc_push_node(old_node);
+                    sds relocated = sdsdup(new_value);
+                    numa_alloc_pop_node();
+                    if (relocated) {
+                        sdsfree(new_value);
+                        new_value = relocated;
+                    }
+                }
+                numa_set_migrated(sdsAllocPtr(new_value), 1);
+            }
+#endif
+            sdsfree(old);
+            dictGetVal(de) = new_value;
             update = 1;
         } else {
             sds f,v;

@@ -43,17 +43,18 @@ Test structure:
 
 ### NUMA Module Layer (added on top of Redis core)
 
-Nine modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
+Eleven modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
 
-1. **numa_pool** — Custom memory allocator. 16 size classes (16B–4KB), bump-pointer O(1) allocation, slab allocator for ≤128B objects, chunk compaction for <30% utilization chunks.
+1. **numa_pool** — Custom memory allocator. 33 size classes (8B–64KB), bump-pointer O(1) allocation, 64KB slab allocator for ≤4KB objects, chunk compaction for <30% utilization chunks.
 2. **numa_migrate** — Low-level block migration between NUMA nodes via `numa_alloc_onnode` + memcpy.
-3. **numa_key_migrate** — Per-key migration (robj as unit). LRU-integrated heat tracking with lazy step decay. Type adapters for STRING (implemented), HASH/LIST/SET/ZSET (stubs).
-4. **numa_strategy_slots** — 16-slot pluggable strategy framework with vtable-based polymorphism. Slot 0 = no-op, Slot 1 = Composite LRU. Runs via `serverCron` every second.
+3. **numa_key_migrate** — Per-key migration (robj as unit). LRU-integrated heat tracking with lazy step decay. Full type adapters for all 5 Redis types: STRING (RAW/EMBSTR), HASH (ziplist/hashtable), LIST (quicklist with LZF/raw sub-paths), SET (intset/hashtable), ZSET (ziplist/skiplist).
+4. **numa_strategy_slots** — 16-slot pluggable strategy framework with vtable-based polymorphism. Slot 0 = no-op, Slot 1 = Composite LRU, Slot 2 = TinyLFU (disabled by default). Runs via `serverCron` every second.
 5. **numa_composite_lru** — Default migration strategy (Slot 1). Dual-channel: hot candidate ring buffer (fast path) + progressive dictionary scan (slow path). JSON-configurable.
-6. **numa_configurable_strategy** — 6 allocation strategies (LOCAL_FIRST, INTERLEAVE, ROUND_ROBIN, WEIGHTED, PRESSURE_AWARE, CXL_OPTIMIZED) at the zmalloc layer.
-7. **numa_command** — Unified `NUMA` Redis command: `NUMA MIGRATE`, `NUMA CONFIG`, `NUMA STRATEGY`.
-8. **numa_bw_monitor** — Real-time per-node bandwidth monitoring (resctrl/numastat/manual backends).
-9. **evict_numa** — NUMA-aware eviction: demotes keys to less-pressured nodes before eviction. Weighted scoring: distance(40%) + pressure(30%) + bandwidth(30%).
+6. **numa_tinylfu** — Frequency-driven migration strategy (Slot 2, disabled by default). Count-Min Sketch (4×16384, 4-bit) + Doorkeeper Bloom Filter. Fixed ~40KB memory, O(1) hot data discovery. Must be manually enabled to avoid conflict with Composite LRU.
+7. **numa_configurable_strategy** — 9 allocation strategies (LOCAL_FIRST, INTERLEAVE, ROUND_ROBIN, WEIGHTED, PRESSURE_AWARE, CXL_OPTIMIZED, WEIGHTED_INTERLEAVE, ADAPTIVE, LATENCY_AWARE) at the zmalloc layer.
+8. **numa_command** — Unified `NUMA` Redis command: `NUMA MIGRATE`, `NUMA CONFIG`, `NUMA STRATEGY`.
+9. **numa_bw_monitor** — Real-time per-node bandwidth monitoring (resctrl/numastat/manual backends).
+10. **evict_numa** — NUMA-aware eviction: demotes keys to less-pressured nodes before eviction. Weighted scoring: distance(40%) + pressure(30%) + bandwidth(30%).
 
 ### Key Integration Points in Redis Core
 
@@ -64,7 +65,7 @@ Nine modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
 
 ### Module Dependency Order (bottom to top)
 
-libnuma → numa_pool → numa_migrate → numa_key_migrate → numa_composite_lru / numa_strategy_slots → numa_command → evict_numa → server.c
+libnuma → numa_pool → numa_migrate → numa_key_migrate → numa_composite_lru / numa_tinylfu / numa_strategy_slots → numa_command → evict_numa → server.c
 
 ## Configuration
 
@@ -74,7 +75,7 @@ libnuma → numa_pool → numa_migrate → numa_key_migrate → numa_composite_l
 
 ## Documentation
 
-- `docs/new/` — Current module design docs (01-overview through 10-call-chain). **Prefer these over `docs/modules/`** which contains older versions.
+- `docs/new/` — Current module design docs (01-overview through 16-numa-tinylfu). **Prefer these over `docs/modules/`** which contains older versions.
 - `TEST_README.md` — Test organization and recommended workflows
 - `WORKFLOW.md` — Development workflow conventions (coding order, integration checklist, common pitfalls)
 
@@ -93,4 +94,4 @@ When adding a new NUMA module:
 - **Never use jemalloc** — the build forces libc, but if you change Makefile flags, NUMA will break
 - **Init order matters** — `initServer()` must complete before any `numa_*_init()` call
 - **serverLog is not directly available** — use `extern void _serverLog(int level, const char *fmt, ...)` in NUMA modules
-- **Only string key migration is fully implemented** — hash/list/set/zset adapters are stubs
+- **All 5 data type migration adapters are fully implemented** — STRING, HASH, LIST, SET, ZSET with proper encoding handling (ziplist/hashtable/quicklist/skiplist)

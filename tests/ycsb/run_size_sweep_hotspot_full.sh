@@ -93,9 +93,9 @@ sync_remote() {
 ops_for_size() {
     local size="$1"
     if (( size < 16384 )); then
-        echo 500000
+        echo 200000
     else
-        echo 100000
+        echo 40000
     fi
 }
 
@@ -235,10 +235,10 @@ main() {
     log_ok "SSH 连接正常"
 
     sync_remote
-    run_variant numa "$TEST_PORT" "$MAXMEM_NUMA" "numa"
+    run_variant numa "$TEST_PORT" "$MAXMEM_NUMA" "numa" "--ae-scheduler"
     run_variant vanilla "$((TEST_PORT+1))" "$MAXMEM_VANILLA" "vanilla_local" "--vanilla-cpu-node 0 --vanilla-mem-node 0"
     run_variant vanilla "$((TEST_PORT+2))" "$MAXMEM_VANILLA" "vanilla_interleaved" "--vanilla-cpu-node 0 --vanilla-mem-node 0,2 --vanilla-mem-policy interleave"
-    run_variant numa "$((TEST_PORT+3))" "$MAXMEM_NUMA" "numa_tinylfu" "--tinylfu"
+    run_variant numa "$((TEST_PORT+3))" "$MAXMEM_NUMA" "numa_tinylfu" "--tinylfu --ae-scheduler"
     fetch_and_plot
     log_ok "size sweep 测试完成"
 }

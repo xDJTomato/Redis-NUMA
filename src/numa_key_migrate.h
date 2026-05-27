@@ -99,6 +99,10 @@ int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node);
 /* 获取对象代表性数据分配基址，用于 locality 统计与迁移去重 */
 void *numa_object_sample_alloc_ptr(robj *val);
 
+/* 估算对象迁移成本：按代表性分配块大小折算为策略 step budget 单位 */
+size_t numa_object_sample_alloc_size(robj *val);
+uint32_t numa_object_migration_cost_units(robj *val);
+
 /* 批量迁移：将列表中的所有Key迁移到目标节点 */
 int numa_migrate_multiple_keys(redisDb *db, list *key_list, int target_node);
 

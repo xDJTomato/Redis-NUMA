@@ -55,6 +55,7 @@ typedef struct {
     void    *data_ptr;
     int      target_node;
     uint8_t  freq_snapshot;
+    uint32_t cost_units;
 } tinylfu_candidate_t;
 
 /* ========== 可配置参数 ========== */
