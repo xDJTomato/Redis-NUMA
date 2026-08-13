@@ -149,6 +149,12 @@ make report     # 生成评测 JSON + results/report.html
 
 在 Linux + 真实 libnuma 环境下，本子系统同样可编译运行（Makefile 自动选择后缀）；
 它也可以作为 Redis 8 的一个独立策略引擎被 `NUMA` 命令调用。
+## 6.5 独立内存分配器（`nf_alloc`）
+
+针对原 `numa_pool`（libnuma 临时方案）的性能与碎片率优化，详见
+[allocator.md](allocator.md)：无 per-object header（metamap 反查）+ free-list + tcache，
+单线程吞吐约为系统 malloc 的 **1.85×**，内部碎片 3.82%，并去掉 16B PREFIX 开销。
+
 ## 7. Redis 桥接适配器（`NUMA FLOW` 命令）
 
 `numaflow/src/nf_bridge.c`（纯 C11，可独立测试）定义了引擎与任意键值存储之间的契约：

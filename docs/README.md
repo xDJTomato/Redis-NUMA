@@ -15,6 +15,7 @@
 | Redis 8 迁移 | 已提供 `docs/redis8-migration.md` 指南 + `src/redis8_compat.h` 兼容头；内核本身仍为 6.2.21 |
 | Redis 桥接适配器 | `src/numa_flow.c`（`HAVE_NUMA` 下编译）：`NUMA FLOW` 命令加载/运行/列出 DAG 工作流 |
 | 自适应 DAG | `numaflow/src/nf_adapt.c`：参数爬山 + 结构切换（conservative/balanced/aggressive） |
+| 独立内存分配器 | `numaflow/src/nf_alloc.c`：无 header + metamap + tcache，吞吐 ≈ malloc 1.85×，见 `docs/numaflow/allocator.md` |
 
 ## 文档目录
 
