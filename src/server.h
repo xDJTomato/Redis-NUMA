@@ -708,7 +708,7 @@ char *getObjectTypeName(robj*);
     _var.ptr = _ptr; \
 } while(0)
 
-struct evictionPoolEntry; /* Defined in evict.c */
+struct evictionPoolEntry; /* Defined in evict.h */
 
 /* This structure is used in order to represent the output buffer of a client,
  * which is actually a linked list of blocks like that, that is: client->reply. */
@@ -1282,12 +1282,12 @@ struct redisServer {
     long long stat_evictedkeys;     /* Number of evicted keys (maxmemory) */
     long long stat_keyspace_hits;   /* Number of successful lookups of keys */
     long long stat_keyspace_misses; /* Number of failed lookups of keys */
-    /* NUMA Demotion 统计 */
-    long long stat_numa_demotions;     /* NUMA降级迁移次数 */
-    long long stat_numa_demote_bytes;  /* NUMA降级迁移字节数 */
-    long long stat_numa_demote_failed; /* NUMA降级失败次数 */
-    long long stat_numa_demote_near;   /* 迁移到近端节点的次数 */
-    long long stat_numa_demote_far;    /* 迁移到远端节点的次数 */
+    /* NUMA demotion statistics. */
+    long long stat_numa_demotions;     /* Number of NUMA demotion migrations. */
+    long long stat_numa_demote_bytes;  /* Bytes migrated by NUMA demotion. */
+    long long stat_numa_demote_failed; /* Number of failed NUMA demotions. */
+    long long stat_numa_demote_near;   /* Migrations to near nodes. */
+    long long stat_numa_demote_far;    /* Migrations to far nodes. */
     long long stat_active_defrag_hits;      /* number of allocations moved */
     long long stat_active_defrag_misses;    /* number of allocations scanned but not moved */
     long long stat_active_defrag_key_hits;  /* number of keys with moved allocations */
@@ -1518,16 +1518,16 @@ struct redisServer {
     int maxmemory_eviction_tenacity;/* Aggressiveness of eviction processing */
     int lfu_log_factor;             /* LFU logarithmic counter factor. */
     int lfu_decay_time;             /* LFU counter decay factor. */
-    /* NUMA Demotion 配置 */
-    int numa_demote_enabled;           /* 启用 NUMA 降级 */
-    size_t numa_demote_min_size;       /* 最小降级大小 */
-    int numa_demote_max_migrate;       /* 最大迁移次数 */
-    int numa_demote_pressure_threshold; /* 压力阈值 (百分比, 0-100) */
-    int numa_demote_distance_weight;   /* 距离权重 (默认 70) */
-    int numa_demote_pressure_weight;   /* 压力权重 (默认 30) */
-    int numa_demote_bandwidth_weight;  /* NUMA降级带宽权重 (0-100, 默认30) */
-    double numa_bw_saturation_threshold; /* 带宽饱和排除阈值 (默认0.95) */
-    int numa_demote_prefer_closer;     /* 优先更近节点 */
+    /* NUMA demotion configuration. */
+    int numa_demote_enabled;           /* Enable NUMA demotion. */
+    size_t numa_demote_min_size;       /* Minimum demotion size. */
+    int numa_demote_max_migrate;       /* Max demotions per eviction cycle (default 3). */
+    int numa_demote_pressure_threshold; /* Pressure threshold (percent, 0-100). */
+    int numa_demote_distance_weight;   /* Distance weight (default 40). */
+    int numa_demote_pressure_weight;   /* Pressure weight (default 30). */
+    int numa_demote_bandwidth_weight;  /* NUMA demotion bandwidth weight (0-100, default 30). */
+    int numa_bw_saturation_threshold;  /* Bandwidth saturation threshold (percent, 0-100, default 95). */
+    int numa_demote_prefer_closer;     /* Prefer closer nodes. */
     long long proto_max_bulk_len;   /* Protocol bulk length maximum size. */
     int oom_score_adj_base;         /* Base oom_score_adj value, as observed on startup */
     int oom_score_adj_values[CONFIG_OOM_COUNT];   /* Linux oom_score_adj configuration */
@@ -1660,7 +1660,9 @@ struct redisServer {
     int target_replica_port; /* Failover target port */
     int failover_state; /* Failover state */
 #ifdef HAVE_NUMA
-    /* NUMA composite-LRU 配置文件路径（可选，对应 redis.conf 中的 numa-migrate-config 项）*/
+    /* Master switch: 0 disables hotness tracking/auto migration/demotion (the NUMA allocator still works). */
+    int numa_enabled;
+    /* NUMA composite-LRU config file path (optional, matches the numa-migrate-config item in redis.conf). */
     char *numa_migrate_config_file;
 #endif
 };
@@ -2810,6 +2812,7 @@ int iAmMaster(void);
 #include "numa_tinylfu.h"
 #include "numa_bw_monitor.h"
 #include "numa_configurable_strategy.h"
+#include "numa_flow.h"
 #endif
 
 #endif

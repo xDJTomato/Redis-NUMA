@@ -128,6 +128,16 @@ Redis 8 中 `serverLog` 仍以 `void serverLog(int level, const char *fmt, ...)`
 把上述策略拆分为 36 个可流程化执行的原子操作，并提供 N8N 风格 GUI / TUI、
 公平评测框架与轻量追踪反馈。详见 `docs/numaflow/README.md`。
 
+### 5.1 Redis 桥接适配器（`NUMA FLOW`）
+
+`src/numa_flow.c`（`HAVE_NUMA` 下编译）是 NUMAflow 引擎在 Redis 内的运行时宿主：
+它实现桥接契约（`enumerate` 用 `numa_get_key_current_node`/`numa_get_key_metadata`
+填充 item，`apply` 调用 `numa_migrate_key_by_name`），并暴露 `NUMA FLOW
+LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT` 命令；`serverCron` 按 `interval_sec` 周期执行
+已加载的工作流。`nf_adapt_tune()` 依据每次运行的 DRAM 驻留反馈，在
+conservative/balanced/aggressive 三个结构模板间切换并爬山调参（见
+`docs/numaflow/README.md` 第 7、8 节）。
+
 ## 6. 验证清单（需在 Linux + libnuma 环境执行）
 
 ```bash

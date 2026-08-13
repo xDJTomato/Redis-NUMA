@@ -822,7 +822,7 @@ struct redisCommand redisCommandTable[] = {
      0,NULL,0,0,0,0,0,0},
 
     {"numa",numaCommand,-2,
-     "admin write",
+     "admin no-script ok-loading ok-stale",
      0,NULL,0,0,0,0,0,0},
 
     {"config",configCommand,-2,
@@ -2259,12 +2259,12 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
 #ifdef HAVE_NUMA
-    /* NUMA 带宽采样（每秒） */
+    /* NUMA bandwidth sampling (every second). */
     run_with_period(1000) {
         numa_bw_monitor_sample();
     }
 
-    /* NUMA 压力权重更新（每秒） */
+    /* NUMA pressure weight updates (every second). */
     run_with_period(1000) {
         numa_config_update_pressure_weights();
     }
@@ -2273,6 +2273,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     run_with_period(1000) {
         numa_strategy_run_all();
         numa_strategy_scheduler_cron();
+        numa_flow_cron();
     }
 #endif
 
@@ -3194,8 +3195,6 @@ void makeThreadKillable(void) {
 
 void initServer(void) {
     int j;
-
-    printf("DEBUG: initServer开始执行\n");
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     setupSignalHandlers();
@@ -3210,52 +3209,34 @@ void initServer(void) {
     }
 
     /* Initialization after setting defaults from the config system. */
-    printf("DEBUG: 开始服务器配置初始化\n");
     server.aof_state = server.aof_enabled ? AOF_ON : AOF_OFF;
     server.hz = server.config_hz;
     server.pid = getpid();
     server.in_fork_child = CHILD_TYPE_NONE;
     server.main_thread_id = pthread_self();
     server.current_client = NULL;
-    
-    printf("DEBUG: 创建服务器数据结构\n");
     server.errors = raxNew();
-    printf("DEBUG: errors创建完成\n");
     server.fixed_time_expire = 0;
     server.in_nested_call = 0;
     server.clients = listCreate();
-    printf("DEBUG: clients创建完成\n");
     server.clients_index = raxNew();
-    printf("DEBUG: clients_index创建完成\n");
     server.clients_to_close = listCreate();
-    printf("DEBUG: clients_to_close创建完成\n");
     server.slaves = listCreate();
-    printf("DEBUG: slaves创建完成\n");
     server.monitors = listCreate();
-    printf("DEBUG: monitors创建完成\n");
     server.clients_pending_write = listCreate();
-    printf("DEBUG: clients_pending_write创建完成\n");
     server.clients_pending_read = listCreate();
-    printf("DEBUG: clients_pending_read创建完成\n");
     server.clients_timeout_table = raxNew();
-    printf("DEBUG: clients_timeout_table创建完成\n");
     server.replication_allowed = 1;
     server.slaveseldb = -1; /* Force to emit the first SELECT command. */
     server.unblocked_clients = listCreate();
-    printf("DEBUG: unblocked_clients创建完成\n");
     server.ready_keys = listCreate();
-    printf("DEBUG: ready_keys创建完成\n");
     server.tracking_pending_keys = listCreate();
-    printf("DEBUG: tracking_pending_keys创建完成\n");
     server.clients_waiting_acks = listCreate();
-    printf("DEBUG: clients_waiting_acks创建完成\n");
     server.get_ack_from_slaves = 0;
     server.client_pause_type = 0;
     server.paused_clients = listCreate();
-    printf("DEBUG: paused_clients创建完成\n");
     server.events_processed_while_blocked = 0;
     server.system_memory_size = zmalloc_get_memory_size();
-    printf("DEBUG: system_memory_size获取完成\n");
     server.blocked_last_cron = 0;
     server.blocking_op_nesting = 0;
 
@@ -6298,14 +6279,10 @@ int main(int argc, char **argv) {
     int j;
     char config_from_stdin = 0;
 
-    printf("DEBUG: main() 开始\n");
 #ifdef HAVE_NUMA
-    printf("DEBUG: 调用numa_init()\n");
     numa_init();
-    printf("DEBUG: numa_init()完成\n");
 #endif
 
-    printf("DEBUG: 检查REDIS_TEST\n");
 #ifdef REDIS_TEST
     if (argc >= 3 && !strcasecmp(argv[1], "test")) {
         int accurate = 0;
@@ -6345,56 +6322,34 @@ int main(int argc, char **argv) {
         return 0;
     }
 #endif
-
-    printf("DEBUG: 初始化库\n");
     /* We need to initialize our libraries, and the server configuration. */
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
     spt_init(argc, argv);
 #endif
-    printf("DEBUG: setlocale\n");
     setlocale(LC_COLLATE,"");
-    printf("DEBUG: tzset\n");
     tzset(); /* Populates 'timezone' global. */
-    printf("DEBUG: zmalloc_set_oom_handler\n");
     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
-
-    printf("DEBUG: 计算随机数\n");
     /* To achieve entropy, in case of containers, their time() and getpid() can
      * be the same. But value of tv_usec is fast enough to make the difference */
     gettimeofday(&tv,NULL);
-    printf("DEBUG: srand\n");
     srand(time(NULL)^getpid()^tv.tv_usec);
-    printf("DEBUG: srandom\n");
     srandom(time(NULL)^getpid()^tv.tv_usec);
-    printf("DEBUG: init_genrand64\n");
     init_genrand64(((long long) tv.tv_sec * 1000000 + tv.tv_usec) ^ getpid());
-    printf("DEBUG: crc64_init\n");
     crc64_init();
-
-    printf("DEBUG: umask\n");
     /* Store umask value. Because umask(2) only offers a set-and-get API we have
      * to reset it and restore it back. We do this early to avoid a potential
      * race condition with threads that could be creating files or directories.
      */
     umask(server.umask = umask(0777));
 
-    printf("DEBUG: 读取命令行参数\n");
-
     uint8_t hashseed[16];
-    printf("DEBUG: getRandomBytes\n");
     getRandomBytes(hashseed,sizeof(hashseed));
-    printf("DEBUG: dictSetHashFunctionSeed\n");
     dictSetHashFunctionSeed(hashseed);
-    printf("DEBUG: checkForSentinelMode\n");
     server.sentinel_mode = checkForSentinelMode(argc,argv);
-    printf("DEBUG: initServerConfig\n");
     initServerConfig();
-    printf("DEBUG: ACLInit\n");
     ACLInit(); /* The ACL subsystem must be initialized ASAP because the
                   basic networking code and client creation depends on it. */
-    printf("DEBUG: moduleInitModulesSystem\n");
     moduleInitModulesSystem();
-    printf("DEBUG: tlsInit\n");
     tlsInit();
 
     /* Store the executable path and arguments in a safe place in order
@@ -6500,37 +6455,47 @@ int main(int argc, char **argv) {
     initServer();
     
 #ifdef HAVE_NUMA
-    /* 锁定主线程 NUMA 节点，防止后台线程触发迁移乒乓 */
+    /* Pin the main-thread NUMA node to prevent background threads from triggering migration ping-pong. */
     int main_thread_numa_node = 0;
     if (numa_available() >= 0) main_thread_numa_node = numa_node_of_cpu(sched_getcpu());
     composite_lru_set_main_thread();
     tinylfu_set_main_thread_node(main_thread_numa_node);
 
-    /* 初始化NUMA策略插槽框架（必须在 initServer() 之后） */
-    printf("DEBUG: 调用numa_strategy_init()\n");
+    /* Initialize the NUMA strategy slot framework (must run after initServer()). */
     numa_strategy_init();
     numa_strategy_scheduler_init(server.el);
-    printf("DEBUG: numa_strategy_init()完成\n");
 
-    /* 初始化可配置分配策略，默认使用 INTERLEAVE，benchmark 可在运行时切换策略 */
-    if (numa_config_strategy_init() == C_OK) {
-        numa_config_set_strategy(NUMA_STRATEGY_CONFIG_INTERLEAVE);
-        serverLog(LL_NOTICE, "NUMA configurable strategy initialized (interleaved)");
+    /* numa-enabled master switch: when off, disable migration policies and demotion, keeping only NUMA allocation. */
+    if (!server.numa_enabled) {
+        numa_strategy_slot_disable(1);
+        numa_strategy_slot_disable(2);
+        server.numa_demote_enabled = 0;
+        serverLog(LL_NOTICE, "NUMA management disabled by config (numa-enabled no); "
+                             "NUMA-aware allocation remains active");
     }
 
-    /* 初始化NUMA Key迁移模块 */
+    /* Initialize the configurable allocation policy (pressure-aware weighted interleave by default); benchmarks can switch strategies at runtime. */
+    if (numa_config_strategy_init() == C_OK) {
+        numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE);
+        serverLog(LL_NOTICE, "NUMA configurable strategy initialized (weighted interleave)");
+    }
+
+    /* Initialize the NUMA key migration module. */
     if (numa_key_migrate_init() != NUMA_KEY_MIGRATE_OK) {
         serverLog(LL_WARNING, "Failed to initialize NUMA key migration module");
     }
 
-    /* 初始化带宽监控 */
+    /* Initialize the bandwidth monitor. */
     if (numa_bw_monitor_init() == 0) {
         serverLog(LL_NOTICE, "NUMA bandwidth monitor initialized");
     } else {
         serverLog(LL_WARNING, "NUMA bandwidth monitor init failed, using defaults");
     }
 
-    /* 如果配置文件中指定了 numa-migrate-config，加载 JSON 配置并应用到默认策略 */
+    /* Initialize the NUMAflow DAG bridge (NUMA FLOW command). */
+    numa_flow_init();
+
+    /* If numa-migrate-config is set in the config file, load the JSON config and apply it to the default strategy. */
     if (server.numa_migrate_config_file) {
         composite_lru_config_t numa_cfg;
         numa_strategy_t *active = numa_strategy_slot_get(1);

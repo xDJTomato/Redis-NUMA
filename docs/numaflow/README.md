@@ -149,3 +149,34 @@ make report     # 生成评测 JSON + results/report.html
 
 在 Linux + 真实 libnuma 环境下，本子系统同样可编译运行（Makefile 自动选择后缀）；
 它也可以作为 Redis 8 的一个独立策略引擎被 `NUMA` 命令调用。
+## 7. Redis 桥接适配器（`NUMA FLOW` 命令）
+
+`numaflow/src/nf_bridge.c`（纯 C11，可独立测试）定义了引擎与任意键值存储之间的契约：
+宿主只需实现两个回调——`enumerate`（把 keyspace 逐条产出为 `nf_item_t`）和 `apply`
+（把某个 key 物理迁移到目标节点）。`src/numa_flow.c` 就是 Redis 侧的薄胶水：
+
+```text
+NUMA FLOW LOAD <name> <path.json> [interval_sec] [ADAPT]   # 加载 GUI 导出的工作流
+NUMA FLOW RUN  [name]                                     # 立即执行（或全部）
+NUMA FLOW LIST / STATUS <name>                            # 查看运行状态/反馈
+NUMA FLOW UNLOAD <name>                                   # 卸载
+NUMA FLOW ADAPT <name> <ON|OFF>                           # 开关自适应
+```
+
+桥接语义：`enumerate` 用 `numa_get_key_current_node` / `numa_get_key_metadata` 填充
+item，`apply` 调用 `numa_migrate_key_by_name`；`emit_migrate` 的决策（`current_node` 变化）
+被翻译成真实的 key 迁移。加载的工作流由 `serverCron` 按 `interval_sec` 周期执行。
+
+## 8. 自适应 DAG（`nf_adapt.c`）
+
+根据每次运行的反馈自动调整 DAG 的**参数**甚至**结构**：
+
+- **参数爬山**：每个可调参数（如 `filter_benefit.threshold`、`demote_cold.threshold`、
+  `budget_limit.budget`）轮询微调——反馈变好则保持方向，变差则反向；
+- **结构选择**：根据「DRAM 驻留率 + 迁移 churn 率」在三个模板间切换：
+  `conservative`（只晋升高收益，抑制抖动）/ `balanced`（CAAT，晋升+降级）/
+  `aggressive`（晋升+降级+再平衡，低驻留时激进）；
+- 运行中 `nf_adapt_tune()` 返回建议模式，结构变化时自动重建 workflow 并写回参数。
+
+测试：`make test` 包含 `tests/test_adapt.c`（桥接迁移决策 + 自适应结构/参数切换）。
+

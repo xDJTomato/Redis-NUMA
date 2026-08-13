@@ -83,7 +83,9 @@ cd numaflow && make && make test && make report
 python gui/server.py          # N8N-style DAG editor at http://127.0.0.1:8090
 ```
 
-Components: `include/` + `src/` (engine), `tui/nf_tui.c` (interactive TUI), `gui/` (web editor + Python bridge), `eval/report.py` (SVG/HTML visualization), `tests/` (40 unit checks + smoke). Key files: `nf_ops.c` (36 atomic ops), `nf_strategy.c` (strategy catalog incl. CAAT), `nf_bench.c` (fair evaluator), `nf_track.c` (CMS + Doorkeeper + EWMA feedback), `numa_shim.c` (portable libnuma emulation).
+Components: `include/` + `src/` (engine), `tui/nf_tui.c` (interactive TUI), `gui/` (web editor + Python bridge), `eval/report.py` (SVG/HTML visualization), `tests/` (unit + bridge/adapt + smoke). Key files: `nf_ops.c` (36 atomic ops), `nf_strategy.c` (strategy catalog incl. CAAT), `nf_bench.c` (fair evaluator), `nf_track.c` (CMS + Doorkeeper + EWMA feedback), `nf_bridge.c` (store-agnostic bridge contract + migration application), `nf_adapt.c` (self-adapting DAG: parameter hill-climb + structure selection), `numa_shim.c` (portable libnuma emulation).
+
+The Redis adapter `src/numa_flow.c` (compiled only under `HAVE_NUMA`) implements the two bridge callbacks and exposes `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`; `serverCron` runs loaded workflows on their interval. `nf_adapt_tune()` folds each run's DRAM-residency feedback and can switch the DAG between conservative/balanced/aggressive templates and hill-climb its parameters.
 
 ## Configuration
 

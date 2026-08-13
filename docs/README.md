@@ -13,6 +13,8 @@
 | 新增 NUMAflow 子系统 | `numaflow/`（纯 C11，无 Redis/libnuma 依赖），36 个原子操作、13 个内置策略 |
 | 新默认策略 | **CAAT**（Cost-Aware Adaptive Tiering，晋升 + 降级） |
 | Redis 8 迁移 | 已提供 `docs/redis8-migration.md` 指南 + `src/redis8_compat.h` 兼容头；内核本身仍为 6.2.21 |
+| Redis 桥接适配器 | `src/numa_flow.c`（`HAVE_NUMA` 下编译）：`NUMA FLOW` 命令加载/运行/列出 DAG 工作流 |
+| 自适应 DAG | `numaflow/src/nf_adapt.c`：参数爬山 + 结构切换（conservative/balanced/aggressive） |
 
 ## 文档目录
 

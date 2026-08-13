@@ -1,13 +1,14 @@
-/* numa_command.c - 统一 NUMA 命令入口
+/* numa_command.c - unified NUMA command entry point
  *
- * 所有 NUMA 相关 Redis 命令均在本文件实现，按领域分三个二级域：
+ * All NUMA-related Redis commands are implemented in this file, organized into sub-domains:
  *
- *   NUMA MIGRATE ...   - Key 级别迁移（原 NUMAMIGRATE）
- *   NUMA CONFIG  ...   - 内存分配策略 + composite-lru JSON 配置（原 NUMACONFIG + NUMAMIGRATE CONFIG）
- *   NUMA STRATEGY ...  - 策略插槽管理（新增）
- *   NUMA HELP          - 帮助信息
+ *   NUMA MIGRATE ...   - key-level migration (formerly NUMAMIGRATE)
+ *   NUMA CONFIG  ...   - memory allocation policy + composite-lru JSON config (formerly NUMACONFIG + NUMAMIGRATE CONFIG)
+ *   NUMA STRATEGY ...  - strategy slot management (new)
+ *   NUMA FLOW     ...  - NUMAflow DAG workflow load/run/list/status (new)
+ *   NUMA HELP          - help
  *
- * 业务逻辑（统计/迁移执行等）仍在各自模块；本文件只负责参数解析和 addReply*。
+ * Business logic (statistics/migration execution, etc.) stays in its own modules; this file only handles argument parsing and addReply*.
  */
 
 #define _GNU_SOURCE
@@ -17,25 +18,26 @@
 #include "numa_tinylfu.h"
 #include "numa_strategy_slots.h"
 #include "numa_configurable_strategy.h"
+#include "numa_flow.h"
 #include "numa_pool.h"
 #include <sched.h>
 #include <numa.h>
 
-/* ========== 外部函数声明 ========== */
+/* ========== External function declarations ========== */
 
 extern int getLongFromObjectOrReply(client *c, robj *o, long *target, const char *msg);
 extern robj *lookupKeyRead(redisDb *db, robj *key);
 
-/* numa_configurable_strategy 内部接口（原 numa_config_command.c 使用） */
+/* numa_configurable_strategy internal interface (used by the former numa_config_command.c). */
 extern const char *get_strategy_name(numa_config_strategy_type_t strategy);
 extern numa_config_strategy_type_t parse_strategy_name(const char *name);
 
-/* zmalloc.c: 分配路径统计 + direct path 大对象缓存统计 */
+/* zmalloc.c: allocation path stats + direct path large-object cache stats. */
 extern void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes, size_t *direct_bytes,
                                  size_t *slab_count, size_t *pool_count, size_t *direct_count);
 extern void numa_get_direct_cache_stats(size_t *hit, size_t *miss, size_t *evict);
 
-/* ========== NUMA MIGRATE 子域 ========== */
+/* ========== NUMA MIGRATE sub-domain ========== */
 
 /*
  * NUMA MIGRATE KEY <key> <node>
@@ -126,7 +128,7 @@ static void numa_cmd_migrate(client *c) {
         numa_key_migrate_stats_t stats;
         numa_get_migration_statistics(&stats);
 
-        /* Composite LRU 访问分布统计 */
+        /* Composite LRU access distribution stats. */
         uint64_t acc_local = 0, acc_remote = 0;
         numa_strategy_t *clru = numa_strategy_slot_get(1);
         if (clru && clru->private_data) {
@@ -135,7 +137,7 @@ static void numa_cmd_migrate(client *c) {
             acc_remote = d->accesses_remote;
         }
 
-        /* TinyLFU 统计 */
+        /* TinyLFU stats. */
         uint64_t tlfu_accesses = 0, tlfu_filtered = 0, tlfu_enqueued = 0;
         uint64_t tlfu_migrated = 0, tlfu_failed = 0, tlfu_resets = 0;
         uint64_t tlfu_acc_local = 0, tlfu_acc_remote = 0;
@@ -336,12 +338,12 @@ static void numa_cmd_migrate(client *c) {
     addReplyErrorFormat(c, "Unknown NUMA MIGRATE subcommand '%s'", sub);
 }
 
-/* ========== NUMA CONFIG 子域 ========== */
+/* ========== NUMA CONFIG sub-domain ========== */
 
 /*
  * NUMA CONFIG GET
  * NUMA CONFIG SET <param> <val> [val2]
- * NUMA CONFIG LOAD [/path]          -- composite-lru JSON 热加载
+ * NUMA CONFIG LOAD [/path]          -- hot-load the composite-lru JSON
  * NUMA CONFIG REBALANCE
  * NUMA CONFIG STATS
  */
@@ -582,7 +584,7 @@ static void numa_cmd_config(client *c) {
         return;
     }
 
-    /* NUMA CONFIG LOAD [/path] -- composite-lru JSON 热加载 */
+    /* NUMA CONFIG LOAD [/path] -- hot-load the composite-lru JSON. */
     if (!strcasecmp(sub, "LOAD")) {
         const char *path = (c->argc >= 4) ? c->argv[3]->ptr : NULL;
 #ifdef HAVE_NUMA
@@ -644,7 +646,7 @@ static void numa_cmd_config(client *c) {
         }
         numa_config_get_statistics(allocs, bytes, cfg->num_nodes);
 
-        /* 扁平 key-value 输出：每节点 3 个字段 + 4 个路径统计 + 3 个 direct cache 统计 = 3*num_nodes + 7 */
+        /* Flat key-value output: 3 fields per node + 4 path stats + 3 direct cache stats = 3*num_nodes + 7. */
         int total_fields = cfg->num_nodes * 3 + 7;
         addReplyArrayLen(c, total_fields * 2);
 
@@ -665,7 +667,7 @@ static void numa_cmd_config(client *c) {
         zfree(allocs);
         zfree(bytes);
 
-        /* 分配路径统计 */
+        /* Allocation path stats. */
         size_t slab_bytes, pool_bytes, direct_bytes;
         size_t slab_count, pool_count, direct_count;
         numa_get_alloc_stats(&slab_bytes, &pool_bytes, &direct_bytes,
@@ -680,7 +682,7 @@ static void numa_cmd_config(client *c) {
         addReplyBulkCString(c, "alloc_direct_count");
         addReplyLongLong(c, direct_count);
 
-        /* Direct path 大对象缓存统计 */
+        /* Direct path large-object cache stats. */
         size_t dc_hit, dc_miss, dc_evict;
         numa_get_direct_cache_stats(&dc_hit, &dc_miss, &dc_evict);
         addReplyBulkCString(c, "direct_cache_hit");
@@ -695,13 +697,13 @@ static void numa_cmd_config(client *c) {
     addReplyErrorFormat(c, "Unknown NUMA CONFIG subcommand '%s'", sub);
 }
 
-/* ========== NUMA STRATEGY 子域 ========== */
+/* ========== NUMA STRATEGY sub-domain ========== */
 
 /*
- * NUMA STRATEGY SLOT <slot_id> <strategy_name>  -- 向插槽插入策略
- * NUMA STRATEGY SLOT ENABLE <slot_id>           -- 启用插槽
- * NUMA STRATEGY SLOT DISABLE <slot_id>          -- 禁用插槽
- * NUMA STRATEGY LIST                             -- 列出所有插槽状态
+ * NUMA STRATEGY SLOT <slot_id> <strategy_name>  -- insert a strategy into a slot
+ * NUMA STRATEGY SLOT ENABLE <slot_id>           -- enable a slot
+ * NUMA STRATEGY SLOT DISABLE <slot_id>          -- disable a slot
+ * NUMA STRATEGY LIST                             -- list the state of all slots
  */
 static void numa_cmd_strategy(client *c) {
     if (c->argc < 3) {
@@ -798,7 +800,7 @@ static void numa_cmd_strategy(client *c) {
             return;
         }
 
-        /* NUMA STRATEGY SLOT <id> <name> — 向插槽插入策略 */
+        /* NUMA STRATEGY SLOT <id> <name> - insert a strategy into a slot. */
         if (c->argc != 5) {
             addReplyError(c, "Usage: NUMA STRATEGY SLOT <slot_id> <strategy_name>");
             return;
@@ -865,16 +867,16 @@ static void numa_cmd_help(client *c) {
     addReplyBulkCString(c, "NUMA HELP                          - Show this help message");
 }
 
-/* ========== 顶层入口 ========== */
+/* ========== Top-level entry point ========== */
 
 /*
- * numaCommand - NUMA 命令顶层路由
+ * numaCommand - top-level routing of the NUMA command
  *
- * 用法：NUMA <MIGRATE|CONFIG|STRATEGY|HELP> [subcommand] [args...]
+ * Usage: NUMA <MIGRATE|CONFIG|STRATEGY|HELP> [subcommand] [args...]
  */
 void numaCommand(client *c) {
     if (c->argc < 2) {
-        addReplyError(c, "Usage: NUMA <MIGRATE|CONFIG|STRATEGY|HELP> [args...]");
+        addReplyError(c, "Usage: NUMA <MIGRATE|CONFIG|STRATEGY|FLOW|HELP> [args...]");
         return;
     }
 
@@ -886,6 +888,8 @@ void numaCommand(client *c) {
         numa_cmd_config(c);
     } else if (!strcasecmp(domain, "STRATEGY")) {
         numa_cmd_strategy(c);
+    } else if (!strcasecmp(domain, "FLOW")) {
+        numa_flow_command(c);
     } else if (!strcasecmp(domain, "HELP")) {
         numa_cmd_help(c);
     } else {

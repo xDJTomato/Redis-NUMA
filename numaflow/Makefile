@@ -24,7 +24,8 @@ endif
 BIN = $(BUILD)/numaflow$(EXE)
 
 SRCS = src/nf_common.c src/numa_shim.c src/nf_json.c src/nf_graph.c \
-       src/nf_ops.c src/nf_track.c src/nf_exec.c src/nf_strategy.c src/nf_bench.c
+       src/nf_ops.c src/nf_track.c src/nf_exec.c src/nf_strategy.c src/nf_bench.c \
+       src/nf_bridge.c src/nf_adapt.c
 OBJS = $(patsubst src/%.c,$(BUILD)/%.o,$(SRCS))
 CORE_OBJS = $(filter-out $(BUILD)/nf_bench.o,$(OBJS))
 
@@ -50,12 +51,16 @@ $(BUILD)/test_smoke$(EXE): $(CORE_OBJS) tests/test_smoke.c | $(BUILD)
 $(BUILD)/test_all$(EXE): $(CORE_OBJS) tests/test_all.c | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) tests/test_all.c $(CORE_OBJS) -o $@ $(LDLIBS)
 
+$(BUILD)/test_adapt$(EXE): $(CORE_OBJS) tests/test_adapt.c | $(BUILD)
+	$(CC) $(CFLAGS) $(INC) tests/test_adapt.c $(CORE_OBJS) -o $@ $(LDLIBS)
+
 $(BUILD)/nf_tui$(EXE): $(OBJS) tui/nf_tui.c | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) tui/nf_tui.c $(OBJS) -o $@ $(LDLIBS)
 
-test: $(BUILD)/test_all$(EXE) $(BUILD)/test_smoke$(EXE) $(BUILD)/nf_tui$(EXE)
+test: $(BUILD)/test_all$(EXE) $(BUILD)/test_smoke$(EXE) $(BUILD)/test_adapt$(EXE) $(BUILD)/nf_tui$(EXE)
 	$(BUILD)/test_all$(EXE)
 	$(BUILD)/test_smoke$(EXE)
+	$(BUILD)/test_adapt$(EXE)
 
 ops: $(BIN)
 	$(BIN) ops
