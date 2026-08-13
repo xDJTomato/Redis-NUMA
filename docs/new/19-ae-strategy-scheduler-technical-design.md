@@ -161,3 +161,5 @@ migration executor -> process tasks under global budget
 ```
 
 统一迁移队列可以在多个策略之间共享主线程迁移预算，并为更细粒度的优先级控制、限速和延迟保护提供基础。
+
+> **已实现**：上述「解耦为统一迁移队列」的思路已在本次交付的 NUMAflow 子系统中落地——策略被拆分为 36 个原子操作，由 DAG 执行器按拓扑排序调度，`budget_limit` 与 `emit_migrate` 在统一预算与容量约束下执行迁移。详见 [NUMAflow 子系统](../numaflow/README.md)。

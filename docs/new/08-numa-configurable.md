@@ -2,7 +2,7 @@
 
 ## 模块概述
 
-`numa_configurable_strategy.c/h` 提供运行时可配置的 NUMA 内存分配策略框架。支持 10 种分配策略，通过原子操作实现无锁分配路径，每秒由 serverCron 更新压力权重。
+`numa_configurable_strategy.c/h` 提供运行时可配置的 NUMA 内存分配策略框架。支持 9 种分配策略，通过原子操作实现无锁分配路径，每秒由 serverCron 更新压力权重。
 
 **版本**：v3.0（WEIGHTED_INTERLEAVE 策略，无锁分配）
 
@@ -210,3 +210,5 @@ atomicSet(var, value)     // var = value（relaxed）
 1. 写入仅在管理命令中（极低频），写入时仍持 `g_config_mutex`
 2. 热路径读到过渡值的最坏情况：一次分配落在非最优节点，无正确性影响
 3. `int` 类型在 x86_64 上天然原子对齐，不存在 torn read
+
+> **补充**：本文所述 `adaptive` 与 `latency_aware` 在本 Redis 模块中为 fallback 到 node 0 的占位实现；NUMAflow 子系统已把它们实现为可用的原子操作 `alloc_adaptive`（DRAM 优先 + 压力溢出）与 `alloc_latency_aware`（最低建模访问代价），并以 `alloc_*` 工作流形式提供。详见 [NUMAflow 子系统](../numaflow/README.md)。

@@ -84,3 +84,25 @@ LRANGE_600: 18,146 req/s
 - 8级大小分类覆盖常见场景
 - 16字节PREFIX开销可接受
 - from_pool标记支持差异化释放策略
+
+## 8. NUMAflow 公平评测（QEMU 不可用环境，本次新增）
+----------------------------------
+
+由于开发机为 16GB Windows（无 libnuma / 无异构内存 / 无 QEMU），本仓库新增了
+纯 C11 的 NUMAflow 评测框架（numaflow/），在可移植 libnuma 仿真拓扑上复现同一条
+访问轨迹，公平比较各调度策略。DRAM 容量约束为工作集约 50%，迫使策略做取舍。
+
+zipf / 3000 keys / 120000 访问 / budget=256 / 2 节点（dram0 + cxl1）:
+
+  策略             | 本地命中率 | 净代价(ns) | 迁移次数
+  ----------------|-----------|-----------|--------
+  Baseline (noop) | 0.0%      | 305.0M    | 0
+  Composite LRU   | 81.2%     | 134.5M    | 2187
+  TinyLFU         | 79.3%     | 105.9M    | 832
+  CAAT（新默认）  | 91.1%     | 84.9M     | 2422
+
+结论: CAAT 净代价比最佳基线（TinyLFU）低约 20%，比 Composite LRU 低约 37%；
+      它通过「晋升 + 降级」在容量约束下维持 DRAM 最优驻留，是新的默认策略。
+
+复现:  cd numaflow && make && make report   # 生成 results/report.html（SVG/HTML 报告）
+       cd numaflow && make test             # 40 项单元检查 + 集成冒烟测试

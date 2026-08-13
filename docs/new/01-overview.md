@@ -36,7 +36,7 @@
 │  │                                                      │   │
 │  │  ┌─────────────────────┐  ┌───────────────────────┐  │   │
 │  │  │  策略插槽框架        │  │  可配置策略框架        │  │   │
-│  │  │  (16 slots)         │  │  (10 种分配策略)      │  │   │
+│  │  │  (16 slots)         │  │  (9 种分配策略)      │  │   │
 │  │  │  ┌───────────────┐  │  └───────────────────────┘  │   │
 │  │  │  │ Slot 0: Noop  │  │                             │   │
 │  │  │  │ Slot 1: C-LRU │  │  ┌───────────────────────┐  │   │
@@ -79,9 +79,9 @@
 | **NUMA 内存迁移** | `numa_migrate.c/h` | 块级内存跨节点迁移，统计追踪 |
 | **策略插槽框架** | `numa_strategy_slots.c/h` | 16 个策略插槽，工厂模式，虚函数表，支持动态扩展 |
 | **Composite LRU** | `numa_composite_lru.c/h` | 默认迁移策略（Slot 1），双通道架构（快速通道 + 兜底通道），阶梯式惰性衰减 |
-| **TinyLFU** | `numa_tinylfu.c/h` | 频率驱动迁移策略（Slot 2），CMS + Doorkeeper Bloom Filter，固定 ~56KB 内存，O(1) 热点发现，默认禁用 |
+| **TinyLFU** | `numa_tinylfu.c/h` | 频率驱动迁移策略（Slot 2），CMS + Doorkeeper Bloom Filter，固定 ~40KB 内存（CMS+Doorkeeper），O(1) 热点发现，默认禁用 |
 | **Key 级别迁移** | `numa_key_migrate.c/h` | 单 Key 迁移，5 种数据类型适配器，原子指针切换 |
-| **可配置策略** | `numa_configurable_strategy.c/h` | 10 种分配策略（含 WEIGHTED_INTERLEAVE 默认策略），无锁分配路径，压力权重原子更新 |
+| **可配置策略** | `numa_configurable_strategy.c/h` | 9 种分配策略（含 WEIGHTED_INTERLEAVE 默认策略），无锁分配路径，压力权重原子更新 |
 | **统一命令接口** | `numa_command.c` | NUMA MIGRATE / CONFIG / STRATEGY 三域路由 |
 | **zmalloc 适配** | `zmalloc.c/h` | NUMA 感知分配入口，PREFIX 元数据（16 字节） |
 
@@ -185,7 +185,7 @@ numa_strategy_run_all()
 ### 3. 双策略迁移架构
 
 - **Composite LRU（Slot 1）**：热度阶梯 + 双通道（快速通道/兜底扫描），适合稳定访问模式
-- **TinyLFU（Slot 2）**：CMS 频率估计 + Doorkeeper 过滤，固定内存 ~56KB，适合访问模式剧烈变化的场景
+- **TinyLFU（Slot 2）**：CMS 频率估计 + Doorkeeper 过滤，固定内存 ~40KB，适合访问模式剧烈变化的场景
 
 ### 4. 阶梯式惰性衰减
 
@@ -252,6 +252,15 @@ redis-cli NUMA CONFIG GET
 - [Composite LRU 策略](06-numa-composite-lru.md) - 双通道迁移决策
 - [TinyLFU 策略](16-numa-tinylfu.md) - CMS + Doorkeeper 频率驱动迁移
 - [Key 级别迁移](07-numa-key-migrate.md) - 细粒度 Key 迁移
-- [可配置策略框架](08-numa-configurable.md) - 10 种分配策略，WEIGHTED_INTERLEAVE 默认策略
+- [可配置策略框架](08-numa-configurable.md) - 9 种分配策略，WEIGHTED_INTERLEAVE 默认策略
 - [统一命令接口](09-numa-command.md) - NUMA 命令详解
 - [调用链与模块交互](10-call-chain.md) - 完整调用链路
+
+## 新增能力（本次交付）
+
+在原有 Redis 6.2.21 内核 NUMA 模块之上，本仓库新增了独立于 Redis 内核的 **NUMAflow** 子系统（纯 C11，`numaflow/`）与 Redis 8 迁移指南：
+
+- [NUMAflow 子系统](../numaflow/README.md) - N8N 风格 DAG 策略引擎、36 个原子操作、CAAT 默认策略、公平评测框架、TUI/GUI、缓存行为追踪反馈
+- [Redis 6.2 → 8 迁移指南](../redis8-migration.md) - 迁移路径与 `src/redis8_compat.h` 兼容头
+
+> 注：Redis 核心当前仍为 6.2.21；迁移到 Redis 8 需在 Linux + libnuma 环境完成最终重编译，迁移指南已给出逐项改动清单与验证命令。

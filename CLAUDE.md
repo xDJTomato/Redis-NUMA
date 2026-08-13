@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Redis 6.2.21 extended with NUMA-aware memory allocation and CXL (Compute Express Link) memory tiering. The project adds transparent NUMA node-granular allocation, per-key heat tracking, and cross-node cold/hot data migration while preserving full Redis API compatibility.
 
+A separate **pure-C11** subsystem **NUMAflow** (`numaflow/`) decomposes every NUMA scheduling strategy into **36 composable atomic operations** executable as N8N-style DAG workflows, and adds: a new default strategy (CAAT), a QEMU-free fair evaluation harness, a TUI and a web GUI, and a lightweight cache-behavior tracking feedback loop. The Redis 6.2 → 8 migration is documented in `docs/redis8-migration.md` with a compat header `src/redis8_compat.h` (the Redis core itself still targets 6.2.21 until it is recompiled on a Linux + libnuma host).
+
 ## Build Commands
 
 ```bash
@@ -28,8 +30,11 @@ cd tests/ycsb && ./run_bw_benchmark.sh    # main benchmark (3-phase: Fill→Hots
 cd tests/ycsb && ./run_ycsb.sh            # YCSB baseline/stress modes
 
 # Quick NUMA environment check
-./check_numa_config.sh
-./diagnose_numa.sh
+./utils/numa/check_numa_config.sh
+./utils/numa/diagnose_numa.sh
+
+# NUMAflow subsystem tests (pure C11, runs on this Windows host too)
+cd numaflow && make test
 ```
 
 Test structure:
@@ -43,7 +48,7 @@ Test structure:
 
 ### NUMA Module Layer (added on top of Redis core)
 
-Eleven modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
+Ten modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
 
 1. **numa_pool** — Custom memory allocator. 33 size classes (8B–64KB), bump-pointer O(1) allocation, 64KB slab allocator for ≤4KB objects, chunk compaction for <30% utilization chunks.
 2. **numa_migrate** — Low-level block migration between NUMA nodes via `numa_alloc_onnode` + memcpy.
@@ -67,17 +72,32 @@ Eleven modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
 
 libnuma → numa_pool → numa_migrate → numa_key_migrate → numa_composite_lru / numa_tinylfu / numa_strategy_slots → numa_command → evict_numa → server.c
 
+### NUMAflow subsystem (`numaflow/`, pure C11, no Redis/libnuma dependency)
+
+Builds and tests on any platform with a C11 compiler (`make` or `mingw32-make`):
+
+```bash
+cd numaflow && make && make test && make report
+./build/numaflow ops          # list 36 atomic operations
+./build/numaflow strategies   # list 13 built-in strategies (CAAT is default)
+python gui/server.py          # N8N-style DAG editor at http://127.0.0.1:8090
+```
+
+Components: `include/` + `src/` (engine), `tui/nf_tui.c` (interactive TUI), `gui/` (web editor + Python bridge), `eval/report.py` (SVG/HTML visualization), `tests/` (40 unit checks + smoke). Key files: `nf_ops.c` (36 atomic ops), `nf_strategy.c` (strategy catalog incl. CAAT), `nf_bench.c` (fair evaluator), `nf_track.c` (CMS + Doorkeeper + EWMA feedback), `numa_shim.c` (portable libnuma emulation).
+
 ## Configuration
 
-- `redis.conf` lines 1044–1071: `numa-demote-*` settings (enable, min-size, max-migrate, pressure-threshold, weights)
-- `redis.conf` lines 2085–2097: `numa-migrate-config` path to `composite_lru.json`
+- `redis.conf` lines 1051–1071: `numa-demote-*` settings (enable, min-size, max-migrate, pressure-threshold, weights)
+- `redis.conf` lines 2092–2104: `numa-enabled` and `numa-migrate-config` path to `composite_lru.json`
 - `composite_lru.json`: per-node bandwidth baselines and migration tuning parameters
 
 ## Documentation
 
-- `docs/new/` — Current module design docs (01-overview through 16-numa-tinylfu). **Prefer these over `docs/modules/`** which contains older versions.
-- `TEST_README.md` — Test organization and recommended workflows
-- `WORKFLOW.md` — Development workflow conventions (coding order, integration checklist, common pitfalls)
+- `docs/new/` — Current module design docs (00-design-proposal through 19-ae-strategy-scheduler-technical-design)
+- `docs/numaflow/` — NUMAflow subsystem design and usage
+- `docs/redis8-migration.md` — Redis 6.2 → 8 migration guide + verification checklist
+- `docs/test/` — Test organization, benchmark results, and usage guides (benchmark_results.txt, EXECUTIVE_SUMMARY.txt, DIAGNOSIS_USAGE.txt)
+- `docs/devlog/` — Development log and design notes (e.g. zmalloc-goals.txt)
 
 ## Development Conventions
 

@@ -274,7 +274,7 @@ int numa_strategy_register_composite_lru(void) {
 ```c
 // 频率驱动的 NUMA 迁移策略
 // 使用 Count-Min Sketch + Doorkeeper Bloom Filter
-// 固定内存 ~56KB，O(1) 热点发现
+// 固定内存 ~40KB，O(1) 热点发现
 int numa_tinylfu_register(void) {
     numa_strategy_factory_t factory = {
         .name = "tinylfu",

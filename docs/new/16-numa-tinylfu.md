@@ -2,7 +2,7 @@
 
 ## 模块概述
 
-`numa_tinylfu.c/h` 实现了基于 **TinyLFU** 算法的 NUMA 热点数据快速发现与迁移策略，注册在策略插槽 **Slot 2**。算法参考 Caffeine（Ben Manes）的 Window-TinyLFU 设计，使用 Count-Min Sketch + Doorkeeper Bloom Filter 以固定 ~56KB 内存实现 O(1) 的访问频率估计。
+`numa_tinylfu.c/h` 实现了基于 **TinyLFU** 算法的 NUMA 热点数据快速发现与迁移策略，注册在策略插槽 **Slot 2**。算法参考 Caffeine（Ben Manes）的 Window-TinyLFU 设计，使用 Count-Min Sketch + Doorkeeper Bloom Filter 以固定 ~40KB 内存（CMS 32KB + Doorkeeper 8KB）实现 O(1) 的访问频率估计。
 
 **定位**：相比 Slot 1 的 Composite LRU（热度阶梯 + 惰性衰减），TinyLFU 提供更激进、更快速的热点发现能力，适用于访问模式变化剧烈的场景。
 
@@ -14,7 +14,7 @@
 |------|----------------------|------------------|
 | **频率估计** | 8 级热度阶梯（0-7），per-key 惰性衰减 | 4-bit CMS 计数器（0-15），全局周期性减半 |
 | **过滤机制** | 无（所有访问都更新热度） | Doorkeeper Bloom Filter 过滤一次性访问 |
-| **内存开销** | O(n)（key_heat_map 字典，随 Key 数增长） | O(1)（固定 ~56KB，与 Key 数无关） |
+| **内存开销** | O(n)（key_heat_map 字典，随 Key 数增长） | O(1)（固定 ~40KB，与 Key 数无关） |
 | **衰减方式** | 阶梯式惰性衰减（按 Key 空闲时间） | 全局减半（每 100K 次操作，所有计数器右移 1 位） |
 | **迁移触发** | 热度首次越过阈值时入队 | 频率达到阈值且数据在远程节点时入队 |
 | **优先级** | HIGH | HIGH |

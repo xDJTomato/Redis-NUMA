@@ -110,7 +110,7 @@
 
 1. **NUMA Slab 分配器**：实现 Slab + Direct 两层分配器，33 级 jemalloc 风格 size class（8B-64KB），small slab 64KB + large slab 2MB
 2. **Composite LRU 策略**：实现双通道热冷识别架构（快速通道 + 渐进扫描），Slot 1 默认启用
-3. **TinyLFU 频率迁移策略**：Count-Min Sketch + Doorkeeper Bloom Filter，固定 ~56KB 内存，O(1) 热点发现，Slot 2 默认禁用
+3. **TinyLFU 频率迁移策略**：Count-Min Sketch + Doorkeeper Bloom Filter，固定 ~40KB 内存（CMS 32KB + Doorkeeper 8KB），O(1) 热点发现，Slot 2 默认禁用
 4. **Key 级别迁移模块**：实现 5 种数据类型（String/Hash/List/Set/ZSet）的完整迁移适配器
 5. **统一命令接口**：实现 NUMA MIGRATE/CONFIG/STRATEGY 命令集
 6. **带宽监控模块**：实时 per-node 带宽监控（resctrl/numastat/manual 后端）
@@ -215,8 +215,17 @@
 - [策略插槽框架](05-numa-strategy-slots.md) - 16 插槽插件系统（Slot 0/1/2）
 - [Composite LRU](06-numa-composite-lru.md) - 双通道迁移决策（Slot 1）
 - [Key 级别迁移](07-numa-key-migrate.md) - 5 种类型完整迁移适配器
-- [可配置策略](08-numa-configurable.md) - 10 种分配策略、无锁分配路径
+- [可配置策略](08-numa-configurable.md) - 9 种分配策略、无锁分配路径
 - [统一命令接口](09-numa-command.md) - NUMA 命令详解
 - [调用链与模块交互](10-call-chain.md) - 完整调用链路
 - [TieredMemDB 对比分析](14-tieredmemdb-analysis.md) - 外部系统对比参考
 - [TinyLFU 频率迁移](16-numa-tinylfu.md) - Count-Min Sketch + Doorkeeper 策略（Slot 2）
+
+## 新增能力（本次交付）
+
+在原有 Redis 6.2.21 内核 NUMA 模块之上，本仓库新增了独立于 Redis 内核的 **NUMAflow** 子系统（纯 C11，`numaflow/`）与 Redis 8 迁移指南：
+
+- [NUMAflow 子系统](../numaflow/README.md) - N8N 风格 DAG 策略引擎、36 个原子操作、CAAT 默认策略、公平评测框架、TUI/GUI、缓存行为追踪反馈
+- [Redis 6.2 → 8 迁移指南](../redis8-migration.md) - 迁移路径与 `src/redis8_compat.h` 兼容头
+
+> 注：Redis 核心当前仍为 6.2.21；迁移到 Redis 8 需在 Linux + libnuma 环境完成最终重编译，迁移指南已给出逐项改动清单与验证命令。
