@@ -28,7 +28,7 @@ deps/lua/src/lua
 deps/lua/src/luac
 deps/lua/src/liblua.a
 tests/tls/*
-.make-*
+ .make-*
 .prerequisites
 *.dSYM
 Makefile.dep
@@ -63,3 +63,10 @@ tests/ycsb/scripts/numa_locality_measure.sh
 
 # Build artifacts
 build/
+build_o/
+
+# NUMA development artifacts (regenerable, do not track)
+perf.data
+monitor/
+tests/legacy/scripts/benchmark_results.txt
+tests/ycsb/legacy/results/

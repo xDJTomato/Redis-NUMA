@@ -13,6 +13,24 @@
 项目面向双路服务器和 CXL 内存扩展设备，其中 Node 0 为低延迟 DRAM，
 Node 1 为大容量 CXL 内存。
 
+本次交付：NUMAflow 策略引擎 + Redis 8 迁移
+--------------------------------------
+
+本次毕业设计新增了一个**独立于 Redis 内核、纯 C11 实现**的 N8N 风格策略引擎
+`numaflow/`，它将上文所有缓存调度策略拆分为 36 个可流程化执行的**原子操作**，
+并提供：更优的默认策略 CAAT、QEMU 不可用环境下的公平评测框架、TUI/GUI 配置界面、
+定时/周期性调度任务、以及轻量缓存行为追踪反馈框架。详见
+[docs/numaflow/README.md](docs/numaflow/README.md)。
+
+此外还提供了 Redis 6.2.21 → Redis 8 的迁移指南与兼容头：
+[docs/redis8-migration.md](docs/redis8-migration.md) 与 `src/redis8_compat.h`。
+
+```bash
+cd numaflow && make && make test && make report
+./build/numaflow ops          # 列出 36 个原子操作
+python gui/server.py          # 打开 http://127.0.0.1:8090 可视化编辑 DAG
+```
+
 编译
 ----
 
@@ -62,11 +80,12 @@ Node 1 为大容量 CXL 内存。
 
 所有内存分配经过两层路径：
 
-* 4 KB 以内的对象由 **Slab 分配器** 处理：64 KB 的 slab，24 级
-  jemalloc 风格的 size class（16 B 到 4096 B），3072 位位图管理，
-  原子 CAS 操作——完全无锁。
+* 64 KB 以内的对象由 **Slab 分配器** 处理：64 KB 小 slab + 2 MB 大
+  slab 两级，33 级 jemalloc 风格的 size class（8 B 到 64 KB），3072 位
+  位图管理；快速路径原子 CAS 无锁，慢速路径与 free 持锁。
 
-* 超过 4 KB 的对象直接走 `numa_alloc_onnode()` 系统调用。
+* 超过 64 KB 的对象直接走 `numa_alloc_onnode()` 系统调用，并经过
+  线程本地 direct cache 缓存复用。
 
 在返回指针之前，`zmalloc` 在对象头部前置 16 字节的前缀
 （`numa_alloc_prefix_t`），记录分配大小、Slab 来源标记、NUMA 节点 ID、
@@ -79,7 +98,7 @@ Node 1 为大容量 CXL 内存。
 权重（`max(1, (1 − pressure) × 100)`），通过 `atomicSet` 发布。分配路径
 通过 `atomicGet` 读取权重，做加权随机选择——热路径上没有任何锁。
 
-共有十种策略可用：
+共有九种策略可用（其中 adaptive、latency_aware 尚未实现，回退 node 0）：
 
     local_first         始终选择 node 0
     interleaved         随机选择（每线程独立种子）
@@ -117,8 +136,10 @@ Node 1 为大容量 CXL 内存。
   远程节点（CXL）。
 
 实际迁移过程：在目标节点通过 `numa_zmalloc_onnode` 分配新内存，
-`memcpy` 复制数据，原子替换 `val->ptr`，释放旧内存。目前仅 STRING
-类型适配器完整实现，HASH、LIST、SET、ZSET 适配器为存根。
+`memcpy` 复制数据，原子替换 `val->ptr`，释放旧内存。五种类型
+（STRING、HASH、LIST、SET、ZSET）的迁移适配器均已实现；注意
+HT 编码的 hash/set 需要开启 `locality_stats_enabled=1` 才能采样到
+真实数据节点，默认关闭时会被判定为本地节点（Node 0）而不触发迁移。
 
 NUMA 命令
 ---------
@@ -183,8 +204,8 @@ NUMA 基准测试（基于 YCSB，三阶段：填充 → 热点 → 持续）：
 
 环境检查：
 
-    % ./check_numa_config.sh
-    % ./diagnose_numa.sh
+    % ./utils/numa/check_numa_config.sh
+    % ./utils/numa/diagnose_numa.sh
 
 性能数据
 --------
@@ -215,21 +236,23 @@ NUMA 基准测试（基于 YCSB，三阶段：填充 → 热点 → 持续）：
     08-numa-configurable.md        分配策略框架
     09-numa-command.md             命令参考
     10-call-chain.md               完整调用链路
-    11-alloc-path-instrumentation.md  RSS 差异调查
-    12-perf-root-cause-analysis.md    吞吐量根因分析
-    13-lockfree-alloc-design.md       无锁分配设计
+    14-tieredmemdb-analysis.md     Intel TieredMemDB 分层设计分析
+    16-numa-tinylfu.md             TinyLFU 热点数据迁移策略
+    17-ae-strategy-slot-scheduler.md  AE 异步事件循环接入方案
+    18-ae-strategy-scheduler-implementation.md  AE 调度器初步实现
+    19-ae-strategy-scheduler-technical-design.md AE 策略调度器技术设计
 
 项目状态
 --------
 
 已实现：
 
-* Slab 分配器（24 级 size class，原子 CAS，无锁）
+* Slab 分配器（33 级 size class，原子 CAS，无锁）
 * 压力感知权重交错默认分配策略（无锁）
 * Composite LRU 双通道迁移
 * 16 字节 PREFIX 内联元数据
 * 策略插槽框架（16 槽，优先级调度）
-* STRING 类型迁移适配器
+* 五种类型迁移适配器（STRING、HASH、LIST、SET、ZSET）
 * 统一 NUMA 命令接口
 * JSON 配置热加载
 * 带宽监控
@@ -238,7 +261,6 @@ NUMA 基准测试（基于 YCSB，三阶段：填充 → 热点 → 持续）：
 
 尚未实现：
 
-* HASH、LIST、SET、ZSET 类型迁移适配器
 * 自适应分配策略
 * 延迟感知分配策略
 * 基于机器学习的迁移预测

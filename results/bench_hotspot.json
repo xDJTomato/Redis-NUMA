@@ -1,0 +1,196 @@
+{
+  "config": {
+    "workload": "hotspot",
+    "keys": 3000,
+    "accesses": 120000,
+    "epoch": 3000,
+    "budget": 256,
+    "nodes": 2,
+    "seed": 20240517
+  },
+  "topology": [
+    {
+      "name": "dram0",
+      "latency_ns": 60,
+      "bandwidth_mbps": 20000
+    },
+    {
+      "name": "cxl1",
+      "latency_ns": 300,
+      "bandwidth_mbps": 8000
+    }
+  ],
+  "migration": [
+    {
+      "strategy": "noop",
+      "local_hit_ratio": 0,
+      "access_cost": 286627536,
+      "migration_cost": 0,
+      "net_cost": 286627536,
+      "migrations": 0,
+      "feedback": 0.020933089973602534,
+      "node_bytes": [
+        0,
+        18519360
+      ]
+    },
+    {
+      "strategy": "composite_lru",
+      "local_hit_ratio": 0.75237500000000002,
+      "access_cost": 126433382.40001759,
+      "migration_cost": 4685742.3999999985,
+      "net_cost": 131119124.8000176,
+      "migrations": 2243,
+      "feedback": 0.42364332128790039,
+      "node_bytes": [
+        8715648,
+        9803712
+      ]
+    },
+    {
+      "strategy": "tinylfu",
+      "local_hit_ratio": 0.80791666666666662,
+      "access_cost": 93487670.400013685,
+      "migration_cost": 1394841.5999999994,
+      "net_cost": 94882512.000013679,
+      "migrations": 621,
+      "feedback": 0.46813791952183592,
+      "node_bytes": [
+        4421952,
+        14097408
+      ]
+    },
+    {
+      "strategy": "caat",
+      "local_hit_ratio": 0.89658333333333329,
+      "access_cost": 75581577.600013778,
+      "migration_cost": 3740635.199999996,
+      "net_cost": 79322212.800013781,
+      "migrations": 2115,
+      "feedback": 0.52767609062977405,
+      "node_bytes": [
+        9273984,
+        9245376
+      ]
+    }
+  ],
+  "allocation": [
+    {
+      "strategy": "alloc_local_first",
+      "local_hit_ratio": 1,
+      "access_cost": 49851014.400006086,
+      "migration_cost": 0,
+      "net_cost": 49851014.400006086,
+      "migrations": 0,
+      "feedback": 0.62035863406621605,
+      "node_bytes": [
+        18519360,
+        0
+      ]
+    },
+    {
+      "strategy": "alloc_interleave",
+      "local_hit_ratio": 0.50406666666666666,
+      "access_cost": 175191139.20000321,
+      "migration_cost": 0,
+      "net_cost": 175191139.20000321,
+      "migrations": 0,
+      "feedback": 0.28628164079567725,
+      "node_bytes": [
+        6462464,
+        12056896
+      ]
+    },
+    {
+      "strategy": "alloc_round_robin",
+      "local_hit_ratio": 0.50140833333333334,
+      "access_cost": 175537132.79999438,
+      "migration_cost": 0,
+      "net_cost": 175537132.79999438,
+      "migrations": 0,
+      "feedback": 0.28488496878126174,
+      "node_bytes": [
+        8565504,
+        9953856
+      ]
+    },
+    {
+      "strategy": "alloc_weighted",
+      "local_hit_ratio": 0.70425833333333332,
+      "access_cost": 120279955.20000559,
+      "migration_cost": 0,
+      "net_cost": 120279955.20000559,
+      "migrations": 0,
+      "feedback": 0.40201279016837976,
+      "node_bytes": [
+        13986432,
+        4532928
+      ]
+    },
+    {
+      "strategy": "alloc_pressure_aware",
+      "local_hit_ratio": 0,
+      "access_cost": 286627536,
+      "migration_cost": 0,
+      "net_cost": 286627536,
+      "migrations": 0,
+      "feedback": 0.020933089973602534,
+      "node_bytes": [
+        0,
+        18519360
+      ]
+    },
+    {
+      "strategy": "alloc_cxl_optimized",
+      "local_hit_ratio": 0.59745000000000004,
+      "access_cost": 182525126.40000018,
+      "migration_cost": 0,
+      "net_cost": 182525126.40000018,
+      "migrations": 0,
+      "feedback": 0.33159718652215103,
+      "node_bytes": [
+        290112,
+        18229248
+      ]
+    },
+    {
+      "strategy": "alloc_weighted_interleave",
+      "local_hit_ratio": 0.70021666666666671,
+      "access_cost": 121239782.40000558,
+      "migration_cost": 0,
+      "net_cost": 121239782.40000558,
+      "migrations": 0,
+      "feedback": 0.39959703977297578,
+      "node_bytes": [
+        13878272,
+        4641088
+      ]
+    },
+    {
+      "strategy": "alloc_adaptive",
+      "local_hit_ratio": 0,
+      "access_cost": 286627536,
+      "migration_cost": 0,
+      "net_cost": 286627536,
+      "migrations": 0,
+      "feedback": 0.020933089973602534,
+      "node_bytes": [
+        0,
+        18519360
+      ]
+    },
+    {
+      "strategy": "alloc_latency_aware",
+      "local_hit_ratio": 1,
+      "access_cost": 49851014.400006086,
+      "migration_cost": 0,
+      "net_cost": 49851014.400006086,
+      "migrations": 0,
+      "feedback": 0.62035863406621605,
+      "node_bytes": [
+        18519360,
+        0
+      ]
+    }
+  ]
+}
