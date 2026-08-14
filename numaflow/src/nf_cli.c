@@ -2,6 +2,7 @@
 #include "nf_ops.h"
 #include "nf_exec.h"
 #include "nf_strategy.h"
+#include "nf_template.h"
 #include "nf_bench.h"
 #include "nf_track.h"
 #include "nf_json.h"
@@ -16,9 +17,12 @@ static void usage(void) {
     printf("commands:\n");
     printf("  ops                     list atomic operations\n");
     printf("  strategies              list built-in strategies\n");
+    printf("  templates               list beginner templates (grouped)\n");
+    printf("  template <name> [file]  export a template's DAG as JSON\n");
     printf("  workflow <name> <file>  export a strategy's DAG as JSON\n");
     printf("  run <file>             execute a workflow DAG (validate)\n");
     printf("  dump-ops <file>         export the op catalog as JSON (for GUI)\n");
+    printf("  dump-templates <file>   export the template catalog as JSON (for GUI)\n");
     printf("  eval [opts]             run the fair benchmark, print JSON\n");
     printf("    --workload <w>  zipf|uniform|hotspot|temporal\n");
     printf("    --keys <n>       number of keys\n");
@@ -34,6 +38,8 @@ static const char *argval(int argc, char **argv, int *i, const char *flag) {
     if (*i + 1 < argc) { (*i)++; return argv[*i]; }
     fprintf(stderr, "missing value for %s\n", flag); exit(2);
 }
+
+static int write_file(const char *path, const char *data);
 
 static int cmd_ops(void) {
     nf_ops_register_all();
@@ -53,6 +59,31 @@ static int cmd_strategies(void) {
     return 0;
 }
 
+static int cmd_templates(void) {
+    const char *last_cat = "";
+    for (int i = 0; i < nf_template_count(); i++) {
+        const nf_template_t *t = nf_template_get(i);
+        if (strcmp(t->category, last_cat) != 0) {
+            printf("\n[%s]\n", t->category);
+            last_cat = t->category;
+        }
+        printf("  %-24s %s\n", t->name, t->description);
+        printf("         use: %s\n", t->use_case);
+    }
+    printf("\n%d templates across 5 categories\n", nf_template_count());
+    return 0;
+}
+
+static int cmd_template(const char *name, const char *path) {
+    nf_graph_t g; nf_graph_init(&g);
+    if (nf_template_build(&g, name) != NF_OK) { fprintf(stderr, "unknown template %s\n", name); return 1; }
+    char *js = nf_graph_to_json(&g);
+    printf("%s\n", js);
+    int rc = path ? write_file(path, js) : 0;
+    free(js); nf_graph_free(&g);
+    return rc;
+}
+
 static int write_file(const char *path, const char *data) {
     FILE *fp = fopen(path, "wb");
     if (!fp) { fprintf(stderr, "cannot write %s\n", path); return 1; }
@@ -68,6 +99,24 @@ static int cmd_workflow(const char *name, const char *path) {
     printf("%s\n", js);
     int rc = path ? write_file(path, js) : 0;
     free(js); nf_graph_free(&g);
+    return rc;
+}
+
+static int cmd_dump_templates(const char *path) {
+    nf_json_t *arr = nf_json_new_arr();
+    for (int i = 0; i < nf_template_count(); i++) {
+        const nf_template_t *t = nf_template_get(i);
+        nf_json_t *j = nf_json_new_obj();
+        nf_json_obj_set(j, "name", nf_json_new_str(t->name));
+        nf_json_obj_set(j, "category", nf_json_new_str(t->category));
+        nf_json_obj_set(j, "description", nf_json_new_str(t->description));
+        nf_json_obj_set(j, "use_case", nf_json_new_str(t->use_case));
+        nf_json_arr_push(arr, j);
+    }
+    char *js = nf_json_serialize(arr);
+    int rc = write_file(path, js);
+    if (rc == 0) printf("wrote %s\n", path);
+    free(js); nf_json_free(arr);
     return rc;
 }
 
@@ -154,6 +203,11 @@ int main(int argc, char **argv) {
     const char *cmd = argv[1];
     if (strcmp(cmd, "ops") == 0) return cmd_ops();
     if (strcmp(cmd, "strategies") == 0) return cmd_strategies();
+    if (strcmp(cmd, "templates") == 0) return cmd_templates();
+    if (strcmp(cmd, "template") == 0) {
+        if (argc < 3) { fprintf(stderr, "usage: template <name> [file]\n"); return 1; }
+        return cmd_template(argv[2], argc > 3 ? argv[3] : NULL);
+    }
     if (strcmp(cmd, "workflow") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: workflow <name> [file]\n"); return 1; }
         return cmd_workflow(argv[2], argc > 3 ? argv[3] : NULL);
@@ -161,6 +215,10 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: run <file>\n"); return 1; }
         return cmd_run(argv[2]);
+    }
+    if (strcmp(cmd, "dump-templates") == 0) {
+        if (argc < 3) { fprintf(stderr, "usage: dump-templates <file>\n"); return 1; }
+        return cmd_dump_templates(argv[2]);
     }
     if (strcmp(cmd, "dump-ops") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: dump-ops <file>\n"); return 1; }

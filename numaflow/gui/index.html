@@ -36,6 +36,8 @@ header button.primary { background:var(--accent); border-color:var(--accent); }
 <header>
   <h1>NUMAflow - DAG Strategy Editor</h1>
   <button onclick="newWorkflow()">New</button>
+  <select id="tmpl" style="background:#374151;color:#fff;border:1px solid #4b5563;border-radius:6px;padding:6px;font-size:12px;max-width:280px"></select>
+  <button onclick="loadTemplate()">Load Template</button>
   <button onclick="loadFile()">Import JSON</button>
   <button onclick="download()">Export JSON</button>
   <button class="primary" onclick="runWorkflow()">Run</button>
@@ -204,19 +206,35 @@ function refreshJson(){ $("#json").value = JSON.stringify(toWorkflow(), null, 2)
 function newWorkflow(){ nodes=[]; edges=[]; selectedId=null; render(); renderInspector(); refreshJson(); }
 function download(){ refreshJson(); var blob = new Blob([$("#json").value], {type:"application/json"}); var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="workflow.json"; a.click(); }
 function loadFile(){ $("#file").click(); }
+function loadWorkflowObject(w){
+  nodes = []; edges = []; nextId = 1;
+  (w.nodes||[]).forEach(function(n){
+    nodes.push({id:n.id, op:n.op, title:n.op, x:100+Math.random()*300, y:100+Math.random()*200, params:n.params||{}});
+    var num = parseInt(n.id.replace(/[^0-9]/g,"")); if(!isNaN(num) && num>=nextId) nextId=num+1;
+  });
+  (w.edges||[]).forEach(function(e){ edges.push({from:e.from,to:e.to}); });
+  selectedId=null; render(); renderInspector(); refreshJson();
+}
+function loadTemplates(){
+  fetch("/api/templates").then(function(r){return r.json();}).then(function(list){
+    var s = document.getElementById("tmpl"); if(!s) return;
+    var html = "<option value=''>pick a template...</option>";
+    var cat = "";
+    list.forEach(function(t){
+      if(t.category!==cat){ html += "<option disabled>-- "+t.category+" --</option>"; cat=t.category; }
+      html += "<option value="+t.name+">"+t.name+": "+t.description+"</option>";
+    });
+    s.innerHTML = html;
+  }).catch(function(){});
+}
+function loadTemplate(){
+  var s = document.getElementById("tmpl"); if(!s || !s.value) return;
+  fetch("/api/template/"+s.value).then(function(r){return r.json();}).then(function(w){ loadWorkflowObject(w); }).catch(function(){ document.getElementById("result").textContent = "template load failed (is the server running?)"; });
+}
 function onFile(ev){
   var f = ev.target.files[0]; if(!f) return;
   var r = new FileReader();
-  r.onload = function(){
-    var w = JSON.parse(r.result);
-    nodes = []; edges = []; nextId = 1;
-    (w.nodes||[]).forEach(function(n){
-      nodes.push({id:n.id, op:n.op, title:n.op, x:100+Math.random()*300, y:100+Math.random()*200, params:n.params||{}});
-      var num = parseInt(n.id.replace(/[^0-9]/g,"")); if(!isNaN(num) && num>=nextId) nextId=num+1;
-    });
-    (w.edges||[]).forEach(function(e){ edges.push({from:e.from,to:e.to}); });
-    selectedId=null; render(); renderInspector(); refreshJson();
-  };
+  r.onload = function(){ loadWorkflowObject(JSON.parse(r.result)); };
   r.readAsText(f);
 }
 function runWorkflow(){
@@ -229,6 +247,7 @@ function runWorkflow(){
 }
 
 loadOps();
+loadTemplates();
 render();
 </script>
 </body>

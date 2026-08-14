@@ -155,6 +155,12 @@ make report     # 生成评测 JSON + results/report.html
 [allocator.md](allocator.md)：无 per-object header（metamap 反查）+ free-list + tcache，
 单线程吞吐约为系统 malloc 的 **1.85×**，内部碎片 3.82%，并去掉 16B PREFIX 开销。
 
+## 6.8 新手模板库
+
+提供 **23 个开箱即用的模板**，按 5 类分组（tiering / allocation / cost / adaptive /
+special），每个带用途与适用场景，CLI `numaflow templates` 或 GUI 下拉框即可选用。详见
+[templates.md](templates.md)。
+
 ## 7. Redis 桥接适配器（`NUMA FLOW` 命令）
 
 `numaflow/src/nf_bridge.c`（纯 C11，可独立测试）定义了引擎与任意键值存储之间的契约：

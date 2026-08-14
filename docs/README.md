@@ -16,6 +16,7 @@
 | Redis 桥接适配器 | `src/numa_flow.c`（`HAVE_NUMA` 下编译）：`NUMA FLOW` 命令加载/运行/列出 DAG 工作流 |
 | 自适应 DAG | `numaflow/src/nf_adapt.c`：参数爬山 + 结构切换（conservative/balanced/aggressive） |
 | 独立内存分配器 | `numaflow/src/nf_alloc.c`：无 header + metamap + tcache，吞吐 ≈ malloc 1.85×，见 `docs/numaflow/allocator.md` |
+| 新手模板库 | 23 个开箱即用模板（tiering/allocation/cost/adaptive/special），见 `docs/numaflow/templates.md` |
 
 ## 文档目录
 

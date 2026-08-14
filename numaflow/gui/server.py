@@ -42,6 +42,28 @@ def get_ops():
             _ops_cache = []
     return _ops_cache
 
+def get_templates():
+    if not BIN:
+        return [{"error": "numaflow binary not found"}]
+    with tempfile.TemporaryDirectory() as d:
+        out = os.path.join(d, "templates.json")
+        subprocess.run([BIN, "dump-templates", out], check=False, capture_output=True)
+        if os.path.exists(out):
+            with open(out, encoding="utf-8") as f:
+                return json.load(f)
+    return []
+
+def get_template(name):
+    if not BIN:
+        return None
+    p = subprocess.run([BIN, "template", name], capture_output=True, text=True, timeout=30)
+    if p.returncode != 0:
+        return None
+    try:
+        return json.loads(p.stdout)
+    except Exception:
+        return None
+
 def run_workflow(body):
     if not BIN:
         return "numaflow binary not found"
@@ -69,6 +91,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         if self.path == "/api/ops":
             self._send(200, json.dumps(get_ops()).encode(), "application/json")
+            return
+        if self.path == "/api/templates":
+            self._send(200, json.dumps(get_templates()).encode(), "application/json")
+            return
+        if self.path.startswith("/api/template/"):
+            name = self.path[len("/api/template/"):]
+            wf = get_template(name)
+            if wf is None:
+                self._send(404, b"not found", "text/plain")
+            else:
+                self._send(200, json.dumps(wf).encode(), "application/json")
             return
         if self.path == "/api/strategies":
             self._send(200, json.dumps({"strategies": ["caat","composite_lru","tinylfu","noop"]}).encode(), "application/json")
