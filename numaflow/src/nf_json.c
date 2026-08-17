@@ -1,4 +1,7 @@
 /* nf_json.c - minimal JSON parser/writer (pure C11). */
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "nf_json.h"
 #include <stdio.h>
 #include <stdlib.h>

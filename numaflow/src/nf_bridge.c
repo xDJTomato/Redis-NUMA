@@ -1,4 +1,7 @@
 /* nf_bridge.c - bridge between the DAG engine and a key-value store (pure C11). */
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "nf_bridge.h"
 #include "nf_strategy.h"
 

@@ -1,101 +1,114 @@
 {
     // ────────────────────────────────────────────────────────────────
-    // composite_lru.json  —  NUMA Composite-LRU 策略参数配置文件
+    // composite_lru.json - configuration file for the NUMA Composite-LRU strategy
     //
-    // 加载方式（二选一）：
-    //   1. redis.conf 中设置：
+    // How to load (pick one):
+    //   1. Set it in redis.conf:
     //        numa-migrate-config /path/to/composite_lru.json
-    //      Redis 启动时自动加载。
+    //      Redis loads it automatically at startup.
     //
-    //   2. 运行时热更新（无需重启）：
+    //   2. Hot-reload at runtime (no restart needed):
     //        NUMA CONFIG LOAD /path/to/composite_lru.json
     //
-    // 所有字段均为可选；未填写的字段保持程序内置默认值。
+    // All fields are optional; unset fields keep the built-in defaults.
     // ────────────────────────────────────────────────────────────────
 
-    // ── 热度衰减 ──────────────────────────────────────────────────
-    // 惰性阶梯衰减的最小触发间隔（秒）。
-    // Key 在上次访问后至少空闲 decay_threshold_sec 秒才会被衰减。
-    // 较小的值使热度衰减更灵敏，过小会导致热点频繁重算。
-    // 范围: 1 ~ 3600   默认: 10
+    // -- Hotness decay --------------------------------------------------------
+    // Minimum trigger interval of the lazy staircase decay (seconds).
+    // A key is only decayed after being idle for at least decay_threshold_sec
+    // seconds since its last access. Smaller values decay more aggressively but
+    // may cause frequent hot-spot recomputation.
+    // Range: 1 ~ 3600   Default: 10
     "decay_threshold_sec": 10,
 
-    // ── 迁移触发阈值 ──────────────────────────────────────────────
-    // Key 的热度等级达到此值时，候选池快速通道触发迁移评估。
-    // 热度等级范围 0-7（PREFIX 机制追踪），值越小迁移越激进。
-    // 范围: 1 ~ 7   默认: 5
+    // -- Migration trigger threshold ------------------------------------------
+    // When a key's hotness level reaches this value, the candidate pool fast
+    // channel triggers migration evaluation. Hotness ranges 0-7 (tracked by the
+    // PREFIX mechanism); lower values migrate more aggressively.
+    // Range: 1 ~ 7   Code default: 3 (explicitly lowered to 1 here for more aggressive migration)
     "migrate_hotness_threshold": 1,
 
-    // ── 稳定性计数 ────────────────────────────────────────────────
-    // 字典回退路径（非 PREFIX 场景）中，Key 需要连续满足迁移条件
-    // stability_count 次后才真正触发迁移，防止抖动。
-    // 范围: 1 ~ 255   默认: 3
+    // -- Stability count ------------------------------------------------------
+    // On the dictionary fallback path (non-PREFIX scenarios), a key must keep
+    // satisfying the migration conditions for stability_count consecutive
+    // checks before migration actually fires, preventing flapping.
+    // Range: 1 ~ 255   Default: 3
     "stability_count": 3,
 
-    // ── 候选池容量 ────────────────────────────────────────────────
-    // 热点候选池（快速通道）环形缓冲区容量，单位：条目数。
-    // 建议设置为 peak_hot_keys * 1.5。
-    //   - 太小：高热度 key 被覆盖，迁移响应延迟升高
-    //   - 太大：内存开销增加，收益递减
-    // 适合场景：
-    //   小实例（< 1M keys）: 256
-    //   中实例（1-10M keys）: 512 ~ 1024
-    //   大实例（> 10M keys）: 2048+
-    // 范围: 1 ~ 65535   默认: 256
+    // -- Candidate pool capacity ----------------------------------------------
+    // Ring buffer capacity of the hot candidate pool (fast channel), in entries.
+    // Recommended: peak_hot_keys * 1.5.
+    //   - Too small: hot keys get overwritten, migration latency increases
+    //   - Too large: more memory overhead with diminishing returns
+    // Suitable sizes:
+    //   Small instances (< 1M keys): 256
+    //   Medium instances (1-10M keys): 512 ~ 1024
+    //   Large instances (> 10M keys): 2048+
+    // Range: 1 ~ 65535   Code default: 1024
     "hot_candidates_size": 1024,
 
-    // ── 渐进扫描批量大小 ──────────────────────────────────────────
-    // 兜底通道：每次 serverCron tick 扫描的 key 数量。
-    // 值越大，全量扫描一遍数据库越快，但每个 tick 的 CPU 消耗越高。
-    // 建议：DBSIZE / 100 ~ DBSIZE / 50 （覆盖时间约 50-100 轮 cron）
-    //   - 数据库 10W keys：200 ~ 400
-    //   - 数据库 100W keys：2000 ~ 5000
-    // 范围: 1 ~ 65535   默认: 2500
+    // -- Progressive scan batch size ------------------------------------------
+    // Fallback channel: number of keys scanned per serverCron tick.
+    // Larger values sweep the database faster but cost more CPU per tick.
+    // Suggested: DBSIZE / 100 ~ DBSIZE / 50 (full coverage in ~50-100 cron rounds)
+    //   - 100K keys: 200 ~ 400
+    //   - 1M keys: 2000 ~ 5000
+    // Range: 1 ~ 65535   Default: 2500
     "scan_batch_size": 2500,
 
-    // ── 基准迁移速率倍数 ──────────────────────────────────────────
-    // 同时放大快速通道迁移预算和兜底扫描预算，不改变 Composite-LRU 的候选、热度、资源检查逻辑。
-    // 默认 5 表示约为原默认基准迁移速率的 5 倍；可运行时通过 NUMA CONFIG SET migration_rate_multiplier N 调整。
-    // 范围: 1 ~ 100   默认: 5
+    // -- Base migration rate multiplier ---------------------------------------
+    // Scales up both the fast-channel migration budget and the fallback scan
+    // budget without changing Composite-LRU's candidate/hotness/resource-check
+    // logic. The default 5 means about 5x the original base migration rate; can
+    // be adjusted at runtime via NUMA CONFIG SET migration_rate_multiplier N.
+    // Range: 1 ~ 100   Default: 5
     "migration_rate_multiplier": 5,
 
-    // ── 资源压力阈值（0.0 ~ 1.0）─────────────────────────────────
-    // 以下三个阈值控制迁移执行时的资源保护逻辑。
-    // 超过阈值时，迁移候选会进入延迟队列而非立即执行。
+    // -- Resource pressure thresholds (0.0 ~ 1.0) ------------------------------
+    // The following three thresholds control the resource protection logic of
+    // migration execution. When exceeded, migration candidates are deferred
+    // instead of being executed immediately.
 
-    // 节点内存利用率上限，超过则认为该节点"过载"，停止迁入。
-    // 范围: 0.5 ~ 1.0   默认: 0.8
-    // 注意: QEMU 环境 Node 0 仅 4GB，0.8 在 Phase 2 中期即被触发，
-    //       阻止所有后续迁移。提高到 0.95 以匹配小内存节点场景。
+    // Node memory utilization cap; above it the node is considered "overloaded"
+    // and migrations into it stop.
+    // Range: 0.5 ~ 1.0   Default: 0.8
+    // Note: on the QEMU setup Node 0 has only 4GB, so 0.8 is hit mid-Phase 2 and
+    //       blocks all further migrations. Raised to 0.95 to match the small
+    //       memory node scenario.
     "overload_threshold": 0.95,
 
-    // 节点带宽利用率上限，超过则认为"带宽饱和"，限制迁移流量。
-    // 范围: 0.5 ~ 1.0   默认: 0.9
+    // Node bandwidth utilization cap; above it the node is considered "bandwidth
+    // saturated" and migration traffic is limited.
+    // Range: 0.5 ~ 1.0   Default: 0.9
     "bandwidth_threshold": 0.9,
 
-    // 系统整体迁移压力上限，超过则进入保守模式（降低迁移速率）。
-    // 范围: 0.3 ~ 1.0   默认: 0.7
-    // 同步提高以配合 overload_threshold=0.95
+    // System-wide migration pressure cap; above it the system enters a
+    // conservative mode (reduced migration rate).
+    // Range: 0.3 ~ 1.0   Default: 0.7
+    // Raised in sync with overload_threshold=0.95
     "pressure_threshold": 0.85,
 
-    // ── 后台自动迁移开关 ──────────────────────────────────────────
-    // 1 = 开启（推荐生产环境）：serverCron 自动驱动候选池 + 渐进扫描
-    // 0 = 关闭：仅支持手动触发（NUMA MIGRATE KEY / NUMA MIGRATE SCAN）
-    //           适合测试、调试或对迁移时机要求严格的场景
-    // 默认: 1
+    // -- Background auto migration switch --------------------------------------
+    // 1 = enabled (recommended for production): serverCron drives the candidate
+    //     pool plus the progressive scan automatically
+    // 0 = disabled: manual triggers only (NUMA MIGRATE KEY / NUMA MIGRATE SCAN),
+    //     for testing, debugging, or scenarios with strict migration timing
+    // Default: 1
     "auto_migrate_enabled": 1,
 
-    // ── 调试日志开关 ────────────────────────────────────────────────
-    // 1 = 打印迁移链路关键决策日志（access/resource/fast-path/scan/key-migrate）
-    // 0 = 关闭调试日志
-    // 默认: 0
+    // -- Debug logging switch --------------------------------------------------
+    // 1 = print key migration-decision logs (access/resource/fast-path/scan/key-migrate)
+    // 0 = debug logging off
+    // Default: 0
     "debug_logging_enabled": 0,
 
-    // ── 节点最大带宽配置（MB/s）───────────────────────────────────
-    // C-TAP 实测基线带宽，用于带宽利用率计算
-    // Node 0 (CXL内存): 典型值 51000 MB/s (约 51 GB/s)
-    // Node 1 (本地内存): 典型值 12000 MB/s (约 12 GB/s)
-    // 根据实际硬件配置调整
+    // -- Per-node max bandwidth (MB/s) -----------------------------------------
+    // C-TAP measured baseline bandwidth, used for bandwidth utilization.
+    // Node 0 (local/DRAM): typical 51000 MB/s (~51 GB/s)
+    // Node 1 (CXL memory): typical 12000 MB/s (~12 GB/s)
+    // Note: consistent with the README node definitions (Node 0=DRAM, Node 1=CXL);
+    // an older version had them swapped, which reversed the bandwidth decisions.
+    // Adjust according to the actual hardware.
     "max_bandwidth_node0_mbps": 51000,
     "max_bandwidth_node1_mbps": 12000
 }

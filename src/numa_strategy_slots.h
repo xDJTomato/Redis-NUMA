@@ -6,18 +6,18 @@
 
 typedef struct aeEventLoop aeEventLoop;
 
-/* 策略插槽配置 */
-#define NUMA_MAX_STRATEGY_SLOTS 16       /* 最大插槽数 */
-#define NUMA_SLOT_DEFAULT_ID    1        /* 默认策略插槽ID */
+/* Strategy slot configuration. */
+#define NUMA_MAX_STRATEGY_SLOTS 16       /* Maximum number of slots. */
+#define NUMA_SLOT_DEFAULT_ID    1        /* Default strategy slot ID. */
 
-/* 返回值定义 */
+/* Return value definitions. */
 #define NUMA_STRATEGY_OK       0
 #define NUMA_STRATEGY_ERR      -1
-#define NUMA_STRATEGY_ENOENT   -2        /* 策略不存在 */
-#define NUMA_STRATEGY_EINVAL   -3        /* 参数无效 */
-#define NUMA_STRATEGY_EEXIST   -4        /* 插槽已被占用 */
+#define NUMA_STRATEGY_ENOENT   -2        /* Strategy does not exist. */
+#define NUMA_STRATEGY_EINVAL   -3        /* Invalid argument. */
+#define NUMA_STRATEGY_EEXIST   -4        /* Slot already occupied. */
 
-/* 策略执行步进返回值 */
+/* Strategy step execution return values. */
 #define NUMA_STRATEGY_STEP_IDLE       0
 #define NUMA_STRATEGY_STEP_PROGRESS   1
 #define NUMA_STRATEGY_STEP_DONE       2
@@ -25,132 +25,132 @@ typedef struct aeEventLoop aeEventLoop;
 #define NUMA_STRATEGY_STEP_ERROR     -1
 #define NUMA_STRATEGY_STEP_TIMEOUT   -2
 
-/* 策略调度模式 */
+/* Strategy scheduling modes. */
 #define NUMA_STRATEGY_SCHED_SERVERCRON 0
 #define NUMA_STRATEGY_SCHED_AE         1
 
-/* 策略类型 */
+/* Strategy types. */
 typedef enum {
-    STRATEGY_TYPE_PERIODIC = 1,          /* 定期执行策略 */
-    STRATEGY_TYPE_EVENT_DRIVEN,          /* 事件驱动策略 */
-    STRATEGY_TYPE_HYBRID                 /* 混合策略 */
+    STRATEGY_TYPE_PERIODIC = 1,          /* Periodically executed strategy. */
+    STRATEGY_TYPE_EVENT_DRIVEN,          /* Event-driven strategy. */
+    STRATEGY_TYPE_HYBRID                 /* Hybrid strategy. */
 } numa_strategy_type_t;
 
-/* 策略优先级 */
+/* Strategy priorities. */
 typedef enum {
-    STRATEGY_PRIORITY_LOW = 1,           /* 低优先级 */
-    STRATEGY_PRIORITY_NORMAL,            /* 正常优先级 */
-    STRATEGY_PRIORITY_HIGH               /* 高优先级 */
+    STRATEGY_PRIORITY_LOW = 1,           /* Low priority. */
+    STRATEGY_PRIORITY_NORMAL,            /* Normal priority. */
+    STRATEGY_PRIORITY_HIGH               /* High priority. */
 } numa_strategy_priority_t;
 
-/* 前向声明 */
+/* Forward declarations. */
 typedef struct numa_strategy numa_strategy_t;
 
-/* 策略虚函数表 */
+/* Strategy vtable. */
 typedef struct {
-    /* 初始化策略 */
+    /* Initialize the strategy. */
     int (*init)(numa_strategy_t *strategy);
     
-    /* 执行策略逻辑 */
+    /* Execute the strategy logic. */
     int (*execute)(numa_strategy_t *strategy);
     int (*execute_step)(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget);
 
-    /* 清理策略资源 */
+    /* Clean up strategy resources. */
     void (*cleanup)(numa_strategy_t *strategy);
     
-    /* 获取策略信息 */
+    /* Get strategy info. */
     const char* (*get_name)(numa_strategy_t *strategy);
     const char* (*get_description)(numa_strategy_t *strategy);
     
-    /* 配置管理 */
+    /* Configuration management. */
     int (*set_config)(numa_strategy_t *strategy, const char *key, const char *value);
     int (*get_config)(numa_strategy_t *strategy, const char *key, char *buf, size_t buf_len);
 } numa_strategy_vtable_t;
 
-/* 策略实例结构 */
+/* Strategy instance structure. */
 struct numa_strategy {
-    /* 基本信息 */
-    int slot_id;                         /* 插槽ID */
-    const char *name;                    /* 策略名称 */
-    const char *description;             /* 策略描述 */
+    /* Basic info. */
+    int slot_id;                         /* Slot ID. */
+    const char *name;                    /* Strategy name. */
+    const char *description;             /* Strategy description. */
     
-    /* 执行控制 */
-    numa_strategy_type_t type;           /* 策略类型 */
-    numa_strategy_priority_t priority;   /* 优先级 */
-    int enabled;                         /* 是否启用 */
-    uint64_t execute_interval_us;        /* 执行间隔(微秒) */
-    uint64_t last_execute_time;          /* 上次执行时间 */
+    /* Execution control. */
+    numa_strategy_type_t type;           /* Strategy type. */
+    numa_strategy_priority_t priority;   /* Priority. */
+    int enabled;                         /* Whether enabled. */
+    uint64_t execute_interval_us;        /* Execution interval (microseconds). */
+    uint64_t last_execute_time;          /* Last execution time. */
     
-    /* 虚函数表 */
+    /* Vtable. */
     const numa_strategy_vtable_t *vtable;
     
-    /* 私有数据 */
+    /* Private data. */
     void *private_data;
     
-    /* 统计信息 */
-    uint64_t total_executions;           /* 总执行次数 */
-    uint64_t total_failures;             /* 失败次数 */
-    uint64_t total_execution_time_us;    /* 总执行时间(微秒) */
+    /* Statistics. */
+    uint64_t total_executions;           /* Total executions. */
+    uint64_t total_failures;             /* Failure count. */
+    uint64_t total_execution_time_us;    /* Total execution time (microseconds). */
 
-    /* AE 调度统计 */
-    int scheduler_mode;                  /* 调度模式 */
+    /* AE scheduling stats. */
+    int scheduler_mode;                  /* Scheduler mode. */
     long long ae_time_event_id;          /* AE time event ID */
-    uint32_t step_budget;                /* 单步预算 */
-    uint32_t max_runtime_us_per_step;    /* 单步最大执行时间 */
-    uint64_t max_execution_time_us;      /* 最大单次执行时间 */
-    uint64_t timeout_count;              /* 超时次数 */
-    uint64_t last_ae_run_us;             /* AE 上次执行时间 */
+    uint32_t step_budget;                /* Per-step budget. */
+    uint32_t max_runtime_us_per_step;    /* Max runtime per step. */
+    uint64_t max_execution_time_us;      /* Max single execution time. */
+    uint64_t timeout_count;              /* Timeout count. */
+    uint64_t last_ae_run_us;             /* Last AE execution time. */
 };
 
-/* 策略工厂结构 */
+/* Strategy factory structure. */
 typedef struct {
-    const char *name;                    /* 策略名称 */
-    const char *description;             /* 策略描述 */
-    numa_strategy_type_t type;           /* 策略类型 */
+    const char *name;                    /* Strategy name. */
+    const char *description;             /* Strategy description. */
+    numa_strategy_type_t type;           /* Strategy type. */
     numa_strategy_priority_t default_priority;
     uint64_t default_interval_us;
     
-    /* 创建和销毁函数 */
+    /* Create and destroy functions. */
     numa_strategy_t* (*create)(void);
     void (*destroy)(numa_strategy_t *strategy);
 } numa_strategy_factory_t;
 
-/* ========== 核心接口 ========== */
+/* ========== Core interface ========== */
 
-/* 初始化与清理 */
+/* Initialization and cleanup. */
 int numa_strategy_init(void);
 void numa_strategy_cleanup(void);
 
-/* 策略工厂注册 */
+/* Strategy factory registration. */
 int numa_strategy_register_factory(const numa_strategy_factory_t *factory);
 
-/* 策略创建与销毁 */
+/* Strategy creation and destruction. */
 numa_strategy_t* numa_strategy_create(const char *name);
 void numa_strategy_destroy(numa_strategy_t *strategy);
 
-/* 插槽操作 */
+/* Slot operations. */
 int numa_strategy_slot_insert(int slot_id, const char *strategy_name);
 int numa_strategy_slot_remove(int slot_id);
 int numa_strategy_slot_enable(int slot_id);
 int numa_strategy_slot_disable(int slot_id);
 int numa_strategy_slot_configure(int slot_id, const char *key, const char *value);
 
-/* 查询接口 */
+/* Query interface. */
 numa_strategy_t* numa_strategy_slot_get(int slot_id);
 int numa_strategy_slot_list(char *buf, size_t buf_len);
 int numa_strategy_slot_status(int slot_id, char *buf, size_t buf_len);
 
-/* 执行调度 */
-void numa_strategy_run_all(void);                    /* 执行所有启用的策略 */
-int numa_strategy_run_slot(int slot_id);            /* 执行指定插槽策略 */
-int numa_strategy_scheduler_init(aeEventLoop *el);  /* 初始化 AE 调度器 */
-int numa_strategy_slot_schedule_ae(int slot_id);    /* 注册插槽 AE time event */
-int numa_strategy_slot_unschedule_ae(int slot_id);  /* 注销插槽 AE time event */
-void numa_strategy_scheduler_cron(void);            /* AE 调度健康检查 */
+/* Execution scheduling. */
+void numa_strategy_run_all(void);                    /* Execute all enabled strategies. */
+int numa_strategy_run_slot(int slot_id);            /* Execute the strategy of a given slot. */
+int numa_strategy_scheduler_init(aeEventLoop *el);  /* Initialize the AE scheduler. */
+int numa_strategy_slot_schedule_ae(int slot_id);    /* Register a slot AE time event. */
+int numa_strategy_slot_unschedule_ae(int slot_id);  /* Unregister a slot AE time event. */
+void numa_strategy_scheduler_cron(void);            /* AE scheduler health check. */
 
-/* 内置策略注册函数 */
-int numa_strategy_register_noop(void);               /* 注册0号兜底策略 */
-int numa_strategy_register_composite_lru(void);      /* 注册1号默认策略 */
-int numa_strategy_register_tinylfu(void);             /* 注册2号TinyLFU策略 */
+/* Built-in strategy registration functions. */
+int numa_strategy_register_noop(void);               /* Register the slot 0 fallback strategy. */
+int numa_strategy_register_composite_lru(void);      /* Register the slot 1 default strategy. */
+int numa_strategy_register_tinylfu(void);             /* Register the slot 2 TinyLFU strategy. */
 
 #endif /* NUMA_STRATEGY_SLOTS_H */

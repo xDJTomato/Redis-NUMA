@@ -1,13 +1,14 @@
-/* numa_tinylfu.h - TinyLFU 热点数据快速发现与迁移策略（插槽 2）
+/* numa_tinylfu.h - TinyLFU hot data fast discovery and migration strategy (slot 2).
  *
- * 基于 Caffeine 的 TinyLFU 算法，使用 Count-Min Sketch + Doorkeeper Bloom Filter
- * 以极低的内存开销（~50KB）实现 O(1) 的访问频率估计和热点数据发现。
+ * Based on Caffeine's TinyLFU algorithm, using a Count-Min Sketch plus a
+ * Doorkeeper Bloom Filter to estimate access frequency and discover hot data
+ * in O(1) with a very low memory footprint (~50KB).
  *
- * 与 Composite LRU (Slot 1) 的核心区别：
- *   - 频率而非热度：CMS 直接计数访问次数，无需阶梯衰减
- *   - 全局衰减：周期性将所有计数器减半（而非每键惰性衰减）
- *   - Doorkeeper：过滤一次性访问的 key，避免计数器污染
- *   - 内存固定：CMS + Bloom Filter 大小固定，与 key 数量无关
+ * Key differences from Composite LRU (Slot 1):
+ *   - Frequency rather than hotness: CMS directly counts accesses, no staircase decay
+ *   - Global decay: all counters are halved periodically (not per-key lazy decay)
+ *   - Doorkeeper: filters one-time accesses to avoid counter pollution
+ *   - Fixed memory: CMS + Bloom Filter sizes are fixed, independent of key count
  */
 
 #ifndef NUMA_TINYLFU_H
@@ -19,15 +20,15 @@
 
 typedef struct redisDb redisDb;
 
-/* ========== Count-Min Sketch 参数 ========== */
+/* ========== Count-Min Sketch parameters ========== */
 #define TINYLFU_CMS_DEPTH       4
-#define TINYLFU_CMS_WIDTH_DEFAULT  16384   /* 必须是 2 的幂 */
-#define TINYLFU_COUNTER_MAX     15         /* 4-bit 计数器上限 */
+#define TINYLFU_CMS_WIDTH_DEFAULT  16384   /* Must be a power of two. */
+#define TINYLFU_COUNTER_MAX     15         /* 4-bit counter maximum. */
 
-/* ========== Doorkeeper Bloom Filter 参数 ========== */
+/* ========== Doorkeeper Bloom Filter parameters ========== */
 #define TINYLFU_DK_HASH_COUNT   2
 
-/* ========== 默认配置 ========== */
+/* ========== Default configuration ========== */
 #define TINYLFU_DEFAULT_MIGRATE_THRESHOLD   2
 #define TINYLFU_DEFAULT_RESET_INTERVAL      50000
 #define TINYLFU_DEFAULT_RING_SIZE           1024
@@ -36,19 +37,19 @@ typedef struct redisDb redisDb;
 /* ========== Count-Min Sketch ========== */
 typedef struct {
     uint8_t *rows[TINYLFU_CMS_DEPTH]; /* 4-bit packed: 2 counters/byte */
-    uint32_t width;                    /* 列数 (2 的幂) */
-    uint32_t width_mask;               /* width - 1, 快速取模 */
+    uint32_t width;                    /* Number of columns (power of two). */
+    uint32_t width_mask;               /* width - 1, for fast modulo. */
     uint32_t bytes_per_row;            /* width / 2 */
 } tinylfu_cms_t;
 
 /* ========== Doorkeeper Bloom Filter ========== */
 typedef struct {
     uint8_t *bits;
-    uint32_t num_bits;                 /* 位数 = CMS_DEPTH * width */
+    uint32_t num_bits;                 /* Bit count = CMS_DEPTH * width. */
     uint32_t num_bytes;
 } tinylfu_doorkeeper_t;
 
-/* ========== 迁移候选条目 ========== */
+/* ========== Migration candidate entry ========== */
 typedef struct {
     sds      key;
     void    *val;
@@ -58,18 +59,18 @@ typedef struct {
     uint32_t cost_units;
 } tinylfu_candidate_t;
 
-/* ========== 可配置参数 ========== */
+/* ========== Configurable parameters ========== */
 typedef struct {
-    uint32_t cms_width;                /* CMS 列数 */
-    uint8_t  migrate_threshold;        /* 触发迁移的最低频率 */
-    uint32_t reset_interval;           /* 每隔多少次访问执行一次全局衰减 */
-    uint32_t ring_size;                /* 候选环形缓冲区大小 */
-    uint32_t migration_budget;         /* 每次 serverCron 最多迁移数 */
-    int      auto_migrate_enabled;     /* 1=开启自动迁移 */
+    uint32_t cms_width;                /* CMS column count. */
+    uint8_t  migrate_threshold;        /* Minimum frequency to trigger migration. */
+    uint32_t reset_interval;           /* Global decay runs every N accesses. */
+    uint32_t ring_size;                /* Candidate ring buffer size. */
+    uint32_t migration_budget;         /* Max migrations per serverCron run. */
+    int      auto_migrate_enabled;     /* 1=enable auto migration. */
     int      debug_logging_enabled;
 } tinylfu_config_t;
 
-/* ========== 策略私有数据 ========== */
+/* ========== Strategy private data ========== */
 typedef struct {
     redisDb *db;
 
@@ -81,22 +82,22 @@ typedef struct {
     /* Doorkeeper Bloom Filter */
     tinylfu_doorkeeper_t doorkeeper;
 
-    /* 全局操作计数（触发衰减） */
+    /* Global operation counter (triggers decay). */
     uint64_t total_ops;
 
-    /* 候选环形缓冲区 */
+    /* Candidate ring buffer. */
     tinylfu_candidate_t *ring;
     uint32_t ring_head;
     uint32_t ring_tail;
     uint32_t ring_count;
 
-    /* 统计 */
-    uint64_t stat_accesses;            /* 总访问次数 */
-    uint64_t stat_doorkeeper_filtered; /* 被 doorkeeper 过滤（一次性访问） */
-    uint64_t stat_candidates_enqueued; /* 入队候选数 */
-    uint64_t stat_migrations_done;     /* 完成迁移数 */
-    uint64_t stat_migrations_failed;   /* 迁移失败数 */
-    uint64_t stat_resets;              /* 全局衰减次数 */
+    /* Statistics. */
+    uint64_t stat_accesses;            /* Total access count. */
+    uint64_t stat_doorkeeper_filtered; /* Filtered by the doorkeeper (one-time accesses). */
+    uint64_t stat_candidates_enqueued; /* Enqueued candidate count. */
+    uint64_t stat_migrations_done;     /* Completed migration count. */
+    uint64_t stat_migrations_failed;   /* Failed migration count. */
+    uint64_t stat_resets;              /* Global decay count. */
     uint64_t stat_accesses_local;
     uint64_t stat_accesses_remote;
     uint64_t stat_accesses_node0;
@@ -106,23 +107,23 @@ typedef struct {
     uint64_t stat_accesses_unknown;
 } tinylfu_data_t;
 
-/* ========== 公共接口 ========== */
+/* ========== Public interface ========== */
 
-/* 向策略管理器注册工厂 */
+/* Register the factory with the strategy manager. */
 int numa_tinylfu_register(void);
 
-/* 访问记录（在 lookupKey 中调用） */
+/* Record an access (called from lookupKey). */
 void tinylfu_record_access(numa_strategy_t *strategy, void *key,
                            void *val, void *data_ptr);
 
-/* 策略工厂函数 */
+/* Strategy factory function. */
 numa_strategy_t* tinylfu_create(void);
 void tinylfu_destroy(numa_strategy_t *strategy);
 
-/* 设置主线程 NUMA 节点（在 main() 中调用） */
+/* Set the main-thread NUMA node (called from main()). */
 void tinylfu_set_main_thread_node(int node);
 
-/* vtable 实现 */
+/* vtable implementation. */
 int  tinylfu_init(numa_strategy_t *strategy);
 int  tinylfu_execute(numa_strategy_t *strategy);
 int  tinylfu_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget);

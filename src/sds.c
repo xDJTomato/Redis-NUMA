@@ -233,7 +233,6 @@ void sdsclear(sds s) {
 sds sdsMakeRoomFor(sds s, size_t addlen) {
     void *sh, *newsh;
     size_t avail = sdsavail(s);
-    // printf("DEBUG: sdsMakeRoomFor(s=%p, addlen=%zu), avail=%zu\n", (void*)s, addlen, avail);
     size_t len, newlen, reqlen;
     char type, oldtype = s[-1] & SDS_TYPE_MASK;
     int hdrlen;
@@ -465,9 +464,7 @@ sds sdsgrowzero(sds s, size_t len) {
 sds sdscatlen(sds s, const void *t, size_t len) {
 
     size_t curlen = sdslen(s);
-    // printf("DEBUG: sdscatlen(s=%p, t=%p, len=%zu), curlen=%zu, trying sdsMakeRoomFor()\n", (void*)s, (void*)t, len, curlen);
     s = sdsMakeRoomFor(s,len);
-    //printf ("DEBUG: sdsMakeRoomFor() returns %p\n", (void*)s);
     if (s == NULL) return NULL;
     memcpy(s+curlen, t, len);
     sdssetlen(s, curlen+len);
@@ -591,9 +588,7 @@ sds sdsfromlonglong(long long value) {
 /* Like sdscatprintf() but gets va_list instead of being variadic. */
 sds sdscatvprintf(sds s, const char *fmt, va_list ap) {
     va_list cpy;
-    // printf("DEBUG: try sdscatvprintf(s=%p, fmt=%s, ap=%p)\n", (void*)s, fmt, (void*)ap);
     char staticbuf[1024], *buf = staticbuf, *t;
-    // printf("DEBUG: staticbuf is %p\n", (void*)staticbuf);
     size_t buflen = strlen(fmt)*2;
     int bufstrlen;
 
@@ -611,16 +606,13 @@ sds sdscatvprintf(sds s, const char *fmt, va_list ap) {
      * fit the string in the current buffer size. */
     while(1) {
         va_copy(cpy,ap);
-        // printf("DEBUG: try vsnprintf(buf=%p, buflen=%zu, fmt=%s, cpy=%p)\n", (void*)buf, buflen, fmt, (void*)cpy);
         bufstrlen = vsnprintf(buf, buflen, fmt, cpy);
-        //printf("DEBUG: vsnprintf() returns %d\n", bufstrlen);
         va_end(cpy);
         if (bufstrlen < 0) {
             if (buf != staticbuf) s_free(buf);
             return NULL;
         }
         if (((size_t)bufstrlen) >= buflen) {
-            //printf("DEBUG: need to grow buffer, current size %zu, required size %d\n", buflen, bufstrlen);
             if (buf != staticbuf) s_free(buf);
             buflen = ((size_t)bufstrlen) + 1;
             buf = s_malloc(buflen);
@@ -631,9 +623,7 @@ sds sdscatvprintf(sds s, const char *fmt, va_list ap) {
     }
 
     /* Finally concat the obtained string to the SDS string and return it. */
-    //printf("DEBUG: trying sdscatlen(s=%p, buf=%p, bufstrlen=%d)\n", (void*)s, (void*)buf, bufstrlen);
     t = sdscatlen(s, buf, bufstrlen);
-    //printf("DEBUG: sdscatlen() returns %p\n", (void*)t);
     if (buf != staticbuf) s_free(buf);
     return t;
 }
@@ -658,7 +648,6 @@ sds sdscatprintf(sds s, const char *fmt, ...) {
     va_list ap;
     char *t;
     va_start(ap, fmt);
-    // printf("DEBUG: try sdscatvprintf(s=%p, fmt=%s, ap=%p)\n", (void*)s, fmt, (void*)ap);
     t = sdscatvprintf(s,fmt,ap);
     va_end(ap);
     return t;

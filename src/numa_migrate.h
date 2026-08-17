@@ -1,8 +1,8 @@
-/* numa_migrate.h - NUMA内存迁移模块
+/* numa_migrate.h - NUMA memory migration module
  *
- * 本模块提供将内存对象在NUMA节点间迁移的基础功能。
- * 阶段1：用于测试的基础迁移功能
- * 阶段2：结合热度追踪的自动负载均衡（规划中）
+ * This module provides basic functionality to migrate memory objects between NUMA nodes.
+ * Phase 1: basic migration functionality for testing
+ * Phase 2: automatic load balancing with hotness tracking (planned)
  */
 
 #ifndef NUMA_MIGRATE_H
@@ -11,41 +11,41 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* 迁移操作返回码 */
-#define NUMA_MIGRATE_OK        0    /* 操作成功 */
-#define NUMA_MIGRATE_ERR      -1    /* 一般错误 */
-#define NUMA_MIGRATE_INVALID  -2    /* 参数无效 */
-#define NUMA_MIGRATE_NOMEM    -3    /* 内存不足 */
+/* Migration operation return codes. */
+#define NUMA_MIGRATE_OK        0    /* Operation succeeded. */
+#define NUMA_MIGRATE_ERR      -1    /* General error. */
+#define NUMA_MIGRATE_INVALID  -2    /* Invalid argument. */
+#define NUMA_MIGRATE_NOMEM    -3    /* Out of memory. */
 
-/* 迁移统计信息 */
+/* Migration statistics. */
 typedef struct {
-    uint64_t total_migrations;      /* 已完成的迁移次数 */
-    uint64_t bytes_migrated;        /* 已迁移的总字节数 */
-    uint64_t failed_migrations;     /* 失败的迁移次数 */
-    uint64_t migration_time_us;     /* 迁移消耗的总时间（微秒） */
+    uint64_t total_migrations;      /* Completed migration count. */
+    uint64_t bytes_migrated;        /* Total bytes migrated. */
+    uint64_t failed_migrations;     /* Failed migration count. */
+    uint64_t migration_time_us;     /* Total migration time (microseconds). */
 } numa_migrate_stats_t;
 
-/* 初始化迁移模块 */
+/* Initialize the migration module. */
 int numa_migrate_init(void);
 
-/* 清理迁移模块，释放资源 */
+/* Clean up the migration module and release resources. */
 void numa_migrate_cleanup(void);
 
-/* 将内存块从当前节点迁移到目标节点
+/* Migrate a memory block from the current node to the target node.
  *
- * @param ptr:         内存块的用户指针（非raw指针）
- * @param size:        内存块大小
- * @param target_node: 目标NUMA节点ID
- * @return:            成功时返回新指针，失败返回NULL
+ * @param ptr:         user pointer of the memory block (not the raw pointer)
+ * @param size:        memory block size
+ * @param target_node: target NUMA node ID
+ * @return:            the new pointer on success, NULL on failure
  *
- * 注意：迁移成功后，旧指针将失效，不可再使用
+ * Note: after a successful migration the old pointer is invalid and must not be used.
  */
 void *numa_migrate_memory(void *ptr, size_t size, int target_node);
 
-/* 获取迁移统计信息 */
+/* Get the migration statistics. */
 void numa_migrate_get_stats(numa_migrate_stats_t *stats);
 
-/* 重置迁移统计信息 */
+/* Reset the migration statistics. */
 void numa_migrate_reset_stats(void);
 
 #endif /* NUMA_MIGRATE_H */

@@ -1,14 +1,14 @@
-/* numa_tinylfu.c - TinyLFU 热点数据快速发现与迁移策略（插槽 2）
+/* numa_tinylfu.c - TinyLFU hot data fast discovery and migration strategy (slot 2).
  *
- * 算法来源: Caffeine (Ben Manes) 的 Window-TinyLFU
+ * Algorithm source: Window-TinyLFU from Caffeine (Ben Manes)
  *
- * 数据结构:
- *   1. Count-Min Sketch (4 行 × 16384 列, 4-bit 计数器)  = 32 KB
- *   2. Doorkeeper Bloom Filter (65536 位)                 =  8 KB
- *   3. 迁移候选环形缓冲区 (512 条目)                      ≈ 16 KB
- *   总计: ~56 KB 固定内存, 与 key 数量无关
+ * Data structures:
+ *   1. Count-Min Sketch (4 rows x 16384 columns, 4-bit counters) = 32 KB
+ *   2. Doorkeeper Bloom Filter (65536 bits)                      =  8 KB
+ *   3. Migration candidate ring buffer (512 entries)             ~ 16 KB
+ *   Total: ~56 KB fixed memory, independent of key count
  *
- * 热路径开销: 1 次 SipHash + 4 次位操作 (Doorkeeper) + 4 次数组读取 (CMS)
+ * Hot-path cost: 1 SipHash + 4 bit operations (Doorkeeper) + 4 array reads (CMS)
  */
 
 #ifdef HAVE_NUMA
@@ -38,7 +38,7 @@ extern uint64_t dictGenHashFunction(const void *key, int len);
 
 #define TLFU_LOG(level, ...) _serverLog(level, __VA_ARGS__)
 
-/* 主线程 NUMA 节点（与 composite_lru 共享） */
+/* Main-thread NUMA node (shared with composite_lru). */
 static int g_main_thread_node = 0;
 
 static uint64_t tinylfu_now_us(void) {
@@ -47,7 +47,7 @@ static uint64_t tinylfu_now_us(void) {
     return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
 }
 
-/* ========== CMS 4-bit packed 操作 ========== */
+/* ========== CMS 4-bit packed operations ========== */
 
 static inline uint8_t cms_get(const uint8_t *row, uint32_t col) {
     uint8_t byte = row[col >> 1];
@@ -71,13 +71,13 @@ static inline int cms_increment(uint8_t *row, uint32_t col) {
     return 0;
 }
 
-/* 从 64-bit hash 中导出各行列索引（Caffeine 风格：分段取 16 位） */
+/* Derive row/column indices from a 64-bit hash (Caffeine style: 16 bits per segment). */
 static inline uint32_t cms_index(uint64_t hash, int row, uint32_t mask) {
     uint32_t h = (uint32_t)(hash >> (row * 16));
     return h & mask;
 }
 
-/* ========== CMS 高层操作 ========== */
+/* ========== High-level CMS operations ========== */
 
 static int cms_alloc(tinylfu_cms_t *cms, uint32_t width) {
     cms->width = width;
@@ -110,7 +110,7 @@ static uint8_t cms_estimate(const tinylfu_cms_t *cms, uint64_t hash) {
     return min_val;
 }
 
-/* 全局减半: (byte >> 1) & 0x77 同时对两个 4-bit nibble 右移 */
+/* Global halving: (byte >> 1) & 0x77 shifts both 4-bit nibbles right. */
 static void cms_halve(tinylfu_cms_t *cms) {
     for (int i = 0; i < TINYLFU_CMS_DEPTH; i++) {
         uint8_t *row = cms->rows[i];
@@ -153,7 +153,7 @@ static inline void dk_add(tinylfu_doorkeeper_t *dk, uint64_t hash) {
     dk->bits[h2 >> 3] |= (1u << (h2 & 7));
 }
 
-/* ========== 环形缓冲区 ========== */
+/* ========== Ring buffer ========== */
 
 static int ring_alloc(tinylfu_data_t *d) {
     d->ring = zcalloc(sizeof(tinylfu_candidate_t) * d->config.ring_size);
@@ -206,7 +206,7 @@ static int ring_pop(tinylfu_data_t *d, tinylfu_candidate_t *out) {
     return 1;
 }
 
-/* ========== 访问记录（热路径，在 lookupKey 中调用） ========== */
+/* ========== Access recording (hot path, called from lookupKey) ========== */
 
 void tinylfu_record_access(numa_strategy_t *strategy, void *key_sds,
                            void *val, void *data_ptr) {
@@ -215,7 +215,7 @@ void tinylfu_record_access(numa_strategy_t *strategy, void *key_sds,
 
     d->stat_accesses++;
 
-    /* 所有访问都记录 locality 统计 */
+    /* All accesses update the locality statistics. */
     if (data_ptr) {
         int data_node = numa_get_node_id(data_ptr);
         if (data_node >= 0) {
@@ -238,21 +238,21 @@ void tinylfu_record_access(numa_strategy_t *strategy, void *key_sds,
     sds keyname = (sds)key_sds;
     uint64_t hash = dictGenHashFunction(keyname, sdslen(keyname));
 
-    /* Doorkeeper: 过滤一次性访问 */
+    /* Doorkeeper: filter one-time accesses. */
     if (!dk_test(&d->doorkeeper, hash)) {
         dk_add(&d->doorkeeper, hash);
         d->stat_doorkeeper_filtered++;
         goto decay_check;
     }
 
-    /* 已通过 doorkeeper, 递增 CMS */
+    /* Passed the doorkeeper, increment the CMS. */
     cms_record(&d->cms, hash);
 
-    /* 估计频率 (+1 因为 doorkeeper 吸收了第一次) */
+    /* Estimated frequency (+1 because the doorkeeper absorbed the first access). */
     uint8_t freq = cms_estimate(&d->cms, hash);
     if (freq < TINYLFU_COUNTER_MAX) freq++;
 
-    /* 检查迁移条件 */
+    /* Check the migration conditions. */
     if (freq >= d->config.migrate_threshold && data_ptr) {
         int data_node = numa_get_node_id(data_ptr);
         if (data_node >= 0 && data_node != g_main_thread_node) {
@@ -272,7 +272,7 @@ decay_check:
     }
 }
 
-/* ========== 策略执行（serverCron 每秒调用） ========== */
+/* ========== Strategy execution (called by serverCron every second) ========== */
 
 int tinylfu_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget) {
     tinylfu_data_t *d = strategy->private_data;
@@ -348,15 +348,15 @@ int tinylfu_execute(numa_strategy_t *strategy) {
     return tinylfu_execute_step(strategy, 0, d->config.migration_budget);
 }
 
-/* ========== vtable 实现 ========== */
+/* ========== vtable implementation ========== */
 
 int tinylfu_init(numa_strategy_t *strategy) {
     tinylfu_data_t *d = zcalloc(sizeof(tinylfu_data_t));
     if (!d) return NUMA_STRATEGY_ERR;
 
-    /* 主线程 NUMA 节点由 server main() 显式锁定，避免初始化时 CPU 漂移。 */
+    /* The main-thread NUMA node is pinned explicitly in server main() to avoid CPU drift during init. */
 
-    /* 默认配置 */
+    /* Default configuration. */
     d->config.cms_width = TINYLFU_CMS_WIDTH_DEFAULT;
     d->config.migrate_threshold = TINYLFU_DEFAULT_MIGRATE_THRESHOLD;
     d->config.reset_interval = TINYLFU_DEFAULT_RESET_INTERVAL;
@@ -498,7 +498,7 @@ static const numa_strategy_vtable_t tinylfu_vtable = {
     .get_config = tinylfu_get_config,
 };
 
-/* ========== 工厂 ========== */
+/* ========== Factory ========== */
 
 numa_strategy_t* tinylfu_create(void) {
     numa_strategy_t *s = zcalloc(sizeof(numa_strategy_t));
@@ -506,7 +506,7 @@ numa_strategy_t* tinylfu_create(void) {
     s->vtable = &tinylfu_vtable;
     s->type = STRATEGY_TYPE_PERIODIC;
     s->priority = STRATEGY_PRIORITY_HIGH;
-    s->execute_interval_us = 1000000; /* 1 秒 */
+    s->execute_interval_us = 1000000; /* 1 second. */
     s->step_budget = TINYLFU_DEFAULT_MIGRATION_BUDGET;
     s->max_runtime_us_per_step = 500;
     s->enabled = 1;
@@ -536,7 +536,7 @@ int numa_tinylfu_register(void) {
     return numa_strategy_register_factory(&tinylfu_factory);
 }
 
-/* ========== 主线程节点设置 ========== */
+/* ========== Main-thread node setup ========== */
 
 void tinylfu_set_main_thread_node(int node) {
     g_main_thread_node = node;

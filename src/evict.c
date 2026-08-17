@@ -53,7 +53,7 @@
  * Empty entries have the key pointer set to NULL. */
 #define EVPOOL_SIZE 16
 #define EVPOOL_CACHED_SDS_SIZE 255
-/* struct evictionPoolEntry 已移至 evict.h */
+/* struct evictionPoolEntry has moved to evict.h. */
 
 static struct evictionPoolEntry *EvictionPoolLRU;
 
@@ -515,6 +515,10 @@ int performEvictions(void) {
     long long delta;
     int slaves = listLength(server.slaves);
     int result = EVICT_FAIL;
+#ifdef HAVE_NUMA
+    /* Demotions are capped per eviction cycle by numa-demote-max-migrate. */
+    int numa_demotions = 0;
+#endif
 
     if (getMaxmemoryState(&mem_reported,NULL,&mem_tofree,NULL) == C_OK)
         return EVICT_OK;
@@ -585,37 +589,49 @@ int performEvictions(void) {
                      * a ghost and we need to try the next element. */
                     if (de) {
                         bestkey = dictGetKey(de);
-                        robj *val = dictGetVal(de);
-                        
-                        /* === NUMA 降级尝试 === */
+
+                        /* For volatile policies 'de' belongs to db->expires
+                         * and its value is an expire timestamp, not a robj.
+                         * Fetch the real value from the main keyspace dict. */
+                        robj *val = NULL;
+                        if (server.maxmemory_policy & MAXMEMORY_FLAG_ALLKEYS) {
+                            val = dictGetVal(de);
+                        } else {
+                            dictEntry *main_de = dictFind(server.db[bestdbid].dict,
+                                                          bestkey);
+                            if (main_de) val = dictGetVal(main_de);
+                        }
+
+                        /* === NUMA demotion attempt === */
 #ifdef HAVE_NUMA
-                        if (server.numa_demote_enabled && val != NULL) {
+                        if (server.numa_demote_enabled && val != NULL &&
+                            numa_demotions < server.numa_demote_max_migrate)
+                        {
                             int target_node = -1;
                             numa_demote_result_t demote_result = evictionTryNumaDemote(
                                 &server.db[bestdbid], bestkey, val, &target_node);
-                            
+
                             if (demote_result == NUMA_DEMOTE_OK) {
-                                /* 降级成功，释放本地内存但保留对象 */
-                                pool[k].current_node = target_node;
-                                pool[k].numa_migrated++;
-                                
+                                /* Demotion succeeded: local memory freed but the object is kept. */
+                                numa_demotions++;
+
                                 size_t obj_size = objectComputeSize(val, 0);
                                 mem_freed += obj_size;
                                 keys_freed++;
-                                
+
                                 serverLog(LL_VERBOSE,
                                     "[Eviction] NUMA demote succeeded: %s -> node %d, size=%zu",
                                     bestkey, target_node, obj_size);
-                                
-                                /* 清空池条目，继续下一轮 */
+
+                                /* Clear the pool entry and continue with the next candidate. */
                                 if (pool[k].key != pool[k].cached)
                                     sdsfree(pool[k].key);
                                 pool[k].key = NULL;
                                 pool[k].idle = 0;
                                 bestkey = NULL;
-                                continue; /* 继续处理下一个候选者 */
+                                continue;
                             }
-                            
+
                             if (demote_result == NUMA_DEMOTE_NO_NODE) {
                                 serverLog(LL_DEBUG,
                                     "[Eviction] No NUMA node available, proceed to evict");
@@ -623,7 +639,7 @@ int performEvictions(void) {
                         }
 #endif /* HAVE_NUMA */
                         
-                        /* 进入真正淘汰流程 */
+                        /* Proceed to the actual eviction flow. */
                         break;
                     } else {
                         /* Ghost... Iterate again. */

@@ -1,4 +1,7 @@
 /* nf_common.c - implementation of NUMAflow common utilities. */
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "nf_common.h"
 
 #include <stdio.h>

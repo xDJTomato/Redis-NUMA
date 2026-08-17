@@ -1,6 +1,6 @@
-/* numa_configurable_strategy.h - 可配置NUMA分配策略接口
+/* numa_configurable_strategy.h - configurable NUMA allocation strategy interface
  *
- * 提供运行时可配置的NUMA内存分配策略，支持通过配置文件和命令行指令动态调整
+ * Provides a runtime-configurable NUMA memory allocation policy, adjustable via config file and command-line directives.
  */
 
 #ifndef NUMA_CONFIGURABLE_STRATEGY_H
@@ -12,129 +12,129 @@
 #include "atomicvar.h"
 #include <stddef.h>
 
-/* 可配置的NUMA策略类型 */
+/* Configurable NUMA strategy types. */
 typedef enum {
-    NUMA_STRATEGY_CONFIG_LOCAL_FIRST = 0,    /* 本地优先策略 */
-    NUMA_STRATEGY_CONFIG_INTERLEAVE,         /* 交错分配策略 */
-    NUMA_STRATEGY_CONFIG_ROUND_ROBIN,        /* 轮询分配策略 */
-    NUMA_STRATEGY_CONFIG_WEIGHTED,           /* 加权分配策略 */
-    NUMA_STRATEGY_CONFIG_PRESSURE_AWARE,     /* 压力感知策略 */
-    NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED,      /* CXL优化策略 */
-    NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE,/* 压力感知权重交错策略 */
-    NUMA_STRATEGY_CONFIG_ADAPTIVE,           /* 自适应策略（待实现） */
-    NUMA_STRATEGY_CONFIG_LATENCY_AWARE,      /* 延迟感知策略（待实现） */
-    NUMA_STRATEGY_CONFIG_COUNT               /* 策略总数哨兵 */
+    NUMA_STRATEGY_CONFIG_LOCAL_FIRST = 0,    /* Local-first policy. */
+    NUMA_STRATEGY_CONFIG_INTERLEAVE,         /* Interleaved allocation policy. */
+    NUMA_STRATEGY_CONFIG_ROUND_ROBIN,        /* Round-robin allocation policy. */
+    NUMA_STRATEGY_CONFIG_WEIGHTED,           /* Weighted allocation policy. */
+    NUMA_STRATEGY_CONFIG_PRESSURE_AWARE,     /* Pressure-aware policy. */
+    NUMA_STRATEGY_CONFIG_CXL_OPTIMIZED,      /* CXL-optimized policy. */
+    NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE,/* Pressure-aware weighted interleave policy. */
+    NUMA_STRATEGY_CONFIG_ADAPTIVE,           /* Adaptive policy (to be implemented). */
+    NUMA_STRATEGY_CONFIG_LATENCY_AWARE,      /* Latency-aware policy (to be implemented). */
+    NUMA_STRATEGY_CONFIG_COUNT               /* Sentinel for the total strategy count. */
 } numa_config_strategy_type_t;
 
-/* 策略配置参数 */
+/* Strategy configuration parameters. */
 typedef struct {
-    numa_config_strategy_type_t strategy_type;  /* 策略类型 */
-    int *node_weights;                          /* 各节点权重数组 */
-    int num_nodes;                              /* 节点数量 */
-    double balance_threshold;                   /* 平衡阈值 */
-    int enable_cxl_optimization;                /* 是否启用CXL优化 */
-    size_t min_allocation_size;                 /* 最小分配大小 */
-    int auto_rebalance;                         /* 是否自动重新平衡 */
-    uint64_t rebalance_interval_us;             /* 重新平衡间隔 */
-    uint64_t enabled_nodes_mask;                 /* 可参与自动分配的 NUMA 节点掩码，0=全部 */
+    numa_config_strategy_type_t strategy_type;  /* Strategy type. */
+    int *node_weights;                          /* Per-node weight array. */
+    int num_nodes;                              /* Number of nodes. */
+    double balance_threshold;                   /* Balance threshold. */
+    int enable_cxl_optimization;                /* Whether CXL optimization is enabled. */
+    size_t min_allocation_size;                 /* Minimum allocation size. */
+    int auto_rebalance;                         /* Whether auto-rebalance is enabled. */
+    uint64_t rebalance_interval_us;             /* Rebalance interval. */
+    uint64_t enabled_nodes_mask;                 /* Mask of NUMA nodes allowed for auto allocation, 0=all. */
 } numa_strategy_config_t;
 
-/* 运行时策略状态 */
+/* Runtime policy state. */
 typedef struct {
     numa_strategy_config_t config;
-    int current_strategy;                       /* 当前使用的策略 */
-    uint64_t last_rebalance_time;               /* 上次重新平衡时间 */
-    redisAtomic int *allocation_counters;        /* 各节点分配计数器（原子，无锁更新） */
-    redisAtomic size_t *bytes_allocated_per_node; /* 各节点已分配字节数（原子，无锁更新） */
-    redisAtomic int *pressure_weights;           /* 压力权重数组（原子更新，分配路径无锁读取） */
-    redisAtomic int *bw_usage_percent;           /* 各节点带宽利用率 0-100（原子更新，迁移路径无锁读取） */
-    int cpu_node;                                /* Redis 主线程 CPU 所在 NUMA 节点 */
-    double *distance_factors;                    /* 各节点距离因子（启动时一次性计算）*/
+    int current_strategy;                       /* Currently used strategy. */
+    uint64_t last_rebalance_time;               /* Last rebalance time. */
+    redisAtomic int *allocation_counters;        /* Per-node allocation counters (atomic, lock-free updates). */
+    redisAtomic size_t *bytes_allocated_per_node; /* Per-node allocated bytes (atomic, lock-free updates). */
+    redisAtomic int *pressure_weights;           /* Pressure weight array (atomic updates, lock-free reads on the allocation path). */
+    redisAtomic int *bw_usage_percent;           /* Per-node bandwidth utilization 0-100 (atomic updates, lock-free reads on the migration path). */
+    int cpu_node;                                /* NUMA node of the Redis main-thread CPU. */
+    double *distance_factors;                    /* Per-node distance factors (computed once at startup). */
 } numa_runtime_state_t;
 
-/* ========== 配置管理API ========== */
+/* ========== Configuration management API ========== */
 
-/* 初始化可配置策略系统 */
+/* Initialize the configurable strategy system. */
 int numa_config_strategy_init(void);
 
-/* 清理策略系统 */
+/* Clean up the strategy system. */
 void numa_config_strategy_cleanup(void);
 
-/* 从配置文件加载策略配置 */
+/* Load the strategy configuration from a file. */
 int numa_config_load_from_file(const char *config_file);
 
-/* 应用策略配置 */
+/* Apply the strategy configuration. */
 int numa_config_apply_strategy(const numa_strategy_config_t *config);
 
-/* 获取当前策略配置 */
+/* Get the current strategy configuration. */
 const numa_strategy_config_t* numa_config_get_current(void);
 
-/* ========== 运行时控制API ========== */
+/* ========== Runtime control API ========== */
 
-/* 设置NUMA分配策略 */
+/* Set the NUMA allocation strategy. */
 int numa_config_set_strategy(numa_config_strategy_type_t strategy);
 
-/* 设置节点权重 */
+/* Set the node weights. */
 int numa_config_set_node_weights(int *weights, int num_nodes);
 
-/* 设置自动分配节点掩码，mask=0 表示启用全部节点 */
+/* Set the auto-allocation node mask; mask=0 enables all nodes. */
 int numa_config_set_enabled_nodes_mask(uint64_t mask);
 uint64_t numa_config_get_enabled_nodes_mask(void);
 
-/* 启用/禁用CXL优化 */
+/* Enable/disable CXL optimization. */
 int numa_config_set_cxl_optimization(int enable);
 
-/* 设置平衡阈值 */
+/* Set the balance threshold. */
 int numa_config_set_balance_threshold(double threshold);
 
-/* 手动触发重新平衡 */
+/* Manually trigger a rebalance. */
 int numa_config_trigger_rebalance(void);
 
-/* 更新压力权重（serverCron 每秒调用） */
+/* Update the pressure weights (called by serverCron every second). */
 void numa_config_update_pressure_weights(void);
 
-/* 获取缓存的带宽利用率（0-100），分配/迁移路径无锁读取 */
+/* Get the cached bandwidth utilization (0-100), lock-free reads on the allocation/migration path. */
 int numa_config_get_cached_bw(int node);
 
-/* 获取缓存的压力权重，分配路径无锁读取 */
+/* Get the cached pressure weight, lock-free reads on the allocation path. */
 int numa_config_get_cached_pressure_weight(int node);
 
-/* ========== 内存分配API ========== */
+/* ========== Memory allocation API ========== */
 
-/* 智能内存分配 - 根据当前配置选择最优策略 */
+/* Smart memory allocation - picks the best strategy according to the current configuration. */
 void *numa_config_malloc(size_t size);
 
-/* 智能清零分配 */
+/* Smart zeroed allocation. */
 void *numa_config_calloc(size_t nmemb, size_t size);
 
-/* 在指定节点分配 */
+/* Allocate on a given node. */
 void *numa_config_malloc_onnode(size_t size, int node);
 
-/* ========== 查询和统计API ========== */
+/* ========== Query and statistics API ========== */
 
-/* 获取策略执行统计 */
+/* Get the strategy execution statistics. */
 void numa_config_get_statistics(uint64_t *allocations_per_node, 
                                size_t *bytes_per_node,
                                int num_nodes);
 
-/* 获取节点负载信息 */
+/* Get the node load info. */
 double numa_config_get_node_utilization(int node_id);
 
-/* 检查是否需要重新平衡 */
+/* Check whether a rebalance is needed. */
 int numa_config_needs_rebalance(void);
 
-/* 获取最佳分配节点 */
+/* Get the best allocation node. */
 int numa_config_get_best_node(size_t size);
 
-/* ========== 命令行接口 ========== */
+/* ========== Command-line interface ========== */
 
-/* 处理NUMA配置相关命令 */
+/* Handle NUMA configuration commands. */
 int numa_config_handle_command(int argc, char **argv);
 
-/* 显示当前配置状态 */
+/* Show the current configuration state. */
 void numa_config_show_status(void);
 
-/* 显示帮助信息 */
+/* Show help. */
 void numa_config_show_help(void);
 
 #endif /* NUMA_CONFIGURABLE_STRATEGY_H */

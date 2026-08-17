@@ -245,7 +245,6 @@ static void numa_cmd_migrate(client *c) {
             addReplyError(c, "Key not found");
             return;
         }
-        key_numa_metadata_t *meta = numa_get_key_metadata(key);
         addReplyArrayLen(c, 12);
         addReplyBulkCString(c, "type");
         const char *type_name;
@@ -258,36 +257,19 @@ static void numa_cmd_migrate(client *c) {
             default:         type_name = "unknown"; break;
         }
         addReplyBulkCString(c, type_name);
+
+        /* For INT/EMBSTR strings the payload lives inside the robj allocation;
+         * fall back to the robj base in that case.  For RAW strings and the
+         * other types, sample the actual data allocation. */
+        void *sample = numa_object_sample_alloc_ptr(val);
+        if (!sample) sample = val;
+
         addReplyBulkCString(c, "current_node");
-        {
-            int node = -1;
-            if (val->encoding == OBJ_ENCODING_RAW && val->ptr)
-                node = numa_get_node_id(sdsAllocPtr(val->ptr));
-            else if (val->encoding != OBJ_ENCODING_INT &&
-                     val->encoding != OBJ_ENCODING_EMBSTR && val->ptr)
-                node = numa_get_node_id(val->ptr);
-            addReplyLongLong(c, node);
-        }
+        addReplyLongLong(c, sample ? numa_get_node_id(sample) : -1);
         addReplyBulkCString(c, "hotness_level");
-        {
-            uint8_t h = 0;
-            if (val->encoding == OBJ_ENCODING_RAW && val->ptr)
-                h = numa_get_hotness(sdsAllocPtr(val->ptr));
-            else if (val->encoding != OBJ_ENCODING_INT &&
-                     val->encoding != OBJ_ENCODING_EMBSTR && val->ptr)
-                h = numa_get_hotness(val->ptr);
-            addReplyLongLong(c, h);
-        }
+        addReplyLongLong(c, sample ? numa_get_hotness(sample) : 0);
         addReplyBulkCString(c, "access_count");
-        {
-            uint8_t ac = 0;
-            if (val->encoding == OBJ_ENCODING_RAW && val->ptr)
-                ac = numa_get_access_count(sdsAllocPtr(val->ptr));
-            else if (val->encoding != OBJ_ENCODING_INT &&
-                     val->encoding != OBJ_ENCODING_EMBSTR && val->ptr)
-                ac = numa_get_access_count(val->ptr);
-            addReplyLongLong(c, ac);
-        }
+        addReplyLongLong(c, sample ? numa_get_access_count(sample) : 0);
         addReplyBulkCString(c, "numa_nodes_available");
         addReplyLongLong(c, numa_max_node() + 1);
         addReplyBulkCString(c, "current_cpu_node");

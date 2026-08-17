@@ -2,18 +2,21 @@
 # Builds with GNU make (Linux) or mingw32-make (native Windows).
 
 CC      = gcc
+PYTHON  = python
 CFLAGS  ?= -O2 -std=c11 -Wall -Wextra
 INC      = -Iinclude
 BUILD    = build
 LDLIBS   = -lm -lpthread
 
 ifeq ($(OS),Windows_NT)
+  PYTHON = python
   MKDIR = if not exist $(BUILD) mkdir $(BUILD)
   MKDIR_RESULTS = if not exist ..\results mkdir ..\results
   RM    = del /q
   EXE   = .exe
   NULL  = NUL
 else
+  PYTHON = python3
   MKDIR = mkdir -p $(BUILD)
   MKDIR_RESULTS = mkdir -p ../results
   RM    = rm -rf
@@ -78,11 +81,19 @@ strategies: $(BIN)
 
 # generate the benchmark JSON + HTML report
 report: $(BIN)
-	python eval/report.py || true
+	$(PYTHON) eval/report.py || true
+
+ifeq ($(OS),Windows_NT)
+CLEAN_GLOB = $(BUILD)\*
+CLEAN_RMDIR = -rmdir $(BUILD) 2>$(NULL)
+else
+CLEAN_GLOB = $(BUILD)/*
+CLEAN_RMDIR = -rmdir $(BUILD) 2>$(NULL) || true
+endif
 
 clean:
-	-$(RM) $(BUILD)\* 2>$(NULL)
-	-rmdir $(BUILD) 2>$(NULL) || true
+	-$(RM) $(CLEAN_GLOB) 2>$(NULL)
+	$(CLEAN_RMDIR)
 
 bench: $(BIN)
 	$(MKDIR_RESULTS)
@@ -90,4 +101,4 @@ bench: $(BIN)
 	$(BIN) eval --workload uniform --keys 3000 --accesses 120000 --epoch 3000 --budget 256 --nodes 2 --seed 20240517 --out ../results/bench_uniform.json
 	$(BIN) eval --workload hotspot --keys 3000 --accesses 120000 --epoch 3000 --budget 256 --nodes 2 --seed 20240517 --out ../results/bench_hotspot.json
 	$(BIN) eval --workload temporal --keys 3000 --accesses 120000 --epoch 3000 --budget 256 --nodes 2 --seed 20240517 --out ../results/bench_temporal.json
-	python eval/report.py
+	$(PYTHON) eval/report.py

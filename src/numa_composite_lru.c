@@ -1,10 +1,10 @@
 /*
- * NUMA复合LRU策略实现（插槽1默认策略）
+ * NUMA composite LRU strategy implementation (slot 1 default policy).
  *
- * 双通道迁移决策：
- *   快速通道：访问时写入候选池，serverCron 优先处理
- *   兜底通道：serverCron 每次渐进扫描 key_heat_map 中 scan_batch_size 个 key
- *   执行时始终重读 PREFIX 当前热度，不依赖快照
+ * Dual-channel migration decision:
+ *   Fast channel: write to the candidate pool on access, processed first by serverCron
+ *   Fallback channel: serverCron progressively scans scan_batch_size keys of key_heat_map each run
+ *   Execution always re-reads the current PREFIX hotness, never relying on snapshots
  */
 
 #define _GNU_SOURCE
@@ -22,7 +22,7 @@
 #include <sched.h>
 #include <numa.h>
 
-/* ========== 日志输出 ========== */
+/* ========== Logging ========== */
 
 #ifdef NUMA_STRATEGY_STANDALONE
 #define _serverLog(level, fmt, ...) printf("[%s] " fmt "\n", level, ##__VA_ARGS__)
@@ -34,7 +34,7 @@ extern void _serverLog(int level, const char *fmt, ...);
 #define LL_WARNING 3
 #endif
 
-/* ========== 辅助函数 ========== */
+/* ========== Helper functions ========== */
 
 static uint64_t get_current_time_us(void) {
     struct timeval tv;
@@ -61,9 +61,10 @@ static uint8_t compute_lazy_decay_steps(uint16_t elapsed_secs) {
     return COMPOSITE_LRU_HOTNESS_MAX;
 }
 
-/* 主线程 NUMA 节点：只有主线程的 node 才参与迁移决策。
- * 后台/IO 线程被 OS 调度到其他 NUMA 节点时，不应把 key 迁移过去，
- * 否则会导致迁移乒乓（主线程迁回 → 后台线程迁走 → 循环往复）。 */
+/* Main-thread NUMA node: only the main thread's node takes part in migration
+ * decisions. When background/IO threads are scheduled to other NUMA nodes by
+ * the OS, keys must not be migrated there, otherwise migration ping-pong
+ * occurs (main thread migrates back, background thread migrates away, ad infinitum). */
 static pthread_t s_main_thread_id;
 static int       s_main_thread_node = 0;
 static int       s_main_thread_inited = 0;
@@ -81,22 +82,36 @@ static inline int is_main_thread(void) {
     return s_main_thread_inited && pthread_equal(pthread_self(), s_main_thread_id);
 }
 
-/* 获取迁移决策使用的 NUMA 节点：始终返回主线程的节点 */
+/* Get the NUMA node used for migration decisions: always the main thread's node. */
 static int get_current_numa_node(void) {
     if (s_main_thread_inited) return s_main_thread_node;
     if (numa_available() < 0) return 0;
     return numa_node_of_cpu(sched_getcpu());
 }
 
-/* ========== 热度图字典回调 ========== */
+/* ========== Heat map dictionary callbacks ========== */
 
 static uint64_t heat_map_hash(const void *key) {
-    return (uint64_t)(uintptr_t)key;
+    /* Hash by content: key names are sds strings stored as sdsdup copies. With
+     * pointer hashing dictFetchValue would always miss, adding a new entry on
+     * every threshold crossing and never updating the old one, causing memory
+     * leaks and repeated idle migrations. */
+    return dictGenHashFunction(key, (int)sdslen((const sds)key));
 }
 
 static int heat_map_key_compare(void *privdata, const void *key1, const void *key2) {
     (void)privdata;
-    return key1 == key2;
+    return sdscmp((const sds)key1, (const sds)key2) == 0;
+}
+
+static void *heat_map_key_dup(void *privdata, const void *key) {
+    (void)privdata;
+    return sdsdup((const sds)key);
+}
+
+static void heat_map_key_destructor(void *privdata, void *key) {
+    (void)privdata;
+    sdsfree((sds)key);
 }
 
 static void heat_map_val_destructor(void *privdata, void *val) {
@@ -106,16 +121,16 @@ static void heat_map_val_destructor(void *privdata, void *val) {
 
 static dictType heat_map_dict_type = {
     .hashFunction = heat_map_hash,
-    .keyDup = NULL,
+    .keyDup = heat_map_key_dup,
     .valDup = NULL,
     .keyCompare = heat_map_key_compare,
-    .keyDestructor = NULL,
+    .keyDestructor = heat_map_key_destructor,
     .valDestructor = heat_map_val_destructor
 };
 
-/* ========== JSON 配置局所辅助 ========== */
+/* ========== JSON config parsing helpers ========== */
 
-/* 去除字符串左右空白 */
+/* Strip leading and trailing whitespace. */
 static char *trim_spaces(char *s) {
     while (*s == ' ' || *s == '\t') s++;
     char *end = s + strlen(s) - 1;
@@ -125,7 +140,7 @@ static char *trim_spaces(char *s) {
 }
 
 /*
- * composite_lru_config_defaults - 填充默认配置
+ * composite_lru_config_defaults - fill in the default configuration
  */
 void composite_lru_config_defaults(composite_lru_config_t *cfg) {
     if (!cfg) return;
@@ -145,10 +160,10 @@ void composite_lru_config_defaults(composite_lru_config_t *cfg) {
 }
 
 /*
- * composite_lru_load_config - 从 JSON 文件加载配置
+ * composite_lru_load_config - load the configuration from a JSON file
  *
- * 支持顶层扁平 key-value 格式，不依赖外部 JSON 库。
- * 未存在或无法解析的字段保持默认值。
+ * Supports a flat top-level key-value format without depending on an external
+ * JSON library. Fields that are absent or unparseable keep their defaults.
  */
 int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
     if (!path || !out) return NUMA_STRATEGY_EINVAL;
@@ -163,29 +178,29 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
 
     char line[512];
     while (fgets(line, sizeof(line), fp)) {
-        /* 忽略注释行和空行 */
+        /* Skip comment and empty lines. */
         char *p = trim_spaces(line);
         if (*p == '/' || *p == '#' || *p == '{' || *p == '}' || *p == '\0') continue;
 
-        /* 尝试匹配 "key": value 格式 */
+        /* Try to match the "key": value format. */
         char *colon = strchr(p, ':');
         if (!colon) continue;
 
-        /* 提取 key */
+        /* Extract the key. */
         *colon = '\0';
         char *k = trim_spaces(p);
-        /* 去掉引号 */
+        /* Strip the quotes. */
         if (*k == '"') k++;
         char *ke = strchr(k, '"');
         if (ke) *ke = '\0';
 
-        /* 提取 value */
+        /* Extract the value. */
         char *v = trim_spaces(colon + 1);
-        /* 去掉尾部逗号 */
+        /* Strip the trailing comma. */
         char *ve = v + strlen(v) - 1;
         while (ve >= v && (*ve == ',' || *ve == ' ' || *ve == '\t')) *ve-- = '\0';
 
-        /* 匹配字段名并设置值 */
+        /* Match the field name and set the value. */
         if (strcmp(k, "decay_threshold_sec") == 0) {
             out->decay_threshold_sec = (uint32_t)atoi(v);
         } else if (strcmp(k, "migrate_hotness_threshold") == 0) {
@@ -217,8 +232,8 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
         } else if (strcmp(k, "debug_logging_enabled") == 0) {
             out->debug_logging_enabled = atoi(v);
         } else if (strncmp(k, "max_bandwidth_node", 18) == 0) {
-            /* 解析 max_bandwidth_nodeX_mbps, X=节点号 */
-            int node_id = atoi(k + 18);  /* "max_bandwidth_node" 后面的数字 */
+            /* Parse max_bandwidth_nodeX_mbps, X = node number. */
+            int node_id = atoi(k + 18);  /* Digits following "max_bandwidth_node". */
             double mbps = atof(v);
             if (node_id >= 0 && node_id < NUMA_BW_MAX_NODES && mbps > 0) {
                 numa_bw_set_max_bandwidth(node_id, mbps);
@@ -237,9 +252,9 @@ int composite_lru_load_config(const char *path, composite_lru_config_t *out) {
 }
 
 /*
- * composite_lru_apply_config - 将配置应用到运行中的策略实例
+ * composite_lru_apply_config - apply the configuration to a running strategy instance
  *
- * 如果候选池大小发生变化，重建候选池数组。
+ * If the candidate pool size changed, rebuild the candidate pool array.
  */
 int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_config_t *cfg) {
     if (!strategy || !strategy->private_data || !cfg) return NUMA_STRATEGY_EINVAL;
@@ -248,6 +263,10 @@ int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_co
     int rebuild_pool = (cfg->hot_candidates_size != data->config.hot_candidates_size);
 
     if (rebuild_pool) {
+        /* Free the sds key names still held by the old pool before rebuilding to avoid leaks. */
+        for (uint32_t i = 0; i < data->config.hot_candidates_size; i++) {
+            if (data->hot_candidates[i].key) sdsfree(data->hot_candidates[i].key);
+        }
         zfree(data->hot_candidates);
         data->hot_candidates = zcalloc(cfg->hot_candidates_size * sizeof(hot_candidate_t));
         if (!data->hot_candidates) {
@@ -259,7 +278,7 @@ int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_co
         data->candidates_count = 0;
     }
 
-    /* 重置扫描游标，避免使用旧配置的步进次数 */
+    /* Reset the scan cursor so the old config's step count is not reused. */
     if (data->scan_iter) {
         dictReleaseIterator(data->scan_iter);
         data->scan_iter = NULL;
@@ -274,27 +293,30 @@ int composite_lru_apply_config(numa_strategy_t *strategy, const composite_lru_co
     return NUMA_STRATEGY_OK;
 }
 
-/* ========== 资源监控 ========== */
+/* ========== Resource monitoring ========== */
 
-/* 检查目标节点的资源状态 */
+/* Check the resource state of the target node. */
 static int check_resource_status(composite_lru_data_t *data, int node_id) {
-    /* 1. 内存过载检查 */
+    /* 1. Memory overload check. */
     double pressure = numaGetNodePressure(node_id);
     double bw_usage = (double)numa_config_get_cached_bw(node_id) / 100.0;
     if (pressure >= data->config.overload_threshold) {
         data->migrations_overloaded++;
         if (data->config.debug_logging_enabled) {
             _serverLog(LL_NOTICE,
-                "[Composite LRU][debug] resource target=%d pressure=%.2f bw=%.2f combined=%.2f decision=AVAILABLE_OVERLOADED_THROTTLED",
+                "[Composite LRU][debug] resource target=%d pressure=%.2f bw=%.2f combined=%.2f decision=OVERLOADED_THROTTLED",
                 node_id, pressure, bw_usage, pressure * 0.6 + bw_usage * 0.4);
         }
         _serverLog(LL_DEBUG,
             "[Composite LRU] Node %d resource check: AVAILABLE_OVERLOADED_THROTTLED (pressure=%.2f >= %.2f)",
             node_id, pressure, data->config.overload_threshold);
-        return RESOURCE_AVAILABLE;
+        /* Target node memory overload: block migrations. Previously this
+         * wrongly returned AVAILABLE, disabling overload protection so that
+         * fuller nodes attracted even more migrations. */
+        return RESOURCE_OVERLOADED;
     }
 
-    /* 2. 带宽饱和检查（读取全局缓存，serverCron 每秒更新） */
+    /* 2. Bandwidth saturation check (reads the global cache, updated by serverCron every second). */
     if (bw_usage >= data->config.bandwidth_threshold) {
         if (data->config.debug_logging_enabled) {
             _serverLog(LL_NOTICE,
@@ -307,7 +329,7 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
         return RESOURCE_BANDWIDTH_SATURATED;
     }
 
-    /* 3. 综合迁移压力只作为观测指标，不阻断热点迁移 */
+    /* 3. Combined migration pressure is observational only, it does not block hot migrations. */
     double combined = pressure * 0.6 + bw_usage * 0.4;
     if (combined >= data->config.pressure_threshold) {
         if (data->config.debug_logging_enabled) {
@@ -327,22 +349,24 @@ static int check_resource_status(composite_lru_data_t *data, int node_id) {
     return RESOURCE_AVAILABLE;
 }
 
-/* ========== 热度管理 ========== */
+/* ========== Hotness management ========== */
 
 /*
- * composite_lru_record_access - 访问路径热度更新
+ * composite_lru_record_access - hotness update on the access path
  *
- * 设计原则：只更新热度，不入队。
- * 若本次访问使热度恰好越过阈值，且内存在远程节点，则写入候选池（快速通道）。
+ * Design principle: only update hotness, never enqueue.
+ * If this access makes hotness cross the threshold and the memory lives on a
+ * remote node, the key is written to the candidate pool (fast channel).
  *
- * val:      robj 指针，用于 PREFIX 热度追踪（robj 生命周期稳定）
- * data_ptr: 实际数据指针（如 RAW SDS 体），用于检测数据所在 NUMA 节点
- *           为 NULL 时退化为从 val 的 PREFIX 读取节点信息
+ * val:      robj pointer, used for PREFIX hotness tracking (robj lifetime is stable)
+ * data_ptr: actual data pointer (e.g. the raw SDS body), used to detect the NUMA
+ *           node where the data lives; when NULL, falls back to reading node info
+ *           from the val PREFIX
  */
 void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val, void *data_ptr, uint16_t current_time) {
     if (!strategy || !strategy->private_data || !key) return;
 
-    /* 单节点快速短路：无 NUMA 远端访问可能，PREFIX 热度追踪无意义 */
+    /* Single-node fast path: no remote NUMA access is possible, PREFIX hotness tracking is pointless. */
     if (numa_pool_num_nodes() <= 1) return;
 
     composite_lru_data_t *data = strategy->private_data;
@@ -350,11 +374,11 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
     int current_node = get_current_numa_node();
 
     if (val) {
-        /* ---- PREFIX 路径（主路径）---- */
+        /* ---- PREFIX path (main path) ---- */
         uint8_t hotness = numa_get_hotness(val);
         int mem_node = data_ptr ? numa_get_node_id(data_ptr) : numa_get_node_id(val);
 
-        /* 阶梯式惰性衰减：一次性结算上次访问以来的衰减债 */
+        /* Staircase lazy decay: settle the decay debt accumulated since the last access in one go. */
         uint16_t last_access = numa_get_last_access(val);
         uint16_t elapsed = calculate_time_delta(current_time, last_access);
         uint8_t decay = compute_lazy_decay_steps(elapsed);
@@ -367,18 +391,18 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             }
         }
 
-        /* 记录衰减前的热度，用于判断是否刚越过阈值 */
+        /* Record the hotness before decay to detect threshold crossings. */
         uint8_t hotness_before = hotness;
 
-        /* 任何访问都递增热度（本地/远程均可） */
+        /* Any access increases hotness (local or remote). */
         if (hotness < COMPOSITE_LRU_HOTNESS_MAX) {
             hotness++;
             numa_set_hotness(val, hotness);
         }
 
-        /* 更新 PREFIX 访问统计。
-         * 优化：本地访问且热度已达 MAX 时，跳过 access_count 累加，
-         * 仅更新 last_access 供衰减结算使用。 */
+        /* Update the PREFIX access statistics.
+         * Optimization: on local access with hotness already at MAX, skip the
+         * access_count increment and only update last_access for decay settlement. */
         uint8_t is_local = (mem_node == current_node);
         if (data->config.locality_stats_enabled) {
             if (is_local) {
@@ -399,12 +423,13 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
         data->heat_updates++;
 
         /*
-         * 快速通道写入条件：
-         *   1. 内存在远程节点（mem_node != current_node）
-         *   2. 本次访问恰好越过阈值（before < threshold <= after）
+         * Fast-channel write conditions:
+         *   1. Memory lives on a remote node (mem_node != current_node)
+         *   2. This access exactly crosses the threshold (before < threshold <= after)
          *
-         * 同时写入 key_heat_map 供扫描通道兜底重试（仅在越过阈值时，
-         * 不在每次访问时同步，避免热路径字典查找开销）。
+         * Also write to key_heat_map for fallback retry by the scan channel
+         * (only on threshold crossing, not on every access, to avoid dict
+         * lookup overhead on the hot path).
          */
         uint8_t thr = data->config.migrate_hotness_threshold;
         if (data->config.debug_logging_enabled) {
@@ -433,7 +458,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
                 "[Composite LRU] Candidate written: val=%p mem_node=%d cpu_node=%d hotness=%d",
                 val, mem_node, current_node, hotness);
 
-            /* 同步写入 key_heat_map：扫描通道兜底（快速通道候选被丢弃时可重试） */
+            /* Synchronously write to key_heat_map: scan-channel fallback (retry when the fast-channel candidate was dropped). */
             composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
             if (!info) {
                 info = zmalloc(sizeof(*info));
@@ -444,7 +469,9 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
                     info->access_count      = 1;
                     info->current_node      = mem_node;
                     info->preferred_node    = current_node;
-                    dictAdd(data->key_heat_map, sdsdup((sds)key), info);
+                    /* Key-name copying is handled by keyDup, so manual sdsdup
+                     * does not diverge from the dict hash/compare/free semantics. */
+                    dictAdd(data->key_heat_map, key, info);
                 }
             } else {
                 info->hotness        = hotness;
@@ -453,7 +480,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             }
         }
     } else {
-        /* ---- 字典回退路径（val 为 NULL 时） ---- */
+        /* ---- Dictionary fallback path (when val is NULL) ---- */
         composite_lru_heat_info_t *info = dictFetchValue(data->key_heat_map, key);
 
         if (!info) {
@@ -475,7 +502,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
         info->last_access = current_time;
         data->heat_updates++;
 
-        /* 惰性衰减 */
+        /* Lazy decay. */
         uint16_t elapsed = calculate_time_delta(current_time, old_last);
         uint8_t decay = compute_lazy_decay_steps(elapsed);
         if (decay > 0) {
@@ -490,7 +517,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             info->hotness++;
         info->stability_counter = 0;
 
-        /* 字典路径候选池写入（热度刚越过阈值且是远程访问） */
+        /* Dictionary-path candidate pool write (hotness just crossed the threshold and the access is remote). */
         uint8_t thr = data->config.migrate_hotness_threshold;
         if (info->current_node != current_node &&
             hotness_before < thr && info->hotness >= thr) {
@@ -498,7 +525,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
             uint32_t idx = data->candidates_head % data->config.hot_candidates_size;
             if (data->hot_candidates[idx].key) sdsfree(data->hot_candidates[idx].key);
             data->hot_candidates[idx].key             = sdsdup((sds)key);
-            data->hot_candidates[idx].val             = NULL;  /* 字典路径无 val 指针 */
+            data->hot_candidates[idx].val             = NULL;  /* No val pointer on the dictionary path. */
             data->hot_candidates[idx].target_node     = current_node;
             data->hot_candidates[idx].hotness_snapshot = info->hotness;
             data->candidates_head = (idx + 1) % data->config.hot_candidates_size;
@@ -512,7 +539,7 @@ void composite_lru_record_access(numa_strategy_t *strategy, void *key, void *val
     }
 }
 
-/* composite_lru_decay_heat 保留：供外部显式调用（字典路径兜底衰减）*/
+/* composite_lru_decay_heat is kept for explicit external calls (dictionary-path fallback decay). */
 void composite_lru_decay_heat(composite_lru_data_t *data) {
     if (!data || !data->key_heat_map) return;
 
@@ -540,17 +567,19 @@ void composite_lru_decay_heat(composite_lru_data_t *data) {
     dictReleaseIterator(di);
 }
 
-/* ========== 渐进扫描（兜底通道）========== */
+/* ========== Progressive scan (fallback channel) ========== */
 
 /*
- * composite_lru_scan_once - 推进一批渐进扫描
+ * composite_lru_scan_once - advance one batch of the progressive scan
  *
- * 每次从 scan_iter 当前位置扫描最多 batch_size 个 key_heat_map 条目。
- * 对热度达到阈值且在远程节点的 key 直接调用 numa_migrate_single_key。
- * 扫描到末尾后将 scan_iter 重置为 NULL，下一次调用时从头开始。
+ * Scans up to batch_size key_heat_map entries from the current scan_iter
+ * position. Keys whose hotness reached the threshold and live on a remote
+ * node are migrated directly via numa_migrate_single_key. When the scan
+ * reaches the end, scan_iter is reset to NULL so the next call restarts
+ * from the beginning.
  *
- * @scanned_out : 本次扫描的 key 数（可为 NULL）
- * @migrated_out: 本次触发迁移的 key 数（可为 NULL）
+ * @scanned_out : number of keys scanned this round (may be NULL)
+ * @migrated_out: number of migrations triggered this round (may be NULL)
  */
 int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
                             uint64_t *scanned_out, uint64_t *migrated_out) {
@@ -563,7 +592,7 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
         return NUMA_STRATEGY_OK;
     }
 
-    /* 如果游标为 NULL，从头开始新一轮扫描 */
+    /* If the cursor is NULL, start a new scan round from the beginning. */
     if (!data->scan_iter) {
         data->scan_iter = dictGetSafeIterator(data->key_heat_map);
         if (!data->scan_iter) return NUMA_STRATEGY_ERR;
@@ -581,7 +610,7 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
         budget_used++;
         data->scan_keys_checked++;
 
-        /* 执行时重读热度（不依赖快照） */
+        /* Re-read hotness at execution time (never rely on snapshots). */
         if (info->hotness >= thr &&
             info->preferred_node >= 0 &&
             info->current_node != info->preferred_node) {
@@ -629,7 +658,7 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
         }
     }
 
-    /* 若迭代器耗尽，释放并置 NULL，下次从头开始 */
+    /* If the iterator is exhausted, release it, set NULL, and restart next time. */
     if (de == NULL) {
         dictReleaseIterator(data->scan_iter);
         data->scan_iter = NULL;
@@ -640,19 +669,19 @@ int composite_lru_scan_once(numa_strategy_t *strategy, uint32_t batch_size,
     return NUMA_STRATEGY_OK;
 }
 
-/* ========== 策略虚函数表实现 ========== */
+/* ========== Strategy vtable implementation ========== */
 
-/* 策略初始化 */
+/* Strategy initialization. */
 int composite_lru_init(numa_strategy_t *strategy) {
     composite_lru_data_t *data = zmalloc(sizeof(*data));
     if (!data) return NUMA_STRATEGY_ERR;
 
     memset(data, 0, sizeof(*data));
 
-    /* 加载默认配置 */
+    /* Load the default configuration. */
     composite_lru_config_defaults(&data->config);
 
-    /* 创建热点候选池（环形缓冲区）*/
+    /* Create the hot candidate pool (ring buffer). */
     data->hot_candidates = zcalloc(data->config.hot_candidates_size * sizeof(hot_candidate_t));
     if (!data->hot_candidates) {
         zfree(data);
@@ -662,7 +691,7 @@ int composite_lru_init(numa_strategy_t *strategy) {
     data->candidates_count = 0;
     data->scan_iter        = NULL;
 
-    /* 创建字典回退路径热度图 */
+    /* Create the dictionary fallback heat map. */
     data->key_heat_map = dictCreate(&heat_map_dict_type, NULL);
     if (!data->key_heat_map) {
         zfree(data->hot_candidates);
@@ -684,12 +713,14 @@ int composite_lru_init(numa_strategy_t *strategy) {
 }
 
 /*
- * composite_lru_execute_step - 小步执行 Composite LRU 迁移策略
+ * composite_lru_execute_step - execute the Composite LRU migration strategy in small steps
  *
- * 流程：
- *   1. 若 auto_migrate_enabled == 0，直接返回
- *   2. 快速通道：按预算处理候选池，重读 PREFIX 热度，仍满足条件则迁移
- *   3. 兜底通道：在剩余预算内推进 key_heat_map 渐进扫描
+ * Flow:
+ *   1. If auto_migrate_enabled == 0, return immediately
+ *   2. Fast channel: process the candidate pool within budget, re-read PREFIX
+ *      hotness, migrate only if the conditions still hold
+ *   3. Fallback channel: advance the key_heat_map progressive scan within the
+ *      remaining budget
  */
 int composite_lru_execute_step(numa_strategy_t *strategy, uint64_t deadline_us, uint32_t budget) {
     if (!strategy || !strategy->private_data) return NUMA_STRATEGY_STEP_ERROR;
@@ -878,7 +909,7 @@ int composite_lru_execute(numa_strategy_t *strategy) {
     return ret < 0 ? NUMA_STRATEGY_ERR : NUMA_STRATEGY_OK;
 }
 
-/* 策略清理 */
+/* Strategy cleanup. */
 void composite_lru_cleanup(numa_strategy_t *strategy) {
     if (!strategy || !strategy->private_data) return;
     composite_lru_data_t *data = strategy->private_data;
@@ -896,6 +927,10 @@ void composite_lru_cleanup(numa_strategy_t *strategy) {
         data->scan_iter = NULL;
     }
     if (data->hot_candidates) {
+        /* Free the sds key names still remaining in the ring buffer. */
+        for (uint32_t i = 0; i < data->config.hot_candidates_size; i++) {
+            if (data->hot_candidates[i].key) sdsfree(data->hot_candidates[i].key);
+        }
         zfree(data->hot_candidates);
         data->hot_candidates = NULL;
     }
@@ -908,19 +943,19 @@ void composite_lru_cleanup(numa_strategy_t *strategy) {
     strategy->private_data = NULL;
 }
 
-/* 获取策略名称 */
+/* Get the strategy name. */
 static const char* composite_lru_get_name(numa_strategy_t *strategy) {
     (void)strategy;
     return "composite-lru";
 }
 
-/* 获取策略描述 */
+/* Get the strategy description. */
 static const char* composite_lru_get_description(numa_strategy_t *strategy) {
     (void)strategy;
-    return "插槽1默认策略：稳定性优先的复合LRU热度管理";
+    return "Slot 1 default policy: stability-first composite LRU hotness management";
 }
 
-/* 设置配置参数（兼容旧接口，内部转发到 config 结构体）*/
+/* Set configuration parameters (compatible with the old interface, forwards to the config struct). */
 int composite_lru_set_config(numa_strategy_t *strategy,
                                     const char *key, const char *value) {
     if (!strategy || !strategy->private_data || !key || !value)
@@ -946,7 +981,7 @@ int composite_lru_set_config(numa_strategy_t *strategy,
     } else if (strcmp(key, "hot_candidates_size") == 0) {
         uint32_t sz = (uint32_t)atoi(value);
         if (sz > 0 && sz != data->config.hot_candidates_size) {
-            /* 重建候选池 */
+            /* Rebuild the candidate pool. */
             composite_lru_config_t newcfg = data->config;
             newcfg.hot_candidates_size = sz;
             composite_lru_apply_config(strategy, &newcfg);
@@ -973,7 +1008,7 @@ int composite_lru_set_config(numa_strategy_t *strategy,
     return NUMA_STRATEGY_OK;
 }
 
-/* 获取配置参数 */
+/* Get configuration parameters. */
 int composite_lru_get_config(numa_strategy_t *strategy,
                                     const char *key, char *buf, size_t buf_len) {
     if (!strategy || !strategy->private_data || !key || !buf || buf_len == 0)
@@ -1026,7 +1061,7 @@ int composite_lru_get_config(numa_strategy_t *strategy,
     return NUMA_STRATEGY_OK;
 }
 
-/* 策略虚函数表 */
+/* Strategy vtable. */
 static const numa_strategy_vtable_t composite_lru_vtable = {
     .init = composite_lru_init,
     .execute = composite_lru_execute,
@@ -1038,21 +1073,21 @@ static const numa_strategy_vtable_t composite_lru_vtable = {
     .get_config = composite_lru_get_config
 };
 
-/* ========== 工厂函数 ========== */
+/* ========== Factory functions ========== */
 
-/* 创建策略实例 */
+/* Create a strategy instance. */
 numa_strategy_t* composite_lru_create(void) {
     numa_strategy_t *strategy = zmalloc(sizeof(*strategy));
     if (!strategy) return NULL;
     
     memset(strategy, 0, sizeof(*strategy));
-    strategy->slot_id = 1;  /* 默认使用插槽1 */
+    strategy->slot_id = 1;  /* Slot 1 by default. */
     strategy->name = "composite-lru";
     strategy->description = "Stability-first composite LRU strategy (slot 1 default)";
     strategy->type = STRATEGY_TYPE_PERIODIC;
     strategy->priority = STRATEGY_PRIORITY_HIGH;
     strategy->enabled = 1;
-    strategy->execute_interval_us = 1000000;  /* 1秒 */
+    strategy->execute_interval_us = 1000000;  /* 1 second. */
     strategy->step_budget = 512;
     strategy->max_runtime_us_per_step = 500;
     strategy->vtable = &composite_lru_vtable;
@@ -1060,7 +1095,7 @@ numa_strategy_t* composite_lru_create(void) {
     return strategy;
 }
 
-/* 销毁策略实例 */
+/* Destroy a strategy instance. */
 void composite_lru_destroy(numa_strategy_t *strategy) {
     if (!strategy) return;
     
@@ -1071,25 +1106,25 @@ void composite_lru_destroy(numa_strategy_t *strategy) {
     zfree(strategy);
 }
 
-/* 策略工厂 */
+/* Strategy factory. */
 static numa_strategy_factory_t composite_lru_factory = {
     .name = "composite-lru",
     .description = "Stability-first composite LRU hotness management (slot 1 default)",
     .type = STRATEGY_TYPE_PERIODIC,
     .default_priority = STRATEGY_PRIORITY_HIGH,
-    .default_interval_us = 1000000,  /* 1秒 */
+    .default_interval_us = 1000000,  /* 1 second. */
     .create = composite_lru_create,
     .destroy = composite_lru_destroy
 };
 
-/* ========== 公共注册接口 ========== */
+/* ========== Public registration interface ========== */
 
-/* 注册策略工厂 */
+/* Register the strategy factory. */
 int numa_composite_lru_register(void) {
     return numa_strategy_register_factory(&composite_lru_factory);
 }
 
-/* ========== 统计信息查询 ========== */
+/* ========== Statistics queries ========== */
 
 void composite_lru_get_stats(numa_strategy_t *strategy, 
                              uint64_t *heat_updates,

@@ -1,4 +1,4 @@
-/* zmalloc - 带内存用量统计的malloc封装
+/* zmalloc - malloc wrapper with memory usage statistics.
  *
  * Copyright (c) 2009-2010, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
@@ -36,9 +36,10 @@
 #include <limits.h>
 #include <sched.h>
 
-/* 提供对原始libc free()的访问。用于释放backtrace_symbols()等返回的结果。
- * 必须在包含zmalloc.h之前定义此函数，因为zmalloc.h可能会在使用jemalloc等
- * 非标准分配器时覆盖free实现。 */
+/* Provide access to the raw libc free(). Used to release results returned by
+ * functions such as backtrace_symbols(). This function must be defined before
+ * including zmalloc.h, since zmalloc.h may override free when using non-standard
+ * allocators such as jemalloc. */
 void zlibc_free(void *ptr)
 {
     free(ptr);
@@ -56,18 +57,18 @@ void zlibc_free(void *ptr)
 #include <unistd.h>
 #include "numa_pool.h"
 #include "numa_configurable_strategy.h"
-/* numaGetNodePressure() 声明：弱符号回退供 redis-benchmark/cli 使用 */
+/* numaGetNodePressure() declaration: weak-symbol fallback for redis-benchmark/cli. */
 __attribute__((weak)) double numaGetNodePressure(int node_id) {
     (void)node_id;
     return 0.0;
 }
-/* numa_config_get_best_node 弱符号回退：未链接策略模块时回退到 node 0 */
+/* numa_config_get_best_node weak-symbol fallback: default to node 0 when the policy module is not linked. */
 __attribute__((weak)) int numa_config_get_best_node(size_t size) {
     (void)size;
     return 0;
 }
 
-/* NUMA全局上下文 - 保留用于兼容性和未来扩展 */
+/* NUMA global context - kept for compatibility and future extensions. */
 static struct {
     int numa_available;
     int num_nodes;
@@ -76,25 +77,25 @@ static struct {
     int *node_distance_order;
 } numa_ctx = {0};
 
-/* 线程局部存储：当前线程绑定的NUMA节点 */
+/* Thread-local storage: the NUMA node the current thread is bound to. */
 static __thread int tls_current_node = -1;
 
 /* Forward declarations */
 static void init_class_lookup(void);
 
-/* 初始化NUMA支持：初始化Slab分配器并按距离排序节点 */
+/* Initialize NUMA support: initialize the slab allocator and sort nodes by distance. */
 void numa_init(void)
 {
-    /* 初始化 Slab 分配器（统一覆盖 8B-64KB） */
+    /* Initialize the slab allocator (covering 8B-64KB). */
     if (numa_slab_init() != 0) {
         numa_ctx.numa_available = 0;
         return;
     }
 
-    /* 初始化 O(1) size class 查找表和 tcache 基础设施 */
+    /* Initialize the O(1) size class lookup table and tcache infrastructure. */
     init_class_lookup();
 
-    /* 检查 NUMA 可用性 */
+    /* Check NUMA availability. */
     if (numa_available() < 0) {
         numa_ctx.numa_available = 0;
         return;
@@ -103,7 +104,7 @@ void numa_init(void)
     numa_ctx.numa_available = 1;
     numa_ctx.num_nodes = numa_max_node() + 1;
 
-    /* 获取当前节点 */
+    /* Get the current node. */
     int cpu = sched_getcpu();
     if (cpu >= 0) {
         numa_ctx.current_node = numa_node_of_cpu(cpu);
@@ -111,10 +112,10 @@ void numa_init(void)
         numa_ctx.current_node = 0;
     }
 
-    /* 改为交错分配策略，实现跨节点负载均衡 */
+    /* Switch to an interleaved allocation strategy for cross-node load balancing. */
     numa_ctx.allocation_strategy = NUMA_STRATEGY_INTERLEAVE;
 
-    /* 初始化节点距离顺序 */
+    /* Initialize the node distance ordering. */
     numa_ctx.node_distance_order = malloc(numa_ctx.num_nodes * sizeof(int));
     if (!numa_ctx.node_distance_order) {
         numa_ctx.numa_available = 0;
@@ -125,7 +126,7 @@ void numa_init(void)
         numa_ctx.node_distance_order[i] = i;
     }
 
-    /* 按距离排序 */
+    /* Sort by distance. */
     for (int i = 0; i < numa_ctx.num_nodes - 1; i++) {
         for (int j = 0; j < numa_ctx.num_nodes - i - 1; j++) {
             int dist1 = numa_distance(numa_ctx.current_node, numa_ctx.node_distance_order[j]);
@@ -139,7 +140,7 @@ void numa_init(void)
     }
 }
 
-/* 清理NUMA资源：释放Slab分配器和节点距离排序数组 */
+/* Clean up NUMA resources: free the slab allocator and the node distance ordering array. */
 void numa_cleanup(void)
 {
     numa_slab_cleanup();
@@ -150,7 +151,7 @@ void numa_cleanup(void)
     }
 }
 
-/* 设置NUMA分配策略（LOCAL_FIRST=本地优先 / INTERLEAVE=交错分配） */
+/* Set the NUMA allocation policy (LOCAL_FIRST / INTERLEAVE). */
 int numa_set_strategy(int strategy)
 {
     if (strategy != NUMA_STRATEGY_LOCAL_FIRST && strategy != NUMA_STRATEGY_INTERLEAVE)
@@ -161,7 +162,7 @@ int numa_set_strategy(int strategy)
     return 0;
 }
 
-/* 获取当前NUMA分配策略 */
+/* Get the current NUMA allocation policy. */
 int numa_get_strategy(void)
 {
     return numa_ctx.allocation_strategy;
@@ -172,24 +173,25 @@ int numa_get_strategy(void)
 #define update_zmalloc_stat_alloc(__n) atomicIncr(used_memory, (__n))
 #define update_zmalloc_stat_free(__n) atomicDecr(used_memory, (__n))
 
-/* NUMA分配器必须使用PREFIX_SIZE策略（即使定义了HAVE_MALLOC_SIZE），
- * 因为libNUMA无法查询已分配内存的大小。
- * 同时利用前缀标志字段区分池分配和直接分配。 */
+/* The NUMA allocator must use the PREFIX_SIZE strategy (even when
+ * HAVE_MALLOC_SIZE is defined), because libnuma cannot query the size of an
+ * already allocated region. The prefix flag fields also distinguish pool
+ * allocations from direct ones. */
 #ifdef HAVE_NUMA
-/* NUMA分配器需要PREFIX_SIZE追踪大小并记录分配来源标志 */
+/* The NUMA allocator needs PREFIX_SIZE to track sizes and record allocation source flags. */
 typedef struct {
-    size_t size;           /* 8字节 - 实际分配内存大小 */
-    char from_pool;        /* 1字节 - 分配来源：0=直接分配, 1=Slab（历史字段名保留兼容） */
-    char node_id;          /* 1字节 - 分配所在NUMA节点ID */
+    size_t size;           /* 8 bytes - actual allocated memory size. */
+    char from_pool;        /* 1 byte - source: 0=direct allocation, 1=slab (name kept for compatibility). */
+    char node_id;          /* 1 byte - NUMA node ID where the allocation lives. */
     /* Heat tracking fields (reused from padding) */
-    uint8_t hotness;       /* 1字节 - 热度级别（0-7），0=冷，7=热 */
-    uint8_t access_count;  /* 1字节 - 访问计数（循环计数器） */
-    uint16_t last_access;  /* 2字节 - LRU时钟低16位（上次访问时间） */
-    char migrated;         /* 1字节 - 迁移亲和标记：1=已迁移，UPDATE时保持节点亲和 */
-    char reserved[1];      /* 1字节 - 保留字段 */
+    uint8_t hotness;       /* 1 byte - hotness level (0-7), 0=cold, 7=hot. */
+    uint8_t access_count;  /* 1 byte - access counter (circular counter). */
+    uint16_t last_access;  /* 2 bytes - low 16 bits of the LRU clock (last access time). */
+    char migrated;         /* 1 byte - migration affinity flag: 1=migrated, keep node affinity on UPDATE. */
+    char reserved[1];      /* 1 byte - reserved. */
 } numa_alloc_prefix_t;
 
-/* 热度追踪常量 */
+/* Hotness tracking constants. */
 #define NUMA_HOTNESS_MAX     7
 #define NUMA_HOTNESS_MIN     0
 #define NUMA_HOTNESS_DEFAULT 1
@@ -202,13 +204,13 @@ static redisAtomic size_t used_memory = 0;
 static redisAtomic size_t used_memory_node[ZMALLOC_MAX_NUMA_NODES];
 #endif
 
-/* 分配路径计数器：记录各路径的实时字节数和累计分配次数 */
+/* Allocation path counters: current bytes and cumulative allocation counts per path. */
 static redisAtomic size_t numa_alloc_slab_bytes   = 0;
 static redisAtomic size_t numa_alloc_direct_bytes = 0;
 static redisAtomic size_t numa_alloc_slab_count   = 0;
 static redisAtomic size_t numa_alloc_direct_count = 0;
 
-/* tcache 命中率计数器 */
+/* tcache hit rate counters. */
 static redisAtomic size_t numa_tcache_alloc_hit  = 0;
 static redisAtomic size_t numa_tcache_alloc_miss = 0;
 static redisAtomic size_t numa_tcache_free_hit   = 0;
@@ -342,10 +344,9 @@ static void tcache_drain_bin(int cls) {
         numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
         size_t total_size = prefix->size + PREFIX_SIZE;
         int node_id = (int)prefix->node_id;
-        /* tcache drain: 真正释放，此时递减统计 */
-        update_zmalloc_stat_free(total_size);
-        if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
-            atomicDecr(used_memory_node[node_id], total_size);
+        /* tcache drain: the logical used-memory counters were already
+         * released when the object entered the tcache.  Only return the
+         * block to the slab and update pool instrumentation here. */
         void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
         numa_slab_free(raw_ptr, total_size, node_id);
         atomicDecr(numa_alloc_slab_bytes, total_size);
@@ -400,32 +401,36 @@ static void zmalloc_default_oom(size_t size)
 static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
 #ifdef HAVE_NUMA
-/* 辅助函数：初始化分配内存的PREFIX元数据（大小、来源、节点ID、热度） */
+/* Helper: initialize the PREFIX metadata of an allocation (size, source, node ID, hotness). */
 static inline void numa_init_prefix(void *ptr, size_t size, int from_slab, int node_id)
 {
     numa_alloc_prefix_t *prefix = (numa_alloc_prefix_t *)ptr;
+    /* Zero the whole PREFIX: when a memory pool entry is reused the prefix may
+     * hold stale data, and leaving it uninitialized would make the migrated
+     * flag and padding read garbage, causing wrong migration affinity. */
+    memset(prefix, 0, sizeof(numa_alloc_prefix_t));
     prefix->size = size;
     prefix->from_pool = from_slab;  /* 1=Slab, 0=Direct */
     prefix->node_id = (char)node_id;
-    /* 初始化热度追踪字段 */
-    prefix->hotness = NUMA_HOTNESS_DEFAULT;  /* 设置默认热度 */
+    /* Initialize the hotness tracking fields. */
+    prefix->hotness = NUMA_HOTNESS_DEFAULT;  /* Set the default hotness. */
     prefix->access_count = 0;
     prefix->last_access = 0;
 }
 
-/* 辅助函数：从用户指针反推PREFIX指针 */
+/* Helper: recover the PREFIX pointer from a user pointer. */
 static inline numa_alloc_prefix_t *numa_get_prefix(void *user_ptr)
 {
     return (numa_alloc_prefix_t *)((char *)user_ptr - PREFIX_SIZE);
 }
 
-/* 辅助函数：将raw指针（含PREFIX）转为用户可见指针 */
+/* Helper: turn a raw pointer (including PREFIX) into a user-visible pointer. */
 static inline void *numa_to_user_ptr(void *raw_ptr)
 {
     return (char *)raw_ptr + PREFIX_SIZE;
 }
 
-/* NUMA感知内存分配（含大小追踪）：Slab（8B-64KB）→ Direct（>64KB） */
+/* NUMA-aware memory allocation (with size tracking): slab (8B-64KB) then direct (>64KB). */
 static void *numa_alloc_with_size_onnode(size_t size, int target_node)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
@@ -447,7 +452,13 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
                 prefix->hotness = NUMA_HOTNESS_DEFAULT;
                 prefix->access_count = 0;
                 prefix->last_access = 0;
-                /* tcache hit: 统计已在 tcache put 时保留，不再递增 used_memory/used_memory_node */
+                /* tcache hit: the object becomes live again, so charge the
+                 * logical used-memory counters now.  They were released when
+                 * the object entered the tcache. */
+                size_t total_size = size + PREFIX_SIZE;
+                update_zmalloc_stat_alloc(total_size);
+                if (target_node >= 0 && target_node < ZMALLOC_MAX_NUMA_NODES)
+                    atomicIncr(used_memory_node[target_node], total_size);
                 atomicIncr(numa_tcache_alloc_hit, 1);
                 return user_ptr;
             }
@@ -460,13 +471,13 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
     void *raw_ptr = NULL;
     int used_slab = 0;
 
-    /* Slab 路径（8B-64KB）：统一走 Slab 分配器 */
+    /* Slab path (8B-64KB): always go through the slab allocator. */
     if (should_use_slab(size)) {
         raw_ptr = numa_slab_alloc(size, target_node, &alloc_size);
         if (raw_ptr) used_slab = 1;
     }
 
-    /* Direct 路径（>64KB 或 Slab 失败）：先查缓存，再 NUMA 分配 */
+    /* Direct path (>64KB or slab failure): check the cache first, then allocate via NUMA. */
     if (!raw_ptr) {
         if (total_size >= DIRECT_CACHE_MIN_SIZE && total_size <= DIRECT_CACHE_MAX_SIZE) {
             direct_cache_ensure_init();
@@ -481,7 +492,7 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
     if (!raw_ptr)
         return NULL;
 
-    /* 埋点：按路径更新计数器 */
+    /* Instrumentation: update the counters by path. */
     if (used_slab) {
         atomicIncr(numa_alloc_slab_bytes, total_size);
         atomicIncr(numa_alloc_slab_count, 1);
@@ -490,7 +501,7 @@ static void *numa_alloc_with_size_onnode(size_t size, int target_node)
         atomicIncr(numa_alloc_direct_count, 1);
     }
 
-    /* 记录是否来自 Slab（用于 free 路由） */
+    /* Record whether the allocation came from a slab (used for free routing). */
     int from_slab = (should_use_slab(size) && used_slab) ? 1 : 0;
 
     numa_init_prefix(raw_ptr, size, from_slab, target_node);
@@ -518,7 +529,7 @@ static void *numa_alloc_with_size(size_t size)
     return numa_alloc_with_size_onnode(size, numa_select_allocation_node(size));
 }
 
-/* NUMA感知内存释放（含大小追踪）：根据PREFIX路由到Slab或Direct */
+/* NUMA-aware memory free (with size tracking): route to slab or direct based on the PREFIX. */
 static void numa_free_with_size(void *user_ptr)
 {
     if (user_ptr == NULL)
@@ -539,25 +550,32 @@ static void numa_free_with_size(void *user_ptr)
             }
             bin->ptrs[bin->count++] = user_ptr;
             atomicIncr(numa_tcache_free_hit, 1);
-            /* tcache put: 不递减 used_memory/used_memory_node，统计保留到真正释放时 */
+            /* tcache put: the object is no longer live from Redis' point of
+             * view.  Release the logical used-memory counters immediately;
+             * otherwise maxmemory accounting sees phantom live bytes and the
+             * eviction loop ends in OOM even though plenty of blocks were
+             * recycled.  RSS accounting remains independent of this counter. */
+            update_zmalloc_stat_free(total_size);
+            if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
+                atomicDecr(used_memory_node[node_id], total_size);
             return;
         }
     }
 
-    /* 非 tcache 路径：立即递减统计 */
+    /* Non-tcache path: decrement the statistics immediately. */
     update_zmalloc_stat_free(total_size);
     if (node_id >= 0 && node_id < ZMALLOC_MAX_NUMA_NODES)
         atomicDecr(used_memory_node[node_id], total_size);
 
     void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
 
-    /* Slab 路径：归还到 Slab */
+    /* Slab path: return to the slab. */
     if (prefix->from_pool) {
         numa_slab_free(raw_ptr, total_size, node_id);
         atomicDecr(numa_alloc_slab_bytes, total_size);
         atomicDecr(numa_alloc_slab_count, 1);
     } else {
-        /* Direct 路径：尝试缓存而非立即释放 */
+        /* Direct path: try caching instead of freeing immediately. */
         if (total_size >= DIRECT_CACHE_MIN_SIZE &&
             total_size <= DIRECT_CACHE_MAX_SIZE) {
             direct_cache_ensure_init();
@@ -586,7 +604,7 @@ void numa_tcache_flush(void)
     tls_direct_cache.count = 0;
 }
 
-/* NUMA感知版zmalloc：分配失败时触发OOM处理器 */
+/* NUMA-aware zmalloc: trigger the OOM handler on allocation failure. */
 void *numa_zmalloc(size_t size)
 {
     void *ptr = numa_alloc_with_size(size);
@@ -595,7 +613,7 @@ void *numa_zmalloc(size_t size)
     return ptr;
 }
 
-/* NUMA感知版zcalloc：分配并清零 */
+/* NUMA-aware zcalloc: allocate and zero. */
 void *numa_zcalloc(size_t size)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
@@ -612,10 +630,10 @@ void *numa_zcalloc(size_t size)
     return ptr;
 }
 
-/* NUMA感知版zrealloc：重新分配内存并保留原有数据，失败返回NULL */
+/* NUMA-aware zrealloc: reallocate keeping the old data, return NULL on failure. */
 static void *numa_tryrealloc(void *ptr, size_t size)
 {
-    /* 处理边界情况 */
+    /* Handle edge cases. */
     if (ptr == NULL)
         return numa_zmalloc(size);
     if (size == 0)
@@ -676,13 +694,13 @@ void *numa_zrealloc(void *ptr, size_t size)
     return result;
 }
 
-/* NUMA感知版zfree */
+/* NUMA-aware zfree. */
 void numa_zfree(void *ptr)
 {
     numa_free_with_size(ptr);
 }
 
-/* 设置当前分配使用的NUMA节点 */
+/* Set the NUMA node used for the current allocations. */
 void numa_set_current_node(int node)
 {
     if (node >= 0 && node < numa_ctx.num_nodes) {
@@ -691,7 +709,7 @@ void numa_set_current_node(int node)
     }
 }
 
-/* 获取当前NUMA节点 */
+/* Get the current NUMA node. */
 int numa_get_current_node(void)
 {
     if (tls_current_node >= 0) {
@@ -708,13 +726,13 @@ void numa_alloc_pop_node(void) {
     tls_current_node = -1;
 }
 
-/* 在指定NUMA节点上分配内存（用于Key迁移，绕过Pool/Slab直接分配） */
+/* Allocate memory on a specific NUMA node (used for key migration, bypassing the pool/slab). */
 static void *numa_alloc_on_specific_node(size_t size, int node)
 {
     return numa_alloc_with_size_onnode(size, node);
 }
 
-/* 在指定NUMA节点上分配内存（对外接口） */
+/* Allocate memory on a specific NUMA node (public interface). */
 void *numa_zmalloc_onnode(size_t size, int node)
 {
     if (node < 0 || node >= numa_ctx.num_nodes)
@@ -726,7 +744,7 @@ void *numa_zmalloc_onnode(size_t size, int node)
     return ptr;
 }
 
-/* 在指定NUMA节点上重新分配内存 */
+/* Reallocate memory on a specific NUMA node. */
 void *numa_zrealloc_onnode(void *ptr, size_t size, int node)
 {
     if (ptr == NULL)
@@ -787,7 +805,7 @@ void *numa_zrealloc_onnode(void *ptr, size_t size, int node)
     return new_ptr;
 }
 
-/* 在指定NUMA节点上分配并清零内存 */
+/* Allocate and zero memory on a specific NUMA node. */
 void *numa_zcalloc_onnode(size_t size, int node)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
@@ -804,9 +822,9 @@ void *numa_zcalloc_onnode(size_t size, int node)
     return ptr;
 }
 
-/* ========== 强制本地节点 (Node 0 / DRAM) 分配 ========== */
+/* ========== Forced local node (Node 0 / DRAM) allocation ========== */
 
-/* 内部函数：与 numa_alloc_with_size() 共享 Slab→Direct 路径，target_node 固定为 0 */
+/* Internal function: shares the slab-to-direct path with numa_alloc_with_size(), target_node fixed to 0. */
 static void *numa_alloc_dram(size_t size)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
@@ -878,16 +896,16 @@ void *zcalloc_local(size_t size)
 void *ztrycalloc_local(size_t size)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
-    void *ptr = numa_alloc_local(size);
+    void *ptr = numa_alloc_dram(size);
     if (!ptr)
         return NULL;
     memset(ptr, 0, size);
     return ptr;
 }
 
-/* ========== NUMA热度追踪API ========== */
+/* ========== NUMA hotness tracking API ========== */
 
-/* 从用户指针读取热度级别 */
+/* Read the hotness level from a user pointer. */
 uint8_t numa_get_hotness(void *ptr)
 {
     if (!ptr) return NUMA_HOTNESS_MIN;
@@ -895,7 +913,7 @@ uint8_t numa_get_hotness(void *ptr)
     return prefix->hotness;
 }
 
-/* 设置用户指针对应内存的热度级别 */
+/* Set the hotness level of the memory pointed to by a user pointer. */
 void numa_set_hotness(void *ptr, uint8_t hotness)
 {
     if (!ptr) return;
@@ -904,7 +922,7 @@ void numa_set_hotness(void *ptr, uint8_t hotness)
     prefix->hotness = hotness;
 }
 
-/* 获取访问计数 */
+/* Get the access counter. */
 uint8_t numa_get_access_count(void *ptr)
 {
     if (!ptr) return 0;
@@ -912,7 +930,7 @@ uint8_t numa_get_access_count(void *ptr)
     return prefix->access_count;
 }
 
-/* 递增访问计数 */
+/* Increment the access counter. */
 void numa_increment_access_count(void *ptr)
 {
     if (!ptr) return;
@@ -920,7 +938,7 @@ void numa_increment_access_count(void *ptr)
     prefix->access_count++;
 }
 
-/* 获取上次访问时间（LRU时钟） */
+/* Get the last access time (LRU clock). */
 uint16_t numa_get_last_access(void *ptr)
 {
     if (!ptr) return 0;
@@ -928,7 +946,7 @@ uint16_t numa_get_last_access(void *ptr)
     return prefix->last_access;
 }
 
-/* 设置上次访问时间 */
+/* Set the last access time. */
 void numa_set_last_access(void *ptr, uint16_t lru_clock)
 {
     if (!ptr) return;
@@ -936,7 +954,7 @@ void numa_set_last_access(void *ptr, uint16_t lru_clock)
     prefix->last_access = lru_clock;
 }
 
-/* 获取分配时所在NUMA节点ID */
+/* Get the NUMA node ID where the allocation lives. */
 int numa_get_node_id(void *ptr)
 {
     if (!ptr) return -1;
@@ -944,7 +962,7 @@ int numa_get_node_id(void *ptr)
     return (int)prefix->node_id;
 }
 
-/* 设置分配内存的NUMA节点ID（用于迁移后更新标记） */
+/* Set the NUMA node ID of an allocation (used to update the flag after migration). */
 void numa_set_node_id(void *ptr, int node_id)
 {
     if (!ptr) return;
@@ -966,7 +984,7 @@ void numa_set_migrated(void *ptr, int migrated)
     prefix->migrated = (char)migrated;
 }
 
-/* 读取各分配路径的实时字节数和累计分配次数 */
+/* Read the current bytes and cumulative allocation counts per path. */
 void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes,
                           size_t *direct_bytes,
                           size_t *slab_count, size_t *pool_count,
@@ -976,7 +994,7 @@ void numa_get_alloc_stats(size_t *slab_bytes, size_t *pool_bytes,
     atomicGet(numa_alloc_direct_bytes, *direct_bytes);
     atomicGet(numa_alloc_slab_count,   *slab_count);
     atomicGet(numa_alloc_direct_count, *direct_count);
-    /* Pool 路径已移除，返回 0 */
+    /* The pool path was removed, return 0. */
     *pool_bytes = 0;
     *pool_count = 0;
 }
@@ -990,13 +1008,13 @@ void numa_get_direct_cache_stats(size_t *hit, size_t *miss, size_t *evict)
 
 #endif /* HAVE_NUMA */
 
-/* 尝试分配内存，失败返回NULL。若usable非空，写入实际可用大小。 */
+/* Try to allocate memory, return NULL on failure. If usable is not NULL, write the actual usable size. */
 void *ztrymalloc_usable(size_t size, size_t *usable)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
 
 #ifdef HAVE_NUMA
-    /* NUMA可用时使用NUMA分配器 */
+    /* Use the NUMA allocator when NUMA is available. */
     if (numa_ctx.numa_available)
     {
         void *ptr = numa_alloc_with_size(size);
@@ -1008,7 +1026,7 @@ void *ztrymalloc_usable(size_t size, size_t *usable)
     }
 #endif
 
-    /* 回退到标准分配器 */
+    /* Fall back to the standard allocator. */
     void *ptr = malloc(MALLOC_MIN_SIZE(size) + PREFIX_SIZE);
     if (!ptr)
         return NULL;
@@ -1028,7 +1046,7 @@ void *ztrymalloc_usable(size_t size, size_t *usable)
 #endif
 }
 
-/* 分配内存，失败时触发OOM处理器（不返回NULL） */
+/* Allocate memory, triggering the OOM handler on failure (never returns NULL). */
 void *zmalloc(size_t size)
 {
     void *ptr = ztrymalloc_usable(size, NULL);
@@ -1037,13 +1055,13 @@ void *zmalloc(size_t size)
     return ptr;
 }
 
-/* 尝试分配内存，失败返回NULL */
+/* Try to allocate memory, return NULL on failure. */
 void *ztrymalloc(size_t size)
 {
     return ztrymalloc_usable(size, NULL);
 }
 
-/* 分配内存，失败触发OOM处理器；若usable非空，写入实际可用大小 */
+/* Allocate memory, triggering the OOM handler on failure; if usable is not NULL, write the actual usable size. */
 void *zmalloc_usable(size_t size, size_t *usable)
 {
     void *ptr = ztrymalloc_usable(size, usable);
@@ -1052,8 +1070,8 @@ void *zmalloc_usable(size_t size, size_t *usable)
     return ptr;
 }
 
-/* 绕过线程缓存直接操作arena的分配/释放函数。
- * 目前仅jemalloc实现，用于在线碎片整理。 */
+/* Allocate/free functions that bypass the thread cache and operate directly on the arena.
+ * Currently implemented only for jemalloc, used for online defragmentation. */
 #ifdef HAVE_DEFRAG
 void *zmalloc_no_tcache(size_t size)
 {
@@ -1074,13 +1092,13 @@ void zfree_no_tcache(void *ptr)
 }
 #endif
 
-/* 尝试分配并清零内存，失败返回NULL；若usable非空写入实际可用大小 */
+/* Try to allocate and zero memory, return NULL on failure; if usable is not NULL, write the actual usable size. */
 void *ztrycalloc_usable(size_t size, size_t *usable)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
 
 #ifdef HAVE_NUMA
-    /* NUMA可用时使用NUMA分配器 */
+    /* Use the NUMA allocator when NUMA is available. */
     if (numa_ctx.numa_available)
     {
         void *ptr = numa_alloc_with_size(size);
@@ -1112,7 +1130,7 @@ void *ztrycalloc_usable(size_t size, size_t *usable)
 #endif
 }
 
-/* 分配并清零内存，失败触发OOM处理器 */
+/* Allocate and zero memory, triggering the OOM handler on failure. */
 void *zcalloc(size_t size)
 {
     void *ptr = ztrycalloc_usable(size, NULL);
@@ -1121,13 +1139,13 @@ void *zcalloc(size_t size)
     return ptr;
 }
 
-/* 尝试分配内存，失败返回NULL */
+/* Try to allocate memory, return NULL on failure. */
 void *ztrycalloc(size_t size)
 {
     return ztrycalloc_usable(size, NULL);
 }
 
-/* 分配内存，失败触发OOM处理器；若usable非空，写入实际可用大小 */
+/* Allocate memory, triggering the OOM handler on failure; if usable is not NULL, write the actual usable size. */
 void *zcalloc_usable(size_t size, size_t *usable)
 {
     void *ptr = ztrycalloc_usable(size, usable);
@@ -1136,7 +1154,7 @@ void *zcalloc_usable(size_t size, size_t *usable)
     return ptr;
 }
 
-/* 重新分配内存，失败触发OOM处理器 */
+/* Reallocate memory, triggering the OOM handler on failure. */
 void *zrealloc(void *ptr, size_t size)
 {
     ptr = ztryrealloc_usable(ptr, size, NULL);
@@ -1145,7 +1163,7 @@ void *zrealloc(void *ptr, size_t size)
     return ptr;
 }
 
-/* 重新分配内存，失败触发OOM处理器；若usable非空写入实际可用大小 */
+/* Reallocate memory, triggering the OOM handler on failure; if usable is not NULL, write the actual usable size. */
 void *zrealloc_usable(void *ptr, size_t size, size_t *usable)
 {
     ptr = ztryrealloc_usable(ptr, size, usable);
@@ -1154,13 +1172,13 @@ void *zrealloc_usable(void *ptr, size_t size, size_t *usable)
     return ptr;
 }
 
-/* 尝试重新分配内存，失败返回NULL */
+/* Try to reallocate memory, return NULL on failure. */
 void *ztryrealloc(void *ptr, size_t size)
 {
     return ztryrealloc_usable(ptr, size, NULL);
 }
 
-/* 尝试重新分配内存，失败返回NULL；若usable非空写入实际可用大小 */
+/* Try to reallocate memory, return NULL on failure; if usable is not NULL, write the actual usable size. */
 void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable)
 {
     if (ptr == NULL)
@@ -1174,7 +1192,7 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable)
     }
 
 #ifdef HAVE_NUMA
-    /* NUMA可用时使用NUMA realloc */
+    /* Use the NUMA realloc when NUMA is available. */
     if (numa_ctx.numa_available)
     {
         void *result = numa_tryrealloc(ptr, size);
@@ -1184,7 +1202,7 @@ void *ztryrealloc_usable(void *ptr, size_t size, size_t *usable)
     }
 #endif
 
-    /* 回退到标准realloc */
+    /* Fall back to the standard realloc. */
     ASSERT_NO_SIZE_OVERFLOW(size);
 
 #ifdef HAVE_MALLOC_SIZE
@@ -1228,7 +1246,7 @@ void zfree(void *ptr)
         return;
 
 #ifdef HAVE_NUMA
-    /* NUMA可用时使用NUMA free路径 */
+    /* Use the NUMA free path when NUMA is available. */
     if (numa_ctx.numa_available)
     {
         numa_zfree(ptr);
@@ -1247,7 +1265,7 @@ void zfree(void *ptr)
 #endif
 }
 
-/* 类似zfree，同时通过usable返回被释放内存的实际大小 */
+/* Like zfree, but also returns the actual size of the freed memory via usable. */
 void zfree_usable(void *ptr, size_t *usable)
 {
 #ifndef HAVE_MALLOC_SIZE
@@ -1257,6 +1275,17 @@ void zfree_usable(void *ptr, size_t *usable)
 
     if (ptr == NULL)
         return;
+#ifdef HAVE_NUMA
+    /* The NUMA allocator must use the NUMA free path: memory from slabs or
+     * numa_alloc_onnode cannot be released with libc free(), that is UB. */
+    if (numa_ctx.numa_available)
+    {
+        if (usable)
+            *usable = numa_get_prefix(ptr)->size;
+        numa_zfree(ptr);
+        return;
+    }
+#endif
 #ifdef HAVE_MALLOC_SIZE
     update_zmalloc_stat_free(*usable = zmalloc_size(ptr));
     free(ptr);
@@ -1299,10 +1328,11 @@ void zmalloc_set_oom_handler(void (*oom_handler)(size_t))
     zmalloc_oom_handler = oom_handler;
 }
 
-/* 以操作系统特定方式获取RSS（常驻内存大小）。
+/* Get the RSS (resident set size) in an OS-specific way.
  *
- * 警告：此函数设计上不追求速度，不应在Redis逐出/换出对象的热路径中调用。
- * 快速RSS估算请使用 RedisEstimateRSS()（速度更快但精度较低）。 */
+ * Warning: this function is not designed for speed and must not be called on
+ * the hot path of Redis eviction/swap-out. Use RedisEstimateRSS() for a quick
+ * RSS estimate (faster but less accurate). */
 
 #if defined(HAVE_PROC_STAT)
 #include <sys/types.h>
@@ -1523,10 +1553,11 @@ int jemalloc_purge()
 #include <libproc.h>
 #endif
 
-/* 从 /proc/self/smaps 读取指定字段的总字节数（原始为KB，自动转换为字节）。
- * 字段名必须带冒号后缀，如smaps中的格式。
- * 若pid为-1则读取当前进程，否则读取指定pid的信息。
- * 示例：zmalloc_get_smap_bytes_by_field("Rss:",-1) */
+/* Read the total bytes of a given field from /proc/self/smaps (raw values are
+ * in KB and converted to bytes automatically). The field name must include the
+ * colon suffix, as in the smaps format. If pid is -1 the current process is
+ * read, otherwise the given pid is used.
+ * Example: zmalloc_get_smap_bytes_by_field("Rss:",-1) */
 #if defined(HAVE_PROC_SMAPS)
 size_t zmalloc_get_smap_bytes_by_field(char *field, long pid)
 {
@@ -1602,23 +1633,24 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid)
 }
 #endif
 
-/* 获取所有标记为Private Dirty的页面总字节数。
+/* Get the total bytes of all pages marked as Private Dirty.
  *
- * 注意：根据平台和进程内存占用情况，此调用可能很慢，耗时超过1000ms！ */
+ * Note: depending on the platform and process memory usage, this call can be
+ * very slow, taking more than 1000ms! */
 size_t zmalloc_get_private_dirty(long pid)
 {
     return zmalloc_get_smap_bytes_by_field("Private_Dirty:", pid);
 }
 
-/* 获取物理内存（RAM）大小（字节）。
- * 跨平台实现，参考：
+/* Get the physical memory (RAM) size in bytes.
+ * Cross-platform implementation, see:
  * http://nadeausoftware.com/articles/2012/09/c_c_tip_how_get_physical_memory_size_system
  *
- * 版权说明：
- * 1) 以 CC Attribution 协议发布（http://creativecommons.org/licenses/by/3.0/deed.en_US）
- * 2) 原作者：David Robert Nadeau
- * 3) Redis版本由 Matt Stancliff 修改
- * 4) 本注释保留以遵守原始协议要求
+ * Copyright notes:
+ * 1) Released under the CC Attribution license (http://creativecommons.org/licenses/by/3.0/deed.en_US)
+ * 2) Original author: David Robert Nadeau
+ * 3) Redis version modified by Matt Stancliff
+ * 4) This comment is kept to comply with the original license requirements
  */
 size_t zmalloc_get_memory_size(void)
 {
@@ -1664,7 +1696,7 @@ size_t zmalloc_get_memory_size(void)
 #endif
 }
 
-/* NUMA分配器需要自行实现zmalloc_size（通过PREFIX读取大小） */
+/* The NUMA allocator implements zmalloc_size itself (reads the size from the PREFIX). */
 #ifdef HAVE_NUMA
 size_t zmalloc_size(void *ptr)
 {

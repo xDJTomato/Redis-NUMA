@@ -1,13 +1,14 @@
-/* evict_numa.c - NUMA降级迁移实现
+/* evict_numa.c - NUMA demotion migration implementation
  *
- * 本模块实现淘汰池与NUMA迁移策略的联动，在内存超限时
- * 优先将冷数据迁移到其他NUMA节点而非直接淘汰。
+ * This module ties the eviction pool to the NUMA migration policy: when memory
+ * is over the limit, cold data is migrated to another NUMA node instead of being evicted.
  *
- * 核心特性：
- * - 距离优先节点选择（优先选择更近的节点）
- * - 压力感知（避免迁移到高压节点）
- * - 带宽感知（避免迁移到带宽饱和节点）
- * - 加权评分决策（距离40% + 压力30% + 带宽30%）
+ * Core features:
+ * - Distance-first node selection (prefers closer nodes)
+ * - Pressure awareness (avoids migrating to high-pressure nodes)
+ * - Bandwidth awareness (avoids migrating to bandwidth-saturated nodes)
+ * - Weighted scoring decision (distance + pressure + bandwidth, weights
+ *   are configurable via the numa-demote-* settings)
  *
  * Copyright (c) 2024, Redis-CXL Project
  */
@@ -24,65 +25,26 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ========== 全局配置 ========== */
-
-static numa_demote_config_t g_demote_config = {
-    .enabled = 1,
-    .min_demote_size = NUMA_DEMOTE_DEFAULT_MIN_SIZE,
-    .max_migrate_count = NUMA_DEMOTE_DEFAULT_MAX_MIGRATE,
-    .node_pressure_threshold = NUMA_DEMOTE_DEFAULT_PRESSURE_THRES,
-    .distance_weight = NUMA_DEMOTE_DEFAULT_DISTANCE_WEIGHT,
-    .pressure_weight = NUMA_DEMOTE_DEFAULT_PRESSURE_WEIGHT,
-    .bandwidth_weight = NUMA_DEMOTE_DEFAULT_BANDWIDTH_WEIGHT,
-    .bw_saturation_threshold = NUMA_DEMOTE_DEFAULT_BW_SAT_THRESHOLD,
-    .prefer_closer_node = 1
-};
-
-/* 节点压力缓存（避免频繁读取sysfs） */
+/* Node pressure cache (avoids frequent sysfs reads). */
 static double g_node_pressure_cache[MAX_NUMA_NODES];
 static long long g_pressure_cache_time[MAX_NUMA_NODES];
-#define PRESSURE_CACHE_TTL_MS 1000  /* 缓存有效期1秒 */
+#define PRESSURE_CACHE_TTL_MS 1000  /* Cache TTL of 1 second. */
 
-/* ========== 配置接口 ========== */
-
-void evictionDemoteConfigDefaults(numa_demote_config_t *config) {
-    if (!config) return;
-    config->enabled = 1;
-    config->min_demote_size = NUMA_DEMOTE_DEFAULT_MIN_SIZE;
-    config->max_migrate_count = NUMA_DEMOTE_DEFAULT_MAX_MIGRATE;
-    config->node_pressure_threshold = NUMA_DEMOTE_DEFAULT_PRESSURE_THRES;
-    config->distance_weight = NUMA_DEMOTE_DEFAULT_DISTANCE_WEIGHT;
-    config->pressure_weight = NUMA_DEMOTE_DEFAULT_PRESSURE_WEIGHT;
-    config->bandwidth_weight = NUMA_DEMOTE_DEFAULT_BANDWIDTH_WEIGHT;
-    config->bw_saturation_threshold = NUMA_DEMOTE_DEFAULT_BW_SAT_THRESHOLD;
-    config->prefer_closer_node = 1;
-}
-
-void evictionSetDemoteConfig(const numa_demote_config_t *config) {
-    if (!config) return;
-    g_demote_config = *config;
-}
-
-void evictionGetDemoteConfig(numa_demote_config_t *config) {
-    if (!config) return;
-    *config = g_demote_config;
-}
-
-/* ========== 节点信息查询 ========== */
+/* ========== Node info queries ========== */
 
 /*
- * numaGetNodePressure - 获取节点内存压力
+ * numaGetNodePressure - get the memory pressure of a node
  *
- * 从 /sys/devices/system/node/nodeX/meminfo 读取
- * 返回值: 0.0 ~ 1.0, 越大表示压力越高
+ * Reads from /sys/devices/system/node/nodeX/meminfo
+ * Returns: 0.0 ~ 1.0, higher means more pressure
  */
 double numaGetNodePressure(int node_id) {
     int max_node = numa_max_node();
     if (node_id < 0 || node_id > max_node) {
-        return 1.0; /* 无效节点返回满压力 */
+        return 1.0; /* Invalid nodes report full pressure. */
     }
 
-    /* 检查缓存 */
+    /* Check the cache. */
     long long now = server.mstime;
     if (g_pressure_cache_time[node_id] > 0 &&
         (now - g_pressure_cache_time[node_id]) < PRESSURE_CACHE_TTL_MS) {
@@ -92,13 +54,13 @@ double numaGetNodePressure(int node_id) {
     double pressure;
 
     /*
-     * 当 maxmemory > 0 时，使用「按节点分摊配额」作为分母：
+     * When maxmemory > 0, use the per-node quota share as the denominator:
      *   per_node_quota = server.maxmemory / num_nodes
      *   pressure       = node_used_bytes / per_node_quota
      *
-     * 这样 pressure 反映的是该节点相对于 Redis 分配给它的内存份额的
-     * 占用程度，而不是相对于整个物理节点内存（后者在 441GB 双路服务器
-     * 上始终只有 ~9.7%，永远触发不了迁移）。
+     * This way pressure reflects how much of Redis's own memory share on the
+     * node is used, instead of the whole physical node memory (which on a
+     * 441GB dual-socket server stays at ~9.7% and would never trigger migration).
      */
     if (server.maxmemory > 0) {
         int num_nodes = max_node + 1;
@@ -112,7 +74,7 @@ double numaGetNodePressure(int node_id) {
             pressure = 1.0;
         }
     } else {
-        /* maxmemory 未设置：回退到物理节点内存压力 */
+        /* maxmemory not set: fall back to the physical node memory pressure. */
         char path[128];
         snprintf(path, sizeof(path),
                  "/sys/devices/system/node/node%d/meminfo", node_id);
@@ -139,7 +101,7 @@ double numaGetNodePressure(int node_id) {
         }
     }
 
-    /* 更新缓存 */
+    /* Update the cache. */
     g_node_pressure_cache[node_id] = pressure;
     g_pressure_cache_time[node_id] = now;
 
@@ -147,7 +109,7 @@ double numaGetNodePressure(int node_id) {
 }
 
 /*
- * numaGetNodeFreeMemory - 获取节点空闲内存（KB）
+ * numaGetNodeFreeMemory - get the free memory of a node (KB)
  */
 size_t numaGetNodeFreeMemory(int node_id) {
     int max_node = numa_max_node();
@@ -175,42 +137,42 @@ size_t numaGetNodeFreeMemory(int node_id) {
     }
     fclose(fp);
     
-    return (size_t)mem_free * 1024; /* 转换为字节 */
+    return (size_t)mem_free * 1024; /* Convert to bytes. */
 }
 
-/* ========== 节点选择算法 ========== */
+/* ========== Node selection algorithm ========== */
 
 /*
- * numaFindBestDemoteNode - 找到最佳降级目标节点
+ * numaFindBestDemoteNode - find the best demotion target node
  *
- * 选择策略: 距离优先 + 压力感知 + 带宽感知
- * 使用加权评分综合距离、压力和带宽因素
+ * Selection policy: distance-first + pressure awareness + bandwidth awareness
+ * Uses a weighted score combining distance, pressure, and bandwidth factors
  */
 int numaFindBestDemoteNode(size_t object_size, int current_node) {
     int num_nodes = numa_pool_num_nodes();
-    if (num_nodes <= 1) return -1; /* 单节点无需降级 */
+    if (num_nodes <= 1) return -1; /* No demotion needed on a single node. */
     
-    /* 候选节点结构 */
+    /* Candidate node structure. */
     typedef struct {
         int node_id;
-        int distance;      /* NUMA 距离 (越小越近) */
-        double pressure;   /* 内存压力 (0~1) */
-        size_t free_mem;   /* 空闲内存 */
-        double bw_usage;   /* 带宽利用率 (0~1) */
-        double score;      /* 综合评分 (越小越好) */
+        int distance;      /* NUMA distance (smaller is closer). */
+        double pressure;   /* Memory pressure (0~1). */
+        size_t free_mem;   /* Free memory. */
+        double bw_usage;   /* Bandwidth utilization (0~1). */
+        double score;      /* Combined score (smaller is better). */
     } node_candidate_t;
     
     node_candidate_t candidates[MAX_NUMA_NODES];
     int candidate_count = 0;
     
-    /* 收集所有候选节点信息 */
+    /* Collect info for all candidate nodes. */
     for (int i = 0; i < num_nodes; i++) {
-        if (i == current_node) continue; /* 跳过当前节点 */
+        if (i == current_node) continue; /* Skip the current node. */
         
         double pressure = numaGetNodePressure(i);
         size_t free_mem = numaGetNodeFreeMemory(i);
         
-        /* 检查压力是否超限 */
+        /* Check whether pressure exceeds the limit. */
         double threshold = server.numa_demote_pressure_threshold / 100.0;
         if (pressure >= threshold) {
             serverLog(LL_DEBUG,
@@ -219,16 +181,17 @@ int numaFindBestDemoteNode(size_t object_size, int current_node) {
             continue;
         }
 
-        /* 获取带宽利用率 */
+        /* Get the bandwidth utilization. */
         double bw_usage = numa_bw_get_usage(i);
-        if (bw_usage >= g_demote_config.bw_saturation_threshold) {
+        double bw_threshold = server.numa_bw_saturation_threshold / 100.0;
+        if (bw_usage >= bw_threshold) {
             serverLog(LL_DEBUG,
                 "[NUMA Demote] Node %d skipped: bw_usage %.2f >= threshold %.2f",
-                i, bw_usage, g_demote_config.bw_saturation_threshold);
+                i, bw_usage, bw_threshold);
             continue;
         }
         
-        /* 检查是否有足够空间 */
+        /* Check whether there is enough space. */
         if (free_mem < object_size * 2) {
             serverLog(LL_DEBUG,
                 "[NUMA Demote] Node %d skipped: free_mem %zu < required %zu",
@@ -236,7 +199,7 @@ int numaFindBestDemoteNode(size_t object_size, int current_node) {
             continue;
         }
         
-        /* 获取 NUMA 距离 */
+        /* Get the NUMA distance. */
         int dist = numa_distance(current_node, i);
         
         candidates[candidate_count].node_id = i;
@@ -252,13 +215,13 @@ int numaFindBestDemoteNode(size_t object_size, int current_node) {
         return -1;
     }
     
-    /* === 评分计算 === */
+    /* === Score computation === */
     /*
-     * 综合评分 = 距离归一化 * distance_weight + 压力归一化 * pressure_weight + 带宽归一化 * bandwidth_weight
-     * 评分越低越优先选择
+     * Combined score = normalized distance * distance_weight + normalized pressure * pressure_weight + normalized bandwidth * bandwidth_weight
+     * Lower scores are selected first
      */
     
-    /* 找最大距离、最大压力和最大带宽用于归一化 */
+    /* Find the max distance, pressure, and bandwidth for normalization. */
     int max_distance = 0;
     double max_pressure = 0.0;
     double max_bw_usage = 0.0;
@@ -274,26 +237,26 @@ int numaFindBestDemoteNode(size_t object_size, int current_node) {
         }
     }
     
-    /* 避免除零 */
+    /* Avoid division by zero. */
     if (max_distance == 0) max_distance = 1;
     if (max_pressure < 0.01) max_pressure = 1.0;
     if (max_bw_usage < 0.01) max_bw_usage = 1.0;
     
-    /* 计算每个候选节点的综合评分 */
+    /* Compute the combined score of each candidate node. */
     for (int i = 0; i < candidate_count; i++) {
         double dist_norm = (double)candidates[i].distance / (double)max_distance;
         double pres_norm = candidates[i].pressure / max_pressure;
         double bw_norm = candidates[i].bw_usage / max_bw_usage;
             
-        /* 从 g_demote_config 读取权重配置 */
-        int dist_weight = g_demote_config.distance_weight;
-        int pres_weight = g_demote_config.pressure_weight;
-        int bw_weight = g_demote_config.bandwidth_weight;
+        /* Read the weights from the server configuration. */
+        int dist_weight = server.numa_demote_distance_weight;
+        int pres_weight = server.numa_demote_pressure_weight;
+        int bw_weight = server.numa_demote_bandwidth_weight;
             
-        if (g_demote_config.prefer_closer_node) {
+        if (server.numa_demote_prefer_closer) {
             /*
-             * 策略 A: 加权模式 - 使用配置的三因子权重
-             * 适合延迟敏感场景
+             * Strategy A: weighted mode - uses the configured three-factor weights
+             * Suitable for latency-sensitive scenarios
              */
             candidates[i].score =
                 dist_norm * dist_weight / 100.0 +
@@ -301,7 +264,7 @@ int numaFindBestDemoteNode(size_t object_size, int current_node) {
                 bw_norm   * bw_weight   / 100.0;
         } else {
             /*
-             * 策略 B: 平衡模式 - 距离、压力、带宽同等重要
+             * Strategy B: balanced mode - distance, pressure, and bandwidth are equally important
              */
             candidates[i].score = (dist_norm + pres_norm + bw_norm) / 3.0;
         }
@@ -315,7 +278,7 @@ int numaFindBestDemoteNode(size_t object_size, int current_node) {
             candidates[i].score);
     }
     
-    /* 选择评分最低的节点 */
+    /* Select the node with the lowest score. */
     int best_idx = 0;
     double best_score = candidates[0].score;
     for (int i = 1; i < candidate_count; i++) {
@@ -336,17 +299,17 @@ int numaFindBestDemoteNode(size_t object_size, int current_node) {
     return candidates[best_idx].node_id;
 }
 
-/* ========== 降级执行接口 ========== */
+/* ========== Demotion execution interface ========== */
 
 /*
- * evictionTryNumaDemote - 尝试将对象降级到其他 NUMA 节点
+ * evictionTryNumaDemote - try to demote an object to another NUMA node
  *
- * @db: 数据库指针 (redisDb*)
- * @key: 键名 (sds)
- * @val: 值对象 (robj*)
- * @target_node: 输出参数，返回目标节点ID
+ * @db: database pointer (redisDb*)
+ * @key: key name (sds)
+ * @val: value object (robj*)
+ * @target_node: output parameter, receives the target node ID
  *
- * 返回值: numa_demote_result_t
+ * Returns: numa_demote_result_t
  */
 numa_demote_result_t evictionTryNumaDemote(void *db, char *key, void *val, int *target_node) {
     if (!server.numa_demote_enabled) {
@@ -360,29 +323,33 @@ numa_demote_result_t evictionTryNumaDemote(void *db, char *key, void *val, int *
         return NUMA_DEMOTE_SKIP;
     }
     
-    /* 获取对象大小 */
+    /* Get the object size. */
     size_t obj_size = objectComputeSize(val_obj, 0);
     if (obj_size < server.numa_demote_min_size) {
-        return NUMA_DEMOTE_SKIP; /* 太小不值得迁移 */
+        return NUMA_DEMOTE_SKIP; /* Too small to be worth migrating. */
     }
     
-    /* 获取当前 NUMA 节点 */
+    /* Get the current NUMA node (strings use the SDS allocation base). */
     int current_node = -1;
     if (val_obj->ptr) {
-        current_node = numa_get_node_id(val_obj->ptr);
+        if (val_obj->type == OBJ_STRING) {
+            current_node = numa_get_node_id(sdsAllocPtr(val_obj->ptr));
+        } else {
+            current_node = numa_get_node_id(val_obj->ptr);
+        }
     }
     if (current_node < 0) {
         current_node = numa_pool_get_node();
     }
     
-    /* 找最佳目标节点 */
+    /* Find the best target node. */
     int best_node = numaFindBestDemoteNode(obj_size, current_node);
     if (best_node < 0) {
         *target_node = -1;
         return NUMA_DEMOTE_NO_NODE;
     }
     
-    /* 执行迁移 */
+    /* Perform the migration. */
     robj keyobj;
     initStaticStringObject(keyobj, key);
     
@@ -393,7 +360,7 @@ numa_demote_result_t evictionTryNumaDemote(void *db, char *key, void *val, int *
         server.stat_numa_demotions++;
         server.stat_numa_demote_bytes += obj_size;
         
-        /* 统计距离分布 */
+        /* Track the distance distribution. */
         int dist = numa_distance(current_node, best_node);
         if (dist <= 20) {
             server.stat_numa_demote_near++;
@@ -412,9 +379,9 @@ numa_demote_result_t evictionTryNumaDemote(void *db, char *key, void *val, int *
 }
 
 /*
- * numaGetNodeBandwidthUsage - 获取节点带宽利用率
+ * numaGetNodeBandwidthUsage - get the bandwidth utilization of a node
  *
- * 返回值: 0.0 ~ 1.0, -1.0 表示无效节点
+ * Returns: 0.0 ~ 1.0, -1.0 for an invalid node
  */
 double numaGetNodeBandwidthUsage(int node_id) {
     return numa_bw_get_usage(node_id);
@@ -422,19 +389,7 @@ double numaGetNodeBandwidthUsage(int node_id) {
 
 #else /* !HAVE_NUMA */
 
-/* 非 NUMA 环境的空实现 */
-
-void evictionDemoteConfigDefaults(numa_demote_config_t *config) {
-    if (config) memset(config, 0, sizeof(*config));
-}
-
-void evictionSetDemoteConfig(const numa_demote_config_t *config) {
-    (void)config;
-}
-
-void evictionGetDemoteConfig(numa_demote_config_t *config) {
-    if (config) memset(config, 0, sizeof(*config));
-}
+/* Empty implementation for non-NUMA environments. */
 
 double numaGetNodePressure(int node_id) {
     (void)node_id;

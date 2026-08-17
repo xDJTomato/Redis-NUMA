@@ -199,6 +199,8 @@ start_server {tags {"introspection"}} {
             bgsave_cpulist
             set-proc-title
             lua-enable-deprecated-api
+            numa-enabled
+            numa-migrate-config
         }
 
         if {!$::tls} {

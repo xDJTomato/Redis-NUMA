@@ -49,22 +49,24 @@ static int numa_flow_enumerate(void *ud, nf_item_t *out) {
     numa_flow_iter_t *it = (numa_flow_iter_t *)ud;
     dictEntry *de = dictNext(it->iter);
     if (!de) return 1;   /* end of keyspace */
-    robj *key = (robj *)dictGetKey(de);
+    /* Redis db dict keys are SDS strings, not robj objects.  Treat them as
+     * SDS directly and derive NUMA telemetry from the value allocation, which
+     * is the only pointer with a NUMA prefix in this path. */
+    sds ks = (sds)dictGetKey(de);
     robj *val = (robj *)dictGetVal(de);
-    sds ks = key->ptr;
     size_t klen = sdslen(ks);
     if (klen >= NF_KEY_MAX) klen = NF_KEY_MAX - 1;
     memcpy(out->key, ks, klen);
     out->key[klen] = '\0';
     out->value = val;
     out->value_size = numa_object_sample_alloc_size(val);
-    out->current_node = numa_get_key_current_node(key);
-    key_numa_metadata_t *m = numa_get_key_metadata(key);
-    if (m) {
-        out->access_count = m->access_count;
-        out->hotness = m->hotness_level;
-        out->recency = m->last_access_time;
-    }
+
+    void *sample = numa_object_sample_alloc_ptr(val);
+    if (!sample) sample = val;
+    out->current_node = sample ? numa_get_node_id(sample) : -1;
+    out->access_count = sample ? numa_get_access_count(sample) : 0;
+    out->hotness = sample ? numa_get_hotness(sample) : 0;
+    out->recency = sample ? numa_get_last_access(sample) : 0;
     return 0;
 }
 

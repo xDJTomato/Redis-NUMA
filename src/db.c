@@ -102,37 +102,42 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
             } else {
                 val->lru = LRU_CLOCK();
             }
-        }
 
-        /* NUMA Composite LRU 热度追踪：记录每次键访问。
-         * data_ptr: 实际数据体的分配基址（zmalloc 返回值），用于读取 PREFIX 中的 NUMA 节点。
-         *
-         * 关键：dict/robj 元数据被 zmalloc_local 强制分配到 DRAM (Node 0)，
-         * 因此 val->ptr (dict *) 的 PREFIX 永远报告 Node 0，不能代表真实数据位置。
-         * 对 OBJ_ENCODING_HT 编码的 hash/set，需要探测一个 dictEntry 的 SDS 值
-         * 来获取实际字段数据所在的 NUMA 节点。 */
 #ifdef HAVE_NUMA
-        {
-            numa_strategy_t *clru = numa_strategy_slot_get(1);
-            if (clru && clru->enabled && clru->private_data) {
-                composite_lru_data_t *clru_data = clru->private_data;
-                if (clru_data->config.access_tracking_enabled) {
-                    clru_data->db = db;
-                    void *data_ptr = clru_data->config.locality_stats_enabled ?
-                                     numaObjectSampleAllocPtr(val) : numaObjectDataAllocPtr(val);
-                    composite_lru_record_access(clru, key->ptr, val, data_ptr,
-                                                (uint16_t)(server.lruclock & 0xFFFF));
+            /* NUMA Composite LRU hotness tracking: only updated on real "touching"
+             * accesses, using the same condition as the LRU update above - NOTOUCH
+             * lookups (EXISTS/TYPE/SCAN) and the BGSAVE child process do not refresh
+             * hotness, avoiding inflated hotness and reducing COW. data_ptr is the
+             * allocation base of the actual data (the zmalloc return value), used to
+             * read the NUMA node from the PREFIX.
+             *
+             * Key point: dict/robj metadata is forced onto DRAM (Node 0) by
+             * zmalloc_local, so the PREFIX of val->ptr (dict *) always reports Node 0
+             * and cannot represent the real data location. For hash/set with
+             * OBJ_ENCODING_HT, probe the SDS value of a dictEntry to get the node of
+             * the actual field data. */
+            {
+                numa_strategy_t *clru = numa_strategy_slot_get(1);
+                if (clru && clru->enabled && clru->private_data) {
+                    composite_lru_data_t *clru_data = clru->private_data;
+                    if (clru_data->config.access_tracking_enabled) {
+                        clru_data->db = db;
+                        void *data_ptr = clru_data->config.locality_stats_enabled ?
+                                         numaObjectSampleAllocPtr(val) : numaObjectDataAllocPtr(val);
+                        composite_lru_record_access(clru, key->ptr, val, data_ptr,
+                                                    (uint16_t)(server.lruclock & 0xFFFF));
+                    }
+                }
+                numa_strategy_t *tlfu = numa_strategy_slot_get(2);
+                if (tlfu && tlfu->enabled && tlfu->private_data) {
+                    tinylfu_data_t *tlfu_data = tlfu->private_data;
+                    tlfu_data->db = db;
+                    void *data_ptr = numaObjectSampleAllocPtr(val);
+                    tinylfu_record_access(tlfu, key->ptr, val, data_ptr);
                 }
             }
-            numa_strategy_t *tlfu = numa_strategy_slot_get(2);
-            if (tlfu && tlfu->enabled && tlfu->private_data) {
-                tinylfu_data_t *tlfu_data = tlfu->private_data;
-                tlfu_data->db = db;
-                void *data_ptr = numaObjectSampleAllocPtr(val);
-                tinylfu_record_access(tlfu, key->ptr, val, data_ptr);
-            }
-        }
 #endif
+        }
 
         return val;
     } else {
@@ -311,7 +316,7 @@ void dbOverwrite(redisDb *db, robj *key, robj *val) {
                     numa_set_migrated(val, 1);
                 atomicIncr(dboverwrite_realloc_count, 1);
             }
-            /* dst == NULL: 原节点分配失败，保留新值在当前节点 */
+            /* dst == NULL: allocation on the original node failed, keep the new value on the current node. */
         }
     }
 #endif

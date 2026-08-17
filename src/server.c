@@ -3246,7 +3246,6 @@ void initServer(void) {
         exit(1);
     }
 
-    // printf("DEBUG\n");
     createSharedObjects();
 
     adjustOpenFilesLimit();

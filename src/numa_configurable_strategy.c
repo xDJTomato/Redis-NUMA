@@ -1,4 +1,4 @@
-/* numa_configurable_strategy.c - 可配置NUMA分配策略实现 */
+/* numa_configurable_strategy.c - configurable NUMA allocation strategy implementation. */
 
 #define _GNU_SOURCE
 #include "numa_configurable_strategy.h"
@@ -13,12 +13,12 @@
 #include <math.h>
 #include <numa.h>
 
-/* 全局运行时状态 */
+/* Global runtime state. */
 static numa_runtime_state_t g_runtime_state = {0};
 static pthread_mutex_t g_config_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_initialized = 0;
 
-/* 策略名称映射 */
+/* Strategy name mapping. */
 static const char* strategy_names[] = {
     "local_first",
     "interleaved",
@@ -31,7 +31,7 @@ static const char* strategy_names[] = {
     "latency_aware"
 };
 
-/* 获取策略名称 */
+/* Get the strategy name. */
 const char* get_strategy_name(numa_config_strategy_type_t strategy) {
     if (strategy >= 0 && strategy < (int)(sizeof(strategy_names)/sizeof(strategy_names[0]))) {
         return strategy_names[strategy];
@@ -39,17 +39,17 @@ const char* get_strategy_name(numa_config_strategy_type_t strategy) {
     return "unknown";
 }
 
-/* 解析策略名称 */
+/* Parse a strategy name. */
 numa_config_strategy_type_t parse_strategy_name(const char* name) {
     for (size_t i = 0; i < sizeof(strategy_names)/sizeof(strategy_names[0]); i++) {
         if (strcasecmp(name, strategy_names[i]) == 0) {
             return (numa_config_strategy_type_t)i;
         }
     }
-    return (numa_config_strategy_type_t)-1; /* 未知策略名返回 -1 表示错误 */
+    return (numa_config_strategy_type_t)-1; /* Unknown strategy names return -1 to signal an error. */
 }
 
-/* 初始化运行时状态 */
+/* Initialize the runtime state. */
 static int init_runtime_state(int num_nodes) {
     if (g_runtime_state.config.node_weights) {
         zfree(g_runtime_state.config.node_weights);
@@ -73,17 +73,20 @@ static int init_runtime_state(int num_nodes) {
     memset(&g_runtime_state, 0, sizeof(g_runtime_state));
     
     g_runtime_state.config.num_nodes = num_nodes;
-    g_runtime_state.config.strategy_type = NUMA_STRATEGY_CONFIG_INTERLEAVE;
+    /* Default policy: pressure-aware weighted interleave (consistent with the
+     * README / docs/new design docs; node weights are refreshed every second
+     * by numa_config_update_pressure_weights()). */
+    g_runtime_state.config.strategy_type = NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE;
     g_runtime_state.config.balance_threshold = 0.3;
     g_runtime_state.config.auto_rebalance = 1;
     g_runtime_state.config.enable_cxl_optimization = 1;
     g_runtime_state.config.min_allocation_size = 1024;
-    g_runtime_state.config.rebalance_interval_us = 5000000; /* 5秒 */
+    g_runtime_state.config.rebalance_interval_us = 5000000; /* 5 seconds. */
     g_runtime_state.config.enabled_nodes_mask = 0;
 
-    /* 分配权重数组（权重不需要原子性，仅 WEIGHTED 策略持锁读取） */
+    /* Allocate the weight arrays (weights need no atomicity; only the WEIGHTED strategy reads them under lock). */
     g_runtime_state.config.node_weights = zcalloc(num_nodes * sizeof(int));
-    /* 原子计数器数组：元素类型为 redisAtomic int/size_t */
+    /* Atomic counter arrays: element types are redisAtomic int/size_t. */
     g_runtime_state.allocation_counters = zcalloc(num_nodes * sizeof(redisAtomic int));
     g_runtime_state.bytes_allocated_per_node = zcalloc(num_nodes * sizeof(redisAtomic size_t));
     g_runtime_state.pressure_weights = zcalloc(num_nodes * sizeof(redisAtomic int));
@@ -97,15 +100,15 @@ static int init_runtime_state(int num_nodes) {
         return C_ERR;
     }
     
-    /* 初始化默认权重 */
+    /* Initialize the default weights. */
     for (int i = 0; i < num_nodes; i++) {
-        g_runtime_state.config.node_weights[i] = 100; /* 默认静态权重100 */
-        atomicSet(g_runtime_state.pressure_weights[i], 100); /* 默认压力权重100 */
+        g_runtime_state.config.node_weights[i] = 100; /* Default static weight 100. */
+        atomicSet(g_runtime_state.pressure_weights[i], 100); /* Default pressure weight 100. */
     }
 
-    /* 计算 NUMA 距离因子：sqrt(min_dist / dist) 阻尼
-     * Node 0 (dist=10): 1.0,  Node 1 CXL (dist=50): ~0.45
-     * 零压力下 DRAM 占 ~69%，CXL ~31%，给迁移系统留空间 */
+    /* Compute the NUMA distance factors: sqrt(min_dist / dist) damping.
+     * Node 0 (dist=10): 1.0, Node 1 CXL (dist=50): ~0.45
+     * At zero pressure DRAM gets ~69% and CXL ~31%, leaving headroom for the migration system. */
     int cpu_node = numa_node_of_cpu(sched_getcpu());
     if (cpu_node < 0) cpu_node = 0;
     g_runtime_state.cpu_node = cpu_node;
@@ -171,14 +174,15 @@ static int nth_enabled_node(int nth, int num_nodes) {
     return first_enabled_node(num_nodes);
 }
 
-/* 选择最佳分配节点。
- * 优化：多数策略不再持 g_config_mutex 全局锁。
- *   - LOCAL_FIRST / INTERLEAVE / ROUND_ROBIN / CXL_OPTIMIZED: 完全无锁
- *   - WEIGHTED: 短暂持锁复制权重数组，计算在锁外完成
- *   - PRESSURE_AWARE: 无锁（读取外部节点利用率数据）
- * 统计计数器使用 Redis atomicIncr/atomicGet（atomicvar.h）无锁更新。
- * 配置字段（strategy_type/num_nodes）极少变更，读取时不加锁——即使读到过渡值
- * 也仅影响瞬时分配的目标节点选择，无正确性风险。 */
+/* Select the best allocation node.
+ * Optimization: most strategies no longer hold the g_config_mutex global lock.
+ *   - LOCAL_FIRST / INTERLEAVE / ROUND_ROBIN / CXL_OPTIMIZED: fully lock-free
+ *   - WEIGHTED: briefly locks to copy the weight array; scoring happens outside the lock
+ *   - PRESSURE_AWARE: lock-free (reads external node utilization data)
+ * Statistics counters are updated lock-free with Redis atomicIncr/atomicGet (atomicvar.h).
+ * Config fields (strategy_type/num_nodes) change rarely and are read without a lock:
+ * even a transient value only affects the target node of a single allocation, with no
+ * correctness risk. */
 static int select_best_node(size_t size) {
     int strategy_type = g_runtime_state.config.strategy_type;
     int num_nodes     = g_runtime_state.config.num_nodes;
@@ -204,7 +208,7 @@ static int select_best_node(size_t size) {
         }
 
         case NUMA_STRATEGY_CONFIG_WEIGHTED: {
-            /* 仅此策略需要读权重数组，短暂持锁复制 */
+            /* Only this strategy reads the weight array; briefly lock to copy it. */
             pthread_mutex_lock(&g_config_mutex);
             int total_weight = 0;
             for (int i = 0; i < num_nodes; i++) {
@@ -294,16 +298,16 @@ static int select_best_node(size_t size) {
         selected_node = first_enabled_node(num_nodes);
     }
 
-    /* 无锁原子更新统计计数器 —— 使用 Redis atomicvar.h API */
+    /* Lock-free atomic statistics updates using the Redis atomicvar.h API. */
     atomicIncr(g_runtime_state.allocation_counters[selected_node], 1);
     atomicIncr(g_runtime_state.bytes_allocated_per_node[selected_node], size);
 
     return selected_node;
 }
 
-/* ========== 公共API实现 ========== */
+/* ========== Public API implementation ========== */
 
-/* 初始化可配置策略系统 */
+/* Initialize the configurable strategy system. */
 int numa_config_strategy_init(void) {
     if (g_initialized) {
         return C_OK;
@@ -314,7 +318,7 @@ int numa_config_strategy_init(void) {
     if (!g_initialized) {
         int num_nodes = numa_max_node() + 1;
         if (num_nodes <= 0) {
-            num_nodes = 1; /* 至少有一个节点 */
+            num_nodes = 1; /* At least one node. */
         }
         
         if (init_runtime_state(num_nodes) == C_ERR) {
@@ -332,7 +336,7 @@ int numa_config_strategy_init(void) {
     return C_OK;
 }
 
-/* 清理策略系统 */
+/* Clean up the strategy system. */
 void numa_config_strategy_cleanup(void) {
     if (!g_initialized) return;
     
@@ -363,7 +367,7 @@ void numa_config_strategy_cleanup(void) {
     pthread_mutex_unlock(&g_config_mutex);
 }
 
-/* 从配置文件加载策略配置 */
+/* Load the strategy configuration from a file. */
 int numa_config_load_from_file(const char *config_file) {
     if (!config_file || !g_initialized) {
         return C_ERR;
@@ -384,7 +388,7 @@ int numa_config_load_from_file(const char *config_file) {
         
         if (!key || !value) continue;
         
-        /* 去除空白字符 */
+        /* Strip whitespace. */
         while (*key == ' ') key++;
         char *end = key + strlen(key) - 1;
         while (end > key && *end == ' ') *end-- = '\0';
@@ -392,7 +396,7 @@ int numa_config_load_from_file(const char *config_file) {
         if (strcmp(key, "strategy") == 0) {
             numa_config_strategy_type_t st = parse_strategy_name(value);
             if ((int)st >= 0) new_config.strategy_type = st;
-            /* 未知策略名则保持原值 */
+            /* Keep the current value on an unknown strategy name. */
         } else if (strcmp(key, "balance_threshold") == 0) {
             new_config.balance_threshold = atof(value);
         } else if (strcmp(key, "auto_rebalance") == 0) {
@@ -415,7 +419,7 @@ int numa_config_load_from_file(const char *config_file) {
     
     fclose(fp);
     
-    /* 应用新配置 */
+    /* Apply the new configuration. */
     int result = numa_config_apply_strategy(&new_config);
     
     if (result == C_OK) {
@@ -425,7 +429,7 @@ int numa_config_load_from_file(const char *config_file) {
     return result;
 }
 
-/* 应用策略配置 */
+/* Apply the strategy configuration. */
 int numa_config_apply_strategy(const numa_strategy_config_t *config) {
     if (!config || !g_initialized) {
         return C_ERR;
@@ -433,13 +437,13 @@ int numa_config_apply_strategy(const numa_strategy_config_t *config) {
     
     pthread_mutex_lock(&g_config_mutex);
     
-    /* 验证配置 */
-    if (config->num_nodes <= 0 || config->num_nodes > 64) { /* 最多支持64个节点 */
+    /* Validate the configuration. */
+    if (config->num_nodes <= 0 || config->num_nodes > 64) { /* At most 64 nodes supported. */
         pthread_mutex_unlock(&g_config_mutex);
         return C_ERR;
     }
     
-    /* 更新配置 */
+    /* Update the configuration. */
     g_runtime_state.config = *config;
     g_runtime_state.current_strategy = config->strategy_type;
     g_runtime_state.last_rebalance_time = 0;
@@ -452,13 +456,13 @@ int numa_config_apply_strategy(const numa_strategy_config_t *config) {
     return C_OK;
 }
 
-/* 获取当前策略配置 */
+/* Get the current strategy configuration. */
 const numa_strategy_config_t* numa_config_get_current(void) {
     if (!g_initialized) return NULL;
     return &g_runtime_state.config;
 }
 
-/* 设置NUMA分配策略 */
+/* Set the NUMA allocation strategy. */
 int numa_config_set_strategy(numa_config_strategy_type_t strategy) {
     if (!g_initialized) return C_ERR;
     
@@ -473,7 +477,7 @@ int numa_config_set_strategy(numa_config_strategy_type_t strategy) {
     return C_OK;
 }
 
-/* 设置节点权重 */
+/* Set the node weights. */
 int numa_config_set_node_weights(int *weights, int num_nodes) {
     if (!weights || num_nodes <= 0 || !g_initialized) {
         return C_ERR;
@@ -482,7 +486,7 @@ int numa_config_set_node_weights(int *weights, int num_nodes) {
     pthread_mutex_lock(&g_config_mutex);
     
     if (num_nodes != g_runtime_state.config.num_nodes) {
-        /* 重新分配权重数组 */
+        /* Reallocate the weight array. */
         if (g_runtime_state.config.node_weights) {
             zfree(g_runtime_state.config.node_weights);
         }
@@ -490,7 +494,7 @@ int numa_config_set_node_weights(int *weights, int num_nodes) {
         g_runtime_state.config.num_nodes = num_nodes;
     }
     
-    /* 复制权重 */
+    /* Copy the weights. */
     for (int i = 0; i < num_nodes && i < g_runtime_state.config.num_nodes; i++) {
         g_runtime_state.config.node_weights[i] = weights[i];
     }
@@ -526,7 +530,7 @@ uint64_t numa_config_get_enabled_nodes_mask(void) {
     return g_runtime_state.config.enabled_nodes_mask;
 }
 
-/* 启用/禁用CXL优化 */
+/* Enable/disable CXL optimization. */
 int numa_config_set_cxl_optimization(int enable) {
     if (!g_initialized) return C_ERR;
     
@@ -540,7 +544,7 @@ int numa_config_set_cxl_optimization(int enable) {
     return C_OK;
 }
 
-/* 设置平衡阈值 */
+/* Set the balance threshold. */
 int numa_config_set_balance_threshold(double threshold) {
     if (threshold < 0.0 || threshold > 1.0 || !g_initialized) {
         return C_ERR;
@@ -554,19 +558,19 @@ int numa_config_set_balance_threshold(double threshold) {
     return C_OK;
 }
 
-/* 手动触发重新平衡 */
+/* Manually trigger a rebalance. */
 int numa_config_trigger_rebalance(void) {
     if (!g_initialized) return C_ERR;
     
     pthread_mutex_lock(&g_config_mutex);
-    g_runtime_state.last_rebalance_time = 0; /* 强制下次检查时重新平衡 */
+    g_runtime_state.last_rebalance_time = 0; /* Force a rebalance on the next check. */
     pthread_mutex_unlock(&g_config_mutex);
     
     serverLog(LL_NOTICE, "[NUMA Config] Manual rebalance triggered");
     return C_OK;
 }
 
-/* 智能内存分配 */
+/* Smart memory allocation. */
 void *numa_config_malloc(size_t size) {
     if (!g_initialized) {
         return zmalloc(size);
@@ -576,7 +580,7 @@ void *numa_config_malloc(size_t size) {
     return numa_zmalloc_onnode(size, target_node);
 }
 
-/* 智能清零分配 */
+/* Smart zeroed allocation. */
 void *numa_config_calloc(size_t nmemb, size_t size) {
     if (!g_initialized) {
         return zcalloc(nmemb * size);
@@ -593,7 +597,7 @@ void *numa_config_calloc(size_t nmemb, size_t size) {
     return ptr;
 }
 
-/* 在指定节点分配 */
+/* Allocate on a given node. */
 void *numa_config_malloc_onnode(size_t size, int node) {
     if (!g_initialized) {
         return numa_zmalloc_onnode(size, node);
@@ -609,7 +613,7 @@ void *numa_config_malloc_onnode(size_t size, int node) {
     return numa_zmalloc_onnode(size, node);
 }
 
-/* 获取策略执行统计 */
+/* Get the strategy execution statistics. */
 void numa_config_get_statistics(uint64_t *allocations_per_node, 
                                size_t *bytes_per_node,
                                int num_nodes) {
@@ -630,7 +634,7 @@ void numa_config_get_statistics(uint64_t *allocations_per_node,
     pthread_mutex_unlock(&g_config_mutex);
 }
 
-/* 获取节点负载信息 */
+/* Get the node load info. */
 double numa_config_get_node_utilization(int node_id) {
     if (!g_initialized || node_id < 0 || node_id >= g_runtime_state.config.num_nodes) {
         return 0.0;
@@ -642,16 +646,16 @@ double numa_config_get_node_utilization(int node_id) {
     size_t node_bytes;
     atomicGet(g_runtime_state.bytes_allocated_per_node[node_id], node_bytes);
     if (node_bytes > 0) {
-        /* 简化的利用率计算 */
+        /* Simplified utilization computation. */
         utilization = (double)node_bytes /
-                      (1024.0 * 1024.0 * 1024.0); /* 转换为GB作为示例 */
+                      (1024.0 * 1024.0 * 1024.0); /* Convert to GB as an example. */
     }
     
     pthread_mutex_unlock(&g_config_mutex);
     return utilization;
 }
 
-/* 检查是否需要重新平衡 */
+/* Check whether a rebalance is needed. */
 int numa_config_needs_rebalance(void) {
     if (!g_initialized || !g_runtime_state.config.auto_rebalance) {
         return 0;
@@ -663,7 +667,7 @@ int numa_config_needs_rebalance(void) {
         return 0;
     }
     
-    /* 检查负载不均衡 */
+    /* Check for load imbalance. */
     pthread_mutex_lock(&g_config_mutex);
     
     double max_util = 0.0, min_util = 1e30;
@@ -680,13 +684,13 @@ int numa_config_needs_rebalance(void) {
     return needs_rebalance;
 }
 
-/* 获取最佳分配节点 */
+/* Get the best allocation node. */
 int numa_config_get_best_node(size_t size) {
     if (!g_initialized) return 0;
     return select_best_node(size);
 }
 
-/* 处理NUMA配置相关命令 */
+/* Handle NUMA configuration commands. */
 int numa_config_handle_command(int argc, char **argv) {
     if (argc < 2) {
         numa_config_show_help();
@@ -718,7 +722,7 @@ int numa_config_handle_command(int argc, char **argv) {
     }
     
     if (strcasecmp(argv[1], "STATS") == 0) {
-        /* 显示统计信息 */
+        /* Show the statistics. */
         serverLog(LL_NOTICE, "[NUMA Config] Allocation Statistics:");
         for (int i = 0; i < g_runtime_state.config.num_nodes; i++) {
             int alloc_count;
@@ -734,7 +738,7 @@ int numa_config_handle_command(int argc, char **argv) {
     return C_ERR;
 }
 
-/* 显示当前配置状态 */
+/* Show the current configuration state. */
 void numa_config_show_status(void) {
     if (!g_initialized) {
         serverLog(LL_NOTICE, "[NUMA Config] System not initialized");
@@ -764,7 +768,7 @@ void numa_config_show_status(void) {
     pthread_mutex_unlock(&g_config_mutex);
 }
 
-/* 显示帮助信息 */
+/* Show help. */
 void numa_config_show_help(void) {
     serverLog(LL_NOTICE, "[NUMA Config] Available Commands:");
     serverLog(LL_NOTICE, "  NUMACONFIG GET                    - Show current configuration");
@@ -780,7 +784,7 @@ void numa_config_show_help(void) {
     }
 }
 
-/* ========== 压力权重更新 ========== */
+/* ========== Pressure weight updates ========== */
 
 void numa_config_update_pressure_weights(void) {
     if (!g_initialized || !g_runtime_state.pressure_weights) return;

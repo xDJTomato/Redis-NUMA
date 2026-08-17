@@ -1,6 +1,6 @@
-/* numa_balanced_allocator.h - 平衡NUMA内存分配器
+/* numa_balanced_allocator.h - balanced NUMA memory allocator
  *
- * 解决CXL环境下内存分配不平衡问题，实现跨NUMA节点的智能负载均衡
+ * Solves the memory allocation imbalance problem in CXL environments by implementing smart load balancing across NUMA nodes.
  */
 
 #ifndef NUMA_BALANCED_ALLOCATOR_H
@@ -9,30 +9,30 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* 负载均衡策略 */
-#define BALANCE_STRATEGY_ROUND_ROBIN    0  /* 轮询分配 */
-#define BALANCE_STRATEGY_WEIGHTED       1  /* 加权分配 */
-#define BALANCE_STRATEGY_PRESSURE_BASED 2  /* 压力感知分配 */
+/* Load balancing strategies. */
+#define BALANCE_STRATEGY_ROUND_ROBIN    0  /* Round-robin allocation. */
+#define BALANCE_STRATEGY_WEIGHTED       1  /* Weighted allocation. */
+#define BALANCE_STRATEGY_PRESSURE_BASED 2  /* Pressure-aware allocation. */
 
-/* 节点权重配置 */
+/* Node weight configuration. */
 typedef struct {
     int node_id;
-    int weight;              /* 分配权重 (1-100) */
-    size_t reserved_memory;  /* 保留内存大小 */
-    int cxl_distance;        /* CXL访问延迟等级 */
+    int weight;              /* Allocation weight (1-100). */
+    size_t reserved_memory;  /* Reserved memory size. */
+    int cxl_distance;        /* CXL access latency class. */
 } node_weight_config_t;
 
-/* 负载均衡配置 */
+/* Load balancing configuration. */
 typedef struct {
-    int strategy;                    /* 分配策略 */
-    node_weight_config_t *weights;   /* 节点权重数组 */
-    int num_weights;                 /* 权重配置数量 */
-    double balance_threshold;        /* 负载不平衡阈值 */
-    uint64_t rebalance_interval_us;  /* 重新平衡间隔 */
-    int enable_cxl_optimization;     /* 是否启用CXL优化 */
+    int strategy;                    /* Allocation strategy. */
+    node_weight_config_t *weights;   /* Node weight array. */
+    int num_weights;                 /* Weight config count. */
+    double balance_threshold;        /* Load imbalance threshold. */
+    uint64_t rebalance_interval_us;  /* Rebalance interval. */
+    int enable_cxl_optimization;     /* Whether CXL optimization is enabled. */
 } balance_config_t;
 
-/* 节点负载统计 */
+/* Node load statistics. */
 typedef struct {
     int node_id;
     size_t total_memory;
@@ -41,58 +41,58 @@ typedef struct {
     double utilization_rate;
     uint64_t allocation_count;
     uint64_t bytes_allocated;
-    int cxl_latency_class;  /* CXL延迟等级 */
+    int cxl_latency_class;  /* CXL latency class. */
 } node_load_stats_t;
 
-/* 平衡分配器上下文 */
+/* Balanced allocator context. */
 typedef struct {
     balance_config_t config;
     node_load_stats_t *node_stats;
     int num_nodes;
     int initialized;
-    int current_rr_index;    /* 轮询索引 */
+    int current_rr_index;    /* Round-robin index. */
     uint64_t last_rebalance;
 } balanced_allocator_t;
 
-/* ========== 公共API ========== */
+/* ========== Public API ========== */
 
-/* 初始化平衡分配器 */
+/* Initialize the balanced allocator. */
 int numa_balanced_init(const balance_config_t *config);
 
-/* 清理平衡分配器 */
+/* Clean up the balanced allocator. */
 void numa_balanced_cleanup(void);
 
-/* 智能分配内存 - 根据负载情况选择最优节点 */
+/* Smart memory allocation - picks the best node according to the load. */
 void *numa_balanced_malloc(size_t size);
 
-/* 智能分配清零内存 */
+/* Smart zeroed memory allocation. */
 void *numa_balanced_calloc(size_t nmemb, size_t size);
 
-/* 在指定节点分配内存 */
+/* Allocate memory on a given node. */
 void *numa_balanced_malloc_onnode(size_t size, int node);
 
-/* 获取最适合分配的节点 */
+/* Get the best node for allocation. */
 int numa_balanced_get_best_node(size_t size);
 
-/* 更新节点负载统计 */
+/* Update the node load statistics. */
 int numa_balanced_update_stats(void);
 
-/* 检查是否需要重新平衡 */
+/* Check whether a rebalance is needed. */
 int numa_balanced_need_rebalance(void);
 
-/* 执行负载重新平衡 */
+/* Perform a load rebalance. */
 int numa_balanced_rebalance(void);
 
-/* 获取节点负载信息 */
+/* Get the load info of a node. */
 const node_load_stats_t* numa_balanced_get_node_stats(int node_id);
 
-/* 获取所有节点负载信息 */
+/* Get the load info of all nodes. */
 const node_load_stats_t* numa_balanced_get_all_stats(int *num_nodes);
 
-/* 动态调整权重 */
+/* Dynamically adjust the weights. */
 int numa_balanced_adjust_weight(int node_id, int new_weight);
 
-/* 设置CXL优化参数 */
+/* Set the CXL optimization parameters. */
 int numa_balanced_set_cxl_params(int enable_optimization, int latency_threshold_ms);
 
 #endif /* NUMA_BALANCED_ALLOCATOR_H */
