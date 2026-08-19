@@ -88,14 +88,14 @@ static uint64_t key_obj_hash(const void *key) {
 }
 
 /* robj pointer compare function. */
-static int key_obj_compare(void *privdata, const void *key1, const void *key2) {
-    (void)privdata;
+static int key_obj_compare(dict *d, const void *key1, const void *key2) {
+    (void)d;
     return key1 == key2 ? 0 : 1;
 }
 
 /* Metadata destructor. */
-static void metadata_destructor(void *privdata, void *val) {
-    (void)privdata;
+static void metadata_destructor(dict *d, void *val) {
+    (void)d;
     zfree(val);
 }
 

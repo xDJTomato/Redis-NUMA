@@ -324,7 +324,7 @@ numa_demote_result_t evictionTryNumaDemote(void *db, char *key, void *val, int *
     }
     
     /* Get the object size. */
-    size_t obj_size = objectComputeSize(val_obj, 0);
+    size_t obj_size = objectComputeSize(NULL, val_obj, 0, rdb->id);
     if (obj_size < server.numa_demote_min_size) {
         return NUMA_DEMOTE_SKIP; /* Too small to be worth migrating. */
     }

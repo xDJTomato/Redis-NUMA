@@ -650,7 +650,7 @@ int performEvictions(void) {
                                 /* Demotion succeeded: local memory freed but the object is kept. */
                                 numa_demotions++;
 
-                                size_t obj_size = objectComputeSize(val, 0);
+                                size_t obj_size = objectComputeSize(NULL, val, 0, bestdbid);
                                 mem_freed += obj_size;
                                 keys_freed++;
 

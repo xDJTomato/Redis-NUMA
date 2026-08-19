@@ -99,23 +99,23 @@ static uint64_t heat_map_hash(const void *key) {
     return dictGenHashFunction(key, sdslen((const sds)key));
 }
 
-static int heat_map_key_compare(void *privdata, const void *key1, const void *key2) {
-    (void)privdata;
+static int heat_map_key_compare(dict *d, const void *key1, const void *key2) {
+    (void)d;
     return sdscmp((const sds)key1, (const sds)key2) == 0;
 }
 
-static void *heat_map_key_dup(void *privdata, const void *key) {
-    (void)privdata;
+static void *heat_map_key_dup(dict *d, const void *key) {
+    (void)d;
     return sdsdup((const sds)key);
 }
 
-static void heat_map_key_destructor(void *privdata, void *key) {
-    (void)privdata;
+static void heat_map_key_destructor(dict *d, void *key) {
+    (void)d;
     sdsfree((sds)key);
 }
 
-static void heat_map_val_destructor(void *privdata, void *val) {
-    (void)privdata;
+static void heat_map_val_destructor(dict *d, void *val) {
+    (void)d;
     zfree(val);
 }
 

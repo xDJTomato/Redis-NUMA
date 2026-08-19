@@ -3166,7 +3166,7 @@ standardConfig static_configs[] = {
     createIntConfig("lfu-decay-time", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.lfu_decay_time, 1, INTEGER_CONFIG, NULL, NULL),
     /* NUMA demotion configuration. */
     createIntConfig("numa-demote-enabled", NULL, MODIFIABLE_CONFIG, 0, 1, server.numa_demote_enabled, 1, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("numa-demote-min-size", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.numa_demote_min_size, 1024, MEMORY_CONFIG, NULL, NULL),
+    createSizeTConfig("numa-demote-min-size", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.numa_demote_min_size, 1024, MEMORY_CONFIG, NULL, NULL),
     createIntConfig("numa-demote-max-migrate", NULL, MODIFIABLE_CONFIG, 1, 10, server.numa_demote_max_migrate, 3, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("numa-demote-pressure-threshold", NULL, MODIFIABLE_CONFIG, 0, 100, server.numa_demote_pressure_threshold, 90, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("numa-demote-distance-weight", NULL, MODIFIABLE_CONFIG, 0, 100, server.numa_demote_distance_weight, 40, INTEGER_CONFIG, NULL, NULL),
