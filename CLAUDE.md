@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Redis 6.2.21 extended with NUMA-aware memory allocation and CXL (Compute Express Link) memory tiering. The project adds transparent NUMA node-granular allocation, per-key heat tracking, and cross-node cold/hot data migration while preserving full Redis API compatibility.
+Redis 7.2.6 extended with NUMA-aware memory allocation and CXL (Compute Express Link) memory tiering. The project adds transparent NUMA node-granular allocation, per-key heat tracking, and cross-node cold/hot data migration while preserving full Redis API compatibility.
 
-A separate **pure-C11** subsystem **NUMAflow** (`numaflow/`) decomposes every NUMA scheduling strategy into **36 composable atomic operations** executable as N8N-style DAG workflows, and adds: a new default strategy (CAAT), a QEMU-free fair evaluation harness, a TUI and a web GUI, and a lightweight cache-behavior tracking feedback loop. The Redis 6.2 → 8 migration is documented in `docs/redis8-migration.md` with a compat header `src/redis8_compat.h` (the Redis core itself still targets 6.2.21 until it is recompiled on a Linux + libnuma host).
+A separate **pure-C11** subsystem **NUMAflow** (`numaflow/`) decomposes every NUMA scheduling strategy into **36 composable atomic operations** executable as N8N-style DAG workflows, and adds: a new default strategy (CAAT), a QEMU-free fair evaluation harness, a TUI and a web GUI, and a lightweight cache-behavior tracking feedback loop. The Redis 6.2.21 → 7.2.6 core migration was performed as a real three-way merge (not a paper plan) and is documented in `docs/redis7-migration.md`, including every bug the merge silently introduced and how it was found. The core builds and passes the full `make test` suite on Linux + libnuma.
 
 ## Build Commands
 
@@ -22,6 +22,10 @@ Build all targets: `make` in `src/` produces redis-server, redis-cli, redis-benc
 ## Running Tests
 
 ```bash
+# Single entry point: build + make test + NUMAflow benchmark (+ optional YCSB/QEMU/CXLMemSim)
+./run_full_validation.sh --quick   # fast: skips YCSB/QEMU/CXLMemSim
+./run_full_validation.sh           # full: aggregated HTML report in results/full_report_<ts>/
+
 # Standard Redis test suite (Tcl-based)
 cd src && make test
 
@@ -35,6 +39,10 @@ cd tests/ycsb && ./run_ycsb.sh            # YCSB baseline/stress modes
 
 # NUMAflow subsystem tests (pure C11, runs on this Windows host too)
 cd numaflow && make test
+
+# Optional: QEMU multi-NUMA-node smoke test and CXLMemSim device-link check
+./tests/vm/boot_numa_vm.sh
+./tests/cxl/run_cxlmemsim.sh
 ```
 
 Test structure:
@@ -43,6 +51,11 @@ Test structure:
 - `tests/ycsb/workloads/` — workload definitions (baseline, stress, bw_saturate, numa_migration)
 - `tests/legacy/numa/` — archived NUMA functional tests (C/bash)
 - `tests/ycsb/scripts/` — helper scripts (install, eval, report generation)
+- `tests/vm/` — QEMU multi-NUMA-node smoke test (TCG, gracefully skips without `/dev/kvm`)
+- `tests/cxl/` — CXLMemSim device-emulation link validation (`external/CXLMemSim`)
+- `tests/report/` — HTML report generator used by `run_full_validation.sh`
+
+See `TESTING.md` for the full breakdown of every tier.
 
 ## Architecture
 
@@ -52,7 +65,7 @@ Ten modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
 
 1. **numa_pool** — Custom memory allocator. 33 size classes (8B–64KB), bump-pointer O(1) allocation, 64KB slab allocator for ≤4KB objects, chunk compaction for <30% utilization chunks.
 2. **numa_migrate** — Low-level block migration between NUMA nodes via `numa_alloc_onnode` + memcpy.
-3. **numa_key_migrate** — Per-key migration (robj as unit). LRU-integrated heat tracking with lazy step decay. Full type adapters for all 5 Redis types: STRING (RAW/EMBSTR), HASH (ziplist/hashtable), LIST (quicklist with LZF/raw sub-paths), SET (intset/hashtable), ZSET (ziplist/skiplist).
+3. **numa_key_migrate** — Per-key migration (robj as unit). LRU-integrated heat tracking with lazy step decay. Full type adapters for all 5 Redis types: STRING (RAW/EMBSTR), HASH (listpack/ziplist/hashtable), LIST (quicklist with LZF/raw and PLAIN/PACKED container sub-paths), SET (intset/hashtable), ZSET (listpack/ziplist/skiplist).
 4. **numa_strategy_slots** — 16-slot pluggable strategy framework with vtable-based polymorphism. Slot 0 = no-op, Slot 1 = Composite LRU, Slot 2 = TinyLFU (disabled by default). Runs via `serverCron` every second.
 5. **numa_composite_lru** — Default migration strategy (Slot 1). Dual-channel: hot candidate ring buffer (fast path) + progressive dictionary scan (slow path). JSON-configurable.
 6. **numa_tinylfu** — Frequency-driven migration strategy (Slot 2, disabled by default). Count-Min Sketch (4×16384, 4-bit) + Doorkeeper Bloom Filter. Fixed ~40KB memory, O(1) hot data discovery. Must be manually enabled to avoid conflict with Composite LRU.
@@ -89,17 +102,22 @@ The Redis adapter `src/numa_flow.c` (compiled only under `HAVE_NUMA`) implements
 
 ## Configuration
 
-- `redis.conf` lines 1051–1071: `numa-demote-*` settings (enable, min-size, max-migrate, pressure-threshold, weights)
-- `redis.conf` lines 2092–2104: `numa-enabled` and `numa-migrate-config` path to `composite_lru.json`
+- `redis.conf` lines 1184–1208: `numa-demote-*` settings (enable, min-size, max-migrate, pressure-threshold, weights)
+- `redis.conf` lines 2342–2354: `numa-enabled` and `numa-migrate-config` path to `composite_lru.json`
 - `composite_lru.json`: per-node bandwidth baselines and migration tuning parameters
 
 ## Documentation
 
-- `docs/new/` — Current module design docs (00-design-proposal through 19-ae-strategy-scheduler-technical-design)
+- `README.md` — project overview, quick start, `run_full_validation.sh` usage
+- `ARCHITECTURE.md` — module layout, dependency order, Redis-core integration points
+- `docs/new/` — Original per-module design docs (00-design-proposal through 19-ae-strategy-scheduler-technical-design)
 - `docs/numaflow/` — NUMAflow subsystem design and usage
-- `docs/redis8-migration.md` — Redis 6.2 → 8 migration guide + verification checklist
+- `docs/redis7-migration.md` — Redis 6.2.21 → 7.2.6 real merge record: tooling, every bug found and fixed, verification performed
 - `docs/test/` — Test organization, benchmark results, and usage guides (benchmark_results.txt, EXECUTIVE_SUMMARY.txt, DIAGNOSIS_USAGE.txt)
 - `docs/devlog/` — Development log and design notes (e.g. zmalloc-goals.txt)
+- `TESTING.md` — every test tier, including the optional QEMU/CXLMemSim steps
+- `CONTRIBUTING.md` — conventions for adding a new NUMA module
+- `CHANGELOG.md` — version history (Keep a Changelog format)
 
 ## Development Conventions
 
@@ -116,4 +134,4 @@ When adding a new NUMA module:
 - **Never use jemalloc** — the build forces libc, but if you change Makefile flags, NUMA will break
 - **Init order matters** — `initServer()` must complete before any `numa_*_init()` call
 - **serverLog is not directly available** — use `extern void _serverLog(int level, const char *fmt, ...)` in NUMA modules
-- **All 5 data type migration adapters are fully implemented** — STRING, HASH, LIST, SET, ZSET with proper encoding handling (ziplist/hashtable/quicklist/skiplist)
+- **All 5 data type migration adapters are fully implemented** — STRING, HASH, LIST, SET, ZSET with proper encoding handling (listpack/ziplist/hashtable/quicklist/skiplist)

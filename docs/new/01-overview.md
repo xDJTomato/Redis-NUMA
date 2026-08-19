@@ -258,9 +258,9 @@ redis-cli NUMA CONFIG GET
 
 ## 新增能力（本次交付）
 
-在原有 Redis 6.2.21 内核 NUMA 模块之上，本仓库新增了独立于 Redis 内核的 **NUMAflow** 子系统（纯 C11，`numaflow/`）与 Redis 8 迁移指南：
+在原有 Redis NUMA 模块之上，本仓库新增了独立于 Redis 内核的 **NUMAflow** 子系统（纯 C11，`numaflow/`）；Redis 内核本身已完成 6.2.21 → 7.2.6 的真实三方合并：
 
 - [NUMAflow 子系统](../numaflow/README.md) - N8N 风格 DAG 策略引擎、36 个原子操作、CAAT 默认策略、公平评测框架、TUI/GUI、缓存行为追踪反馈
-- [Redis 6.2 → 8 迁移指南](../redis8-migration.md) - 迁移路径与 `src/redis8_compat.h` 兼容头
+- [Redis 6.2.21 → 7.2.6 迁移记录](../redis7-migration.md) - 实际合并步骤、6 个被 merge 静默引入的 bug 及修复、1 个 CVE cherry-pick
 
-> 注：Redis 核心当前仍为 6.2.21；迁移到 Redis 8 需在 Linux + libnuma 环境完成最终重编译，迁移指南已给出逐项改动清单与验证命令。
+> 注：Redis 核心现为 7.2.6（`feat/redis7-port` 分支），已在 Linux + libnuma 环境编译通过并跑通 `make test` 全量测试；详见迁移记录。

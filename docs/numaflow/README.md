@@ -148,7 +148,7 @@ make report     # 生成评测 JSON + results/report.html
 ```
 
 在 Linux + 真实 libnuma 环境下，本子系统同样可编译运行（Makefile 自动选择后缀）；
-它也可以作为 Redis 8 的一个独立策略引擎被 `NUMA` 命令调用。
+它也可以作为 Redis 7 的一个独立策略引擎被 `NUMA` 命令调用（见 `src/numa_flow.c` 与 `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`）。
 ## 6.5 独立内存分配器（`nf_alloc`）
 
 针对原 `numa_pool`（libnuma 临时方案）的性能与碎片率优化，详见
