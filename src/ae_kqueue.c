@@ -178,7 +178,10 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
                 numevents++;
             }
         }
+    } else if (retval == -1 && errno != EINTR) {
+        panic("aeApiPoll: kevent, %s", strerror(errno));
     }
+
     return numevents;
 }
 

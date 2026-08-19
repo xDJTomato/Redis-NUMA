@@ -151,11 +151,19 @@ start_server {tags {"string"}} {
         set ex
     } {*syntax*}
 
+    test "GETEX and GET expired key or not exist" {
+        r del foo
+        r set foo bar px 1
+        after 2
+        assert_equal {} [r getex foo]
+        assert_equal {} [r get foo]
+    }
+
     test "GETEX no arguments" {
          set ex {}
          catch {r getex} ex
          set ex
-     } {*wrong number of arguments*}
+     } {*wrong number of arguments for 'getex' command}
 
     test "GETDEL command" {
         r del foo
@@ -173,7 +181,8 @@ start_server {tags {"string"}} {
             {set foo bar}
             {del foo}
         }
-    }
+        close_replication_stream $repl
+    } {} {needs:repl}
 
     test {GETEX without argument does not propagate to replica} {
         set repl [attach_to_replication_stream]
@@ -185,23 +194,24 @@ start_server {tags {"string"}} {
             {set foo bar}
             {del foo}
         }
-    }
+        close_replication_stream $repl
+    } {} {needs:repl}
 
     test {MGET} {
         r flushdb
-        r set foo BAR
-        r set bar FOO
-        r mget foo bar
+        r set foo{t} BAR
+        r set bar{t} FOO
+        r mget foo{t} bar{t}
     } {BAR FOO}
 
     test {MGET against non existing key} {
-        r mget foo baazz bar
+        r mget foo{t} baazz{t} bar{t}
     } {BAR {} FOO}
 
     test {MGET against non-string key} {
-        r sadd myset ciao
-        r sadd myset bau
-        r mget foo baazz bar myset
+        r sadd myset{t} ciao
+        r sadd myset{t} bau
+        r mget foo{t} baazz{t} bar{t} myset{t}
     } {BAR {} FOO {}}
 
     test {GETSET (set new value)} {
@@ -215,22 +225,36 @@ start_server {tags {"string"}} {
     } {bar xyz}
 
     test {MSET base case} {
-        r mset x 10 y "foo bar" z "x x x x x x x\n\n\r\n"
-        r mget x y z
+        r mset x{t} 10 y{t} "foo bar" z{t} "x x x x x x x\n\n\r\n"
+        r mget x{t} y{t} z{t}
     } [list 10 {foo bar} "x x x x x x x\n\n\r\n"]
 
-    test {MSET wrong number of args} {
-        catch {r mset x 10 y "foo bar" z} err
-        format $err
-    } {*wrong number*}
+    test {MSET/MSETNX wrong number of args} {
+        assert_error {*wrong number of arguments for 'mset' command} {r mset x{t} 10 y{t} "foo bar" z{t}}
+        assert_error {*wrong number of arguments for 'msetnx' command} {r msetnx x{t} 20 y{t} "foo bar" z{t}}
+    }
+
+    test {MSET with already existing - same key twice} {
+        r set x{t} x
+        list [r mset x{t} xxx x{t} yyy] [r get x{t}]
+    } {OK yyy}
 
     test {MSETNX with already existent key} {
-        list [r msetnx x1 xxx y2 yyy x 20] [r exists x1] [r exists y2]
+        list [r msetnx x1{t} xxx y2{t} yyy x{t} 20] [r exists x1{t}] [r exists y2{t}]
     } {0 0 0}
 
     test {MSETNX with not existing keys} {
-        list [r msetnx x1 xxx y2 yyy] [r get x1] [r get y2]
+        list [r msetnx x1{t} xxx y2{t} yyy] [r get x1{t}] [r get y2{t}]
     } {1 xxx yyy}
+
+    test {MSETNX with not existing keys - same key twice} {
+        r del x1{t}
+        list [r msetnx x1{t} xxx x1{t} yyy] [r get x1{t}]
+    } {1 yyy}
+
+    test {MSETNX with already existing keys - same key twice} {
+        list [r msetnx x1{t} xxx x1{t} zzz] [r get x1{t}]
+    } {0 yyy}
 
     test "STRLEN against non-existing key" {
         assert_equal 0 [r strlen notakey]
@@ -427,6 +451,11 @@ start_server {tags {"string"}} {
         assert_equal "" [r getrange mykey 0 -1]
     }
 
+    test "GETRANGE against wrong key type" {
+        r lpush lkey1 "list"
+        assert_error {WRONGTYPE Operation against a key holding the wrong kind of value*} {r getrange lkey1 0 -1}
+    }
+
     test "GETRANGE against string value" {
         r set mykey "Hello World"
         assert_equal "Hell" [r getrange mykey 0 3]
@@ -456,6 +485,16 @@ start_server {tags {"string"}} {
             if {$_end < 0} {set _end "end-[abs($_end)-1]"}
             assert_equal [string range $bin $_start $_end] [r getrange bin $start $end]
         }
+    }
+
+    test "Coverage: SUBSTR" {
+        r set key abcde
+        assert_equal "a" [r substr key 0 0]
+        assert_equal "abcd" [r substr key 0 3]
+        assert_equal "bcde" [r substr key -4 -1]
+        assert_equal "" [r substr key -1 -3]
+        assert_equal "" [r substr key 7 8]
+        assert_equal "" [r substr nokey 0 1]
     }
     
 if {[string match {*jemalloc*} [s mem_allocator]]} {
@@ -505,11 +544,35 @@ if {[string match {*jemalloc*} [s mem_allocator]]} {
         list $old_value $new_value
     } {{} bar}
 
-    test {Extended SET GET with NX option should result in syntax err} {
-      catch {r set foo bar NX GET} err1
-      catch {r set foo bar NX GET} err2
-      list $err1 $err2
-    } {*syntax err* *syntax err*}
+    test {Extended SET GET option with XX} {
+        r del foo
+        r set foo bar
+        set old_value [r set foo baz GET XX]
+        set new_value [r get foo]
+        list $old_value $new_value
+    } {bar baz}
+
+    test {Extended SET GET option with XX and no previous value} {
+        r del foo
+        set old_value [r set foo bar GET XX]
+        set new_value [r get foo]
+        list $old_value $new_value
+    } {{} {}}
+
+    test {Extended SET GET option with NX} {
+        r del foo
+        set old_value [r set foo bar GET NX]
+        set new_value [r get foo]
+        list $old_value $new_value
+    } {{} bar}
+
+    test {Extended SET GET option with NX and previous value} {
+        r del foo
+        r set foo bar
+        set old_value [r set foo baz GET NX]
+        set new_value [r get foo]
+        list $old_value $new_value
+    } {bar bar}
 
     test {Extended SET GET with incorrect type should result in wrong type error} {
       r del foo
@@ -560,30 +623,28 @@ if {[string match {*jemalloc*} [s mem_allocator]]} {
     set rna2 {ATTAAAGGTTTATACCTTCCCAGGTAACAAACCAACCAACTTTCGATCTCTTGTAGATCTGTTCTCTAAACGAACTTTAAAATCTGTGTGGCTGTCACTCGGCTGCATGCTTAGTGCACTCACGCAGTATAATTAATAACTAATTACTGTCGTTGACAGGACACGAGTAACTCGTCTATCTTCTGCAGGCTGCTTACGGTTTCGTCCGTGTTGCAGCCGATCATCAGCACATCTAGGTTT}
     set rnalcs {ACCTTCCCAGGTAACAAACCAACCAACTTTCGATCTCTTGTAGATCTGTTCTCTAAACGAACTTTAAAATCTGTGTGGCTGTCACTCGGCTGCATGCTTAGTGCACTCACGCAGTATAATTAATAACTAATTACTGTCGTTGACAGGACACGAGTAACTCGTCTATCTTCTGCAGGCTGCTTACGGTTTCGTCCGTGTTGCAGCCGATCATCAGCACATCTAGGTTT}
 
-    test {STRALGO LCS string output with STRINGS option} {
-        r STRALGO LCS STRINGS $rna1 $rna2
+    test {LCS basic} {
+        r set virus1{t} $rna1
+        r set virus2{t} $rna2
+        r LCS virus1{t} virus2{t}
     } $rnalcs
 
-    test {STRALGO LCS len} {
-        r STRALGO LCS LEN STRINGS $rna1 $rna2
+    test {LCS len} {
+        r set virus1{t} $rna1
+        r set virus2{t} $rna2
+        r LCS virus1{t} virus2{t} LEN
     } [string length $rnalcs]
 
-    test {LCS with KEYS option} {
-        r set virus1 $rna1
-        r set virus2 $rna2
-        r STRALGO LCS KEYS virus1 virus2
-    } $rnalcs
-
     test {LCS indexes} {
-        dict get [r STRALGO LCS IDX KEYS virus1 virus2] matches
+        dict get [r LCS virus1{t} virus2{t} IDX] matches
     } {{{238 238} {239 239}} {{236 236} {238 238}} {{229 230} {236 237}} {{224 224} {235 235}} {{1 222} {13 234}}}
 
     test {LCS indexes with match len} {
-        dict get [r STRALGO LCS IDX KEYS virus1 virus2 WITHMATCHLEN] matches
+        dict get [r LCS virus1{t} virus2{t} IDX WITHMATCHLEN] matches
     } {{{238 238} {239 239} 1} {{236 236} {238 238} 1} {{229 230} {236 237} 2} {{224 224} {235 235} 1} {{1 222} {13 234} 222}}
 
     test {LCS indexes with match len and minimum match len} {
-        dict get [r STRALGO LCS IDX KEYS virus1 virus2 WITHMATCHLEN MINMATCHLEN 5] matches
+        dict get [r LCS virus1{t} virus2{t} IDX WITHMATCHLEN MINMATCHLEN 5] matches
     } {{{1 222} {13 234} 222}}
 
     test {SETRANGE with huge offset} {
@@ -595,4 +656,19 @@ if {[string match {*jemalloc*} [s mem_allocator]]} {
            }
         }
     }
+
+    test {APPEND modifies the encoding from int to raw} {
+        r del foo
+        r set foo 1
+        assert_encoding "int" foo
+        r append foo 2
+
+        set res {}
+        lappend res [r get foo]
+        assert_encoding "raw" foo
+        
+        r set bar 12
+        assert_encoding "int" bar
+        lappend res [r get bar]
+    } {12 12}
 }

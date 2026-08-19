@@ -9,8 +9,8 @@
 # reconnect with the master, otherwise just the initial synchronization is
 # checked for consistency.
 proc test_psync {descr duration backlog_size backlog_ttl delay cond mdl sdl reconnect} {
-    start_server {tags {"repl"}} {
-        start_server {} {
+    start_server {tags {"repl"} overrides {save {}}} {
+        start_server {overrides {save {}}} {
 
             set master [srv -1 client]
             set master_host [srv -1 host]
@@ -117,6 +117,7 @@ proc test_psync {descr duration backlog_size backlog_ttl delay cond mdl sdl reco
     }
 }
 
+tags {"external:skip"} {
 foreach mdl {no yes} {
     foreach sdl {disabled swapdb} {
         test_psync {no reconnection, just sync} 6 1000000 3600 0 {
@@ -138,4 +139,5 @@ foreach mdl {no yes} {
         assert {[s -1 sync_partial_err] > 0}
         } $mdl $sdl 1
     }
+}
 }

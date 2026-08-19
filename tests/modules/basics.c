@@ -30,9 +30,9 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define REDISMODULE_EXPERIMENTAL_API
 #include "redismodule.h"
 #include <string.h>
+#include <stdlib.h>
 
 /* --------------------------------- Helpers -------------------------------- */
 
@@ -77,6 +77,309 @@ fail:
     return REDISMODULE_OK;
 }
 
+int TestCallResp3Attribute(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    reply = RedisModule_Call(ctx,"DEBUG","3cc" ,"PROTOCOL", "attrib"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_STRING) goto fail;
+
+    /* make sure we can not reply to resp2 client with resp3 (it might be a string but it contains attribute) */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    if (!TestMatchReply(reply,"Some real reply following the attribute")) goto fail;
+
+    reply = RedisModule_CallReplyAttribute(reply);
+    if (!reply || RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_ATTRIBUTE) goto fail;
+    /* make sure we can not reply to resp2 client with resp3 attribute */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+    if (RedisModule_CallReplyLength(reply) != 1) goto fail;
+
+    RedisModuleCallReply *key, *val;
+    if (RedisModule_CallReplyAttributeElement(reply,0,&key,&val) != REDISMODULE_OK) goto fail;
+    if (!TestMatchReply(key,"key-popularity")) goto fail;
+    if (RedisModule_CallReplyType(val) != REDISMODULE_REPLY_ARRAY) goto fail;
+    if (RedisModule_CallReplyLength(val) != 2) goto fail;
+    if (!TestMatchReply(RedisModule_CallReplyArrayElement(val, 0),"key:123")) goto fail;
+    if (!TestMatchReply(RedisModule_CallReplyArrayElement(val, 1),"90")) goto fail;
+
+    RedisModule_ReplyWithSimpleString(ctx,"OK");
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestGetResp(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    int flags = RedisModule_GetContextFlags(ctx);
+
+    if (flags & REDISMODULE_CTX_FLAGS_RESP3) {
+        RedisModule_ReplyWithLongLong(ctx, 3);
+    } else {
+        RedisModule_ReplyWithLongLong(ctx, 2);
+    }
+
+    return REDISMODULE_OK;
+}
+
+int TestCallRespAutoMode(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    RedisModule_Call(ctx,"DEL","c","myhash");
+    RedisModule_Call(ctx,"HSET","ccccc","myhash", "f1", "v1", "f2", "v2");
+    /* 0 stands for auto mode, we will get the reply in the same format as the client */
+    reply = RedisModule_Call(ctx,"HGETALL","0c" ,"myhash");
+    RedisModule_ReplyWithCallReply(ctx, reply);
+    return REDISMODULE_OK;
+}
+
+int TestCallResp3Map(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    RedisModule_Call(ctx,"DEL","c","myhash");
+    RedisModule_Call(ctx,"HSET","ccccc","myhash", "f1", "v1", "f2", "v2");
+    reply = RedisModule_Call(ctx,"HGETALL","3c" ,"myhash"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_MAP) goto fail;
+
+    /* make sure we can not reply to resp2 client with resp3 map */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    long long items = RedisModule_CallReplyLength(reply);
+    if (items != 2) goto fail;
+
+    RedisModuleCallReply *key0, *key1;
+    RedisModuleCallReply *val0, *val1;
+    if (RedisModule_CallReplyMapElement(reply,0,&key0,&val0) != REDISMODULE_OK) goto fail;
+    if (RedisModule_CallReplyMapElement(reply,1,&key1,&val1) != REDISMODULE_OK) goto fail;
+    if (!TestMatchReply(key0,"f1")) goto fail;
+    if (!TestMatchReply(key1,"f2")) goto fail;
+    if (!TestMatchReply(val0,"v1")) goto fail;
+    if (!TestMatchReply(val1,"v2")) goto fail;
+
+    RedisModule_ReplyWithSimpleString(ctx,"OK");
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallResp3Bool(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    reply = RedisModule_Call(ctx,"DEBUG","3cc" ,"PROTOCOL", "true"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_BOOL) goto fail;
+    /* make sure we can not reply to resp2 client with resp3 bool */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    if (!RedisModule_CallReplyBool(reply)) goto fail;
+    reply = RedisModule_Call(ctx,"DEBUG","3cc" ,"PROTOCOL", "false"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_BOOL) goto fail;
+    if (RedisModule_CallReplyBool(reply)) goto fail;
+
+    RedisModule_ReplyWithSimpleString(ctx,"OK");
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallResp3Null(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    reply = RedisModule_Call(ctx,"DEBUG","3cc" ,"PROTOCOL", "null"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_NULL) goto fail;
+
+    /* make sure we can not reply to resp2 client with resp3 null */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    RedisModule_ReplyWithSimpleString(ctx,"OK");
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallReplyWithNestedReply(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    RedisModule_Call(ctx,"DEL","c","mylist");
+    RedisModule_Call(ctx,"RPUSH","ccl","mylist","test",(long long)1234);
+    reply = RedisModule_Call(ctx,"LRANGE","ccc","mylist","0","-1");
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_ARRAY) goto fail;
+    if (RedisModule_CallReplyLength(reply) < 1) goto fail;
+    RedisModuleCallReply *nestedReply = RedisModule_CallReplyArrayElement(reply, 0);
+
+    RedisModule_ReplyWithCallReply(ctx,nestedReply);
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallReplyWithArrayReply(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    RedisModule_Call(ctx,"DEL","c","mylist");
+    RedisModule_Call(ctx,"RPUSH","ccl","mylist","test",(long long)1234);
+    reply = RedisModule_Call(ctx,"LRANGE","ccc","mylist","0","-1");
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_ARRAY) goto fail;
+
+    RedisModule_ReplyWithCallReply(ctx,reply);
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallResp3Double(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    reply = RedisModule_Call(ctx,"DEBUG","3cc" ,"PROTOCOL", "double"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_DOUBLE) goto fail;
+
+    /* make sure we can not reply to resp2 client with resp3 double*/
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    double d = RedisModule_CallReplyDouble(reply);
+    /* we compare strings, since comparing doubles directly can fail in various architectures, e.g. 32bit */
+    char got[30], expected[30];
+    snprintf(got, sizeof(got), "%.17g", d);
+    snprintf(expected, sizeof(expected), "%.17g", 3.141);
+    if (strcmp(got, expected) != 0) goto fail;
+    RedisModule_ReplyWithSimpleString(ctx,"OK");
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallResp3BigNumber(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    reply = RedisModule_Call(ctx,"DEBUG","3cc" ,"PROTOCOL", "bignum"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_BIG_NUMBER) goto fail;
+
+    /* make sure we can not reply to resp2 client with resp3 big number */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    size_t len;
+    const char* big_num = RedisModule_CallReplyBigNumber(reply, &len);
+    RedisModule_ReplyWithStringBuffer(ctx,big_num,len);
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallResp3Verbatim(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    reply = RedisModule_Call(ctx,"DEBUG","3cc" ,"PROTOCOL", "verbatim"); /* 3 stands for resp 3 reply */
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_VERBATIM_STRING) goto fail;
+
+    /* make sure we can not reply to resp2 client with resp3 verbatim string */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    const char* format;
+    size_t len;
+    const char* str = RedisModule_CallReplyVerbatim(reply, &len, &format);
+    RedisModuleString *s = RedisModule_CreateStringPrintf(ctx, "%.*s:%.*s", 3, format, (int)len, str);
+    RedisModule_ReplyWithString(ctx,s);
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
+int TestCallResp3Set(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModule_AutoMemory(ctx);
+    RedisModuleCallReply *reply;
+
+    RedisModule_Call(ctx,"DEL","c","myset");
+    RedisModule_Call(ctx,"sadd","ccc","myset", "v1", "v2");
+    reply = RedisModule_Call(ctx,"smembers","3c" ,"myset"); // N stands for resp 3 reply
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_SET) goto fail;
+
+    /* make sure we can not reply to resp2 client with resp3 set */
+    if (RedisModule_ReplyWithCallReply(ctx, reply) != REDISMODULE_ERR) goto fail;
+
+    long long items = RedisModule_CallReplyLength(reply);
+    if (items != 2) goto fail;
+
+    RedisModuleCallReply *val0, *val1;
+
+    val0 = RedisModule_CallReplySetElement(reply,0);
+    val1 = RedisModule_CallReplySetElement(reply,1);
+
+    /*
+     * The order of elements on sets are not promised so we just
+     * veridy that the reply matches one of the elements.
+     */
+    if (!TestMatchReply(val0,"v1") && !TestMatchReply(val0,"v2")) goto fail;
+    if (!TestMatchReply(val1,"v1") && !TestMatchReply(val1,"v2")) goto fail;
+
+    RedisModule_ReplyWithSimpleString(ctx,"OK");
+    return REDISMODULE_OK;
+
+fail:
+    RedisModule_ReplyWithSimpleString(ctx,"ERR");
+    return REDISMODULE_OK;
+}
+
 /* TEST.STRING.APPEND -- Test appending to an existing string object. */
 int TestStringAppend(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     REDISMODULE_NOT_USED(argv);
@@ -97,8 +400,40 @@ int TestStringAppendAM(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     RedisModule_AutoMemory(ctx);
     RedisModuleString *s = RedisModule_CreateString(ctx,"foo",3);
     RedisModule_RetainString(ctx,s);
+    RedisModule_TrimStringAllocation(s);    /* Mostly NOP, but exercises the API function */
     RedisModule_StringAppendBuffer(ctx,s,"bar",3);
     RedisModule_ReplyWithString(ctx,s);
+    RedisModule_FreeString(ctx,s);
+    return REDISMODULE_OK;
+}
+
+/* TEST.STRING.TRIM -- Test we trim a string with free space. */
+int TestTrimString(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+    RedisModuleString *s = RedisModule_CreateString(ctx,"foo",3);
+    char *tmp = RedisModule_Alloc(1024);
+    RedisModule_StringAppendBuffer(ctx,s,tmp,1024);
+    size_t string_len = RedisModule_MallocSizeString(s);
+    RedisModule_TrimStringAllocation(s);
+    size_t len_after_trim = RedisModule_MallocSizeString(s);
+
+    /* Determine if using jemalloc memory allocator. */
+    RedisModuleServerInfoData *info = RedisModule_GetServerInfo(ctx, "memory");
+    const char *field = RedisModule_ServerInfoGetFieldC(info, "mem_allocator");
+    int use_jemalloc = !strncmp(field, "jemalloc", 8);
+
+    /* Jemalloc will reallocate `s` from 2k to 1k after RedisModule_TrimStringAllocation(),
+     * but non-jemalloc memory allocators may keep the old size. */
+    if ((use_jemalloc && len_after_trim < string_len) ||
+        (!use_jemalloc && len_after_trim <= string_len))
+    {
+        RedisModule_ReplyWithSimpleString(ctx, "OK");
+    } else {
+        RedisModule_ReplyWithError(ctx, "String was not trimmed as expected.");
+    }
+    RedisModule_FreeServerInfo(ctx, info);
+    RedisModule_Free(tmp);
     RedisModule_FreeString(ctx,s);
     return REDISMODULE_OK;
 }
@@ -152,6 +487,38 @@ int TestUnlink(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         return failTest(ctx, "Could not verify key to be unlinked");
     }
     return RedisModule_ReplyWithSimpleString(ctx, "OK");
+}
+
+int TestNestedCallReplyArrayElement(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    RedisModule_AutoMemory(ctx);
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+
+    RedisModuleString *expect_key = RedisModule_CreateString(ctx, "mykey", strlen("mykey"));
+    RedisModule_SelectDb(ctx, 1);
+    RedisModule_Call(ctx, "LPUSH", "sc", expect_key, "myvalue");
+
+    RedisModuleCallReply *scan_reply = RedisModule_Call(ctx, "SCAN", "l", (long long)0);
+    RedisModule_Assert(scan_reply != NULL && RedisModule_CallReplyType(scan_reply) == REDISMODULE_REPLY_ARRAY);
+    RedisModule_Assert(RedisModule_CallReplyLength(scan_reply) == 2);
+
+    long long scan_cursor;
+    RedisModuleCallReply *cursor_reply = RedisModule_CallReplyArrayElement(scan_reply, 0);
+    RedisModule_Assert(RedisModule_CallReplyType(cursor_reply) == REDISMODULE_REPLY_STRING);
+    RedisModule_Assert(RedisModule_StringToLongLong(RedisModule_CreateStringFromCallReply(cursor_reply), &scan_cursor) == REDISMODULE_OK);
+    RedisModule_Assert(scan_cursor == 0);
+
+    RedisModuleCallReply *keys_reply = RedisModule_CallReplyArrayElement(scan_reply, 1);
+    RedisModule_Assert(RedisModule_CallReplyType(keys_reply) == REDISMODULE_REPLY_ARRAY);
+    RedisModule_Assert( RedisModule_CallReplyLength(keys_reply) == 1);
+ 
+    RedisModuleCallReply *key_reply = RedisModule_CallReplyArrayElement(keys_reply, 0);
+    RedisModule_Assert(RedisModule_CallReplyType(key_reply) == REDISMODULE_REPLY_STRING);
+    RedisModuleString *key = RedisModule_CreateStringFromCallReply(key_reply);
+    RedisModule_Assert(RedisModule_StringCompare(key, expect_key) == 0);
+
+    RedisModule_ReplyWithSimpleString(ctx, "OK");
+    return REDISMODULE_OK;
 }
 
 /* TEST.STRING.TRUNCATE -- Test truncating an existing string object. */
@@ -382,6 +749,25 @@ end:
 
 /* Return 1 if the reply matches the specified string, otherwise log errors
  * in the server log and return 0. */
+int TestAssertErrorReply(RedisModuleCtx *ctx, RedisModuleCallReply *reply, char *str, size_t len) {
+    RedisModuleString *mystr, *expected;
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_ERROR) {
+        return 0;
+    }
+
+    mystr = RedisModule_CreateStringFromCallReply(reply);
+    expected = RedisModule_CreateString(ctx,str,len);
+    if (RedisModule_StringCompare(mystr,expected) != 0) {
+        const char *mystr_ptr = RedisModule_StringPtrLen(mystr,NULL);
+        const char *expected_ptr = RedisModule_StringPtrLen(expected,NULL);
+        RedisModule_Log(ctx,"warning",
+            "Unexpected Error reply reply '%s' (instead of '%s')",
+            mystr_ptr, expected_ptr);
+        return 0;
+    }
+    return 1;
+}
+
 int TestAssertStringReply(RedisModuleCtx *ctx, RedisModuleCallReply *reply, char *str, size_t len) {
     RedisModuleString *mystr, *expected;
 
@@ -456,6 +842,30 @@ int TestBasics(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     T("test.call","");
     if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
 
+    T("test.callresp3map","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
+
+    T("test.callresp3set","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
+
+    T("test.callresp3double","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
+
+    T("test.callresp3bool","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
+
+    T("test.callresp3null","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
+
+    T("test.callreplywithnestedreply","");
+    if (!TestAssertStringReply(ctx,reply,"test",4)) goto fail;
+
+    T("test.callreplywithbignumberreply","");
+    if (!TestAssertStringReply(ctx,reply,"1234567999999999999999999999999999999",37)) goto fail;
+
+    T("test.callreplywithverbatimstringreply","");
+    if (!TestAssertStringReply(ctx,reply,"txt:This is a verbatim\nstring",29)) goto fail;
+
     T("test.ctxflags","");
     if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
 
@@ -468,14 +878,38 @@ int TestBasics(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     T("test.unlink","");
     if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
 
+    T("test.nestedcallreplyarray","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
+
     T("test.string.append.am","");
     if (!TestAssertStringReply(ctx,reply,"foobar",6)) goto fail;
+    
+    T("test.string.trim","");
+    if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
 
     T("test.string.printf", "cc", "foo", "bar");
     if (!TestAssertStringReply(ctx,reply,"Got 3 args. argv[1]: foo, argv[2]: bar",38)) goto fail;
 
     T("test.notify", "");
     if (!TestAssertStringReply(ctx,reply,"OK",2)) goto fail;
+
+    T("test.callreplywitharrayreply", "");
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_ARRAY) goto fail;
+    if (RedisModule_CallReplyLength(reply) != 2) goto fail;
+    if (!TestAssertStringReply(ctx,RedisModule_CallReplyArrayElement(reply, 0),"test",4)) goto fail;
+    if (!TestAssertStringReply(ctx,RedisModule_CallReplyArrayElement(reply, 1),"1234",4)) goto fail;
+
+    T("foo", "E");
+    if (!TestAssertErrorReply(ctx,reply,"ERR unknown command 'foo', with args beginning with: ",53)) goto fail;
+
+    T("set", "Ec", "x");
+    if (!TestAssertErrorReply(ctx,reply,"ERR wrong number of arguments for 'set' command",47)) goto fail;
+
+    T("shutdown", "SE");
+    if (!TestAssertErrorReply(ctx,reply,"ERR command 'shutdown' is not allowed on script mode",52)) goto fail;
+
+    T("set", "WEcc", "x", "1");
+    if (!TestAssertErrorReply(ctx,reply,"ERR Write command 'set' was called while write is not allowed.",62)) goto fail;
 
     RedisModule_ReplyWithSimpleString(ctx,"ALL TESTS PASSED");
     return REDISMODULE_OK;
@@ -493,12 +927,78 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     if (RedisModule_Init(ctx,"test",1,REDISMODULE_APIVER_1)
         == REDISMODULE_ERR) return REDISMODULE_ERR;
 
+    /* Perform RM_Call inside the RedisModule_OnLoad
+     * to verify that it works as expected without crashing.
+     * The tests will verify it on different configurations
+     * options (cluster/no cluster). A simple ping command
+     * is enough for this test. */
+    RedisModuleCallReply *reply = RedisModule_Call(ctx, "ping", "");
+    if (RedisModule_CallReplyType(reply) != REDISMODULE_REPLY_STRING) {
+        RedisModule_FreeCallReply(reply);
+        return REDISMODULE_ERR;
+    }
+    size_t len;
+    const char *reply_str = RedisModule_CallReplyStringPtr(reply, &len);
+    if (len != 4) {
+        RedisModule_FreeCallReply(reply);
+        return REDISMODULE_ERR;
+    }
+    if (memcmp(reply_str, "PONG", 4) != 0) {
+        RedisModule_FreeCallReply(reply);
+        return REDISMODULE_ERR;
+    }
+    RedisModule_FreeCallReply(reply);
+
     if (RedisModule_CreateCommand(ctx,"test.call",
         TestCall,"write deny-oom",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
+    if (RedisModule_CreateCommand(ctx,"test.callresp3map",
+        TestCallResp3Map,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callresp3attribute",
+        TestCallResp3Attribute,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callresp3set",
+        TestCallResp3Set,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callresp3double",
+        TestCallResp3Double,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callresp3bool",
+        TestCallResp3Bool,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callresp3null",
+        TestCallResp3Null,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callreplywitharrayreply",
+        TestCallReplyWithArrayReply,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callreplywithnestedreply",
+        TestCallReplyWithNestedReply,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callreplywithbignumberreply",
+        TestCallResp3BigNumber,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.callreplywithverbatimstringreply",
+        TestCallResp3Verbatim,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
     if (RedisModule_CreateCommand(ctx,"test.string.append",
         TestStringAppend,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.string.trim",
+        TestTrimString,"write deny-oom",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     if (RedisModule_CreateCommand(ctx,"test.string.append.am",
@@ -521,8 +1021,21 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         TestUnlink,"write deny-oom",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
+    if (RedisModule_CreateCommand(ctx,"test.nestedcallreplyarray",
+        TestNestedCallReplyArrayElement,"write deny-oom",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
     if (RedisModule_CreateCommand(ctx,"test.basics",
-        TestBasics,"readonly",1,1,1) == REDISMODULE_ERR)
+        TestBasics,"write",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    /* the following commands are used by an external test and should not be added to TestBasics */
+    if (RedisModule_CreateCommand(ctx,"test.rmcallautomode",
+        TestCallRespAutoMode,"write",1,1,1) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
+    if (RedisModule_CreateCommand(ctx,"test.getresp",
+        TestGetResp,"readonly",1,1,1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
     RedisModule_SubscribeToKeyspaceEvents(ctx,

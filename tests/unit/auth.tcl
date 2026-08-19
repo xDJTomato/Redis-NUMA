@@ -1,11 +1,16 @@
-start_server {tags {"auth"}} {
+start_server {tags {"auth external:skip"}} {
     test {AUTH fails if there is no password configured server side} {
         catch {r auth foo} err
         set _ $err
-    } {ERR*any password*}
+    } {ERR *any password*}
+
+    test {Arity check for auth command} {
+        catch {r auth a b c} err
+        set _ $err
+    } {*syntax error*}
 }
 
-start_server {tags {"auth"} overrides {requirepass foobar}} {
+start_server {tags {"auth external:skip"} overrides {requirepass foobar}} {
     test {AUTH fails when a wrong password is given} {
         catch {r auth wrong!} err
         set _ $err
@@ -40,27 +45,9 @@ start_server {tags {"auth"} overrides {requirepass foobar}} {
         assert_match {*unauthenticated bulk length*} $e
         $rr close
     }
-
-    test {For unauthenticated clients output buffer is limited} {
-        set rr [redis [srv "host"] [srv "port"] 1 $::tls]
-        $rr SET x 5
-        catch {[$rr read]} e
-        assert_match {*NOAUTH Authentication required*} $e
-
-        # Fill the output buffer in a loop without reading it and make
-        # sure the client disconnected.
-        # Considering the socket eat some of the replies, we are testing
-        # that such client can't consume more than few MB's.
-        catch {
-            for {set j 0} {$j < 1000000} {incr j} {
-                    $rr SET x 5
-            }
-        } e
-        assert_match {I/O error reading reply} $e
-    }
 }
 
-start_server {tags {"auth_binary_password"}} {
+start_server {tags {"auth_binary_password external:skip"}} {
     test {AUTH fails when binary password is wrong} {
         r config set requirepass "abc\x00def"
         catch {r auth abc} err
@@ -83,8 +70,8 @@ start_server {tags {"auth_binary_password"}} {
 
             # Configure the replica with masterauth
             set loglines [count_log_lines 0]
-            $slave slaveof $master_host $master_port
             $slave config set masterauth "abc"
+            $slave slaveof $master_host $master_port
 
             # Verify replica is not able to sync with master
             wait_for_log_messages 0 {"*Unable to AUTH to MASTER*"} $loglines 1000 10

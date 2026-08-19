@@ -1,6 +1,15 @@
-# tests of corrupt ziplist payload with valid CRC
+# tests of corrupt listpack payload with valid CRC
 
-tags {"dump" "corruption"} {
+tags {"dump" "corruption" "external:skip"} {
+
+# catch sigterm so that in case one of the random command hangs the test,
+# usually due to redis not putting a response in the output buffers,
+# we'll know which command it was
+if { ! [ catch {
+    package require Tclx
+} err ] } {
+    signal error SIGTERM
+}
 
 proc generate_collections {suffix elements} {
     set rd [redis_deferring_client]
@@ -23,6 +32,7 @@ proc generate_collections {suffix elements} {
 proc generate_types {} {
     r config set list-max-ziplist-size 5
     r config set hash-max-ziplist-entries 5
+    r config set set-max-listpack-entries 5
     r config set zset-max-ziplist-entries 5
     r config set stream-node-max-entries 5
 
@@ -43,7 +53,7 @@ proc generate_types {} {
     generate_collections big 10
 
     # make sure our big stream also has a listpack record that has different
-    # field names than the master recored
+    # field names than the master recorded
     r xadd streambig * item 1 value 1
     r xadd streambig * item 1 unique value
 }
@@ -137,10 +147,21 @@ foreach sanitize_dump {no yes} {
                         if {$dbsize != [r dbsize]} {
                             puts "unexpected keys"
                             puts "keys: [r keys *]"
-                            puts $sent
+                            puts "commands leading to it:"
+                            foreach cmd $sent {
+                                foreach arg $cmd {
+                                    puts -nonewline "[string2printable $arg] "
+                                }
+                                puts ""
+                            }
                             exit 1
                         }
                     } err ] } {
+                        set err [format "%s" $err] ;# convert to string for pattern matching
+                        if {[string match "*SIGTERM*" $err]} {
+                            puts "payload that caused test to hang: $printable_dump"
+                            exit 1
+                        }
                         # if the server terminated update stats and restart it
                         set report_and_restart true
                         incr stat_terminated_in_traffic
@@ -157,8 +178,9 @@ foreach sanitize_dump {no yes} {
                 # check valgrind report for invalid reads after each RESTORE
                 # payload so that we have a report that is easier to reproduce
                 set valgrind_errors [find_valgrind_errors [srv 0 stderr] false]
-                if {$valgrind_errors != ""} {
-                    puts "valgrind found an issue for payload: $printable_dump"
+                set asan_errors [sanitizer_errors_from_file [srv 0 stderr]]
+                if {$valgrind_errors != "" || $asan_errors != ""} {
+                    puts "valgrind or asan found an issue for payload: $printable_dump"
                     set report_and_restart true
                     set print_commands true
                 }

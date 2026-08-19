@@ -11,8 +11,8 @@ proc stop_bg_block_op {handle} {
     catch {exec /bin/kill -9 $handle}
 }
 
-start_server {tags {"repl"}} {
-    start_server {} {
+start_server {tags {"repl" "external:skip"}} {
+    start_server {overrides {save {}}} {
         set master [srv -1 client]
         set master_host [srv -1 host]
         set master_port [srv -1 port]

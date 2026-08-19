@@ -82,5 +82,37 @@ tags "modules" {
             assert_equal {pmessage * __keyspace@9__:x notify} [$rd1 read]
             $rd1 close
         }
-	}
+
+        test {Test expired key space event} {
+            set prev_expired [s expired_keys]
+            r set exp 1 PX 10
+            wait_for_condition 100 10 {
+                [s expired_keys] eq $prev_expired + 1
+            } else {
+                fail "key not expired"
+            }
+            assert_equal [r get testkeyspace:expired] 1
+        }
+
+        test "Unload the module - testkeyspace" {
+            assert_equal {OK} [r module unload testkeyspace]
+        }
+
+        test "Verify RM_StringDMA with expiration are not causing invalid memory access" {
+            assert_equal {OK} [r set x 1 EX 1]
+        }
+    }
+
+    start_server {} {
+        test {OnLoad failure will handle un-registration} {
+            catch {r module load $testmodule noload}
+            r set x 1
+            r hset y f v
+            r lpush z 1 2 3
+            r sadd p 1 2 3
+            r zadd t 1 f1 2 f2
+            r xadd s * f v
+            r ping
+        }
+    }
 }

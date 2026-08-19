@@ -265,6 +265,17 @@ int64_t intsetRandom(intset *is) {
     return _intsetGet(is,rand()%len);
 }
 
+/* Return the largest member. */
+int64_t intsetMax(intset *is) {
+    uint32_t len = intrev32ifbe(is->length);
+    return _intsetGet(is, len - 1);
+}
+
+/* Return the smallest member. */
+int64_t intsetMin(intset *is) {
+    return _intsetGet(is, 0);
+}
+
 /* Get the value at the given position. When this position is
  * out of range the function returns 0, when in range it returns 1. */
 uint8_t intsetGet(intset *is, uint32_t pos, int64_t *value) {
@@ -307,7 +318,7 @@ int intsetValidateIntegrity(const unsigned char *p, size_t size, int deep) {
         return 0;
     }
 
-    /* check that the size matchies (all records are inside the buffer). */
+    /* check that the size matches (all records are inside the buffer). */
     uint32_t count = intrev32ifbe(is->length);
     if (sizeof(*is) + count*record_size != size)
         return 0;
@@ -393,7 +404,7 @@ static void checkConsistency(intset *is) {
 }
 
 #define UNUSED(x) (void)(x)
-int intsetTest(int argc, char **argv, int accurate) {
+int intsetTest(int argc, char **argv, int flags) {
     uint8_t success;
     int i;
     intset *is;
@@ -401,7 +412,7 @@ int intsetTest(int argc, char **argv, int accurate) {
 
     UNUSED(argc);
     UNUSED(argv);
-    UNUSED(accurate);
+    UNUSED(flags);
 
     printf("Value encodings: "); {
         assert(_intsetValueEncoding(-32768) == INTSET_ENC_INT16);
@@ -425,6 +436,8 @@ int intsetTest(int argc, char **argv, int accurate) {
         is = intsetAdd(is,6,&success); assert(success);
         is = intsetAdd(is,4,&success); assert(success);
         is = intsetAdd(is,4,&success); assert(!success);
+        assert(6 == intsetMax(is));
+        assert(4 == intsetMin(is));
         ok();
         zfree(is);
     }

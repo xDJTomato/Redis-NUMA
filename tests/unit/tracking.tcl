@@ -1,4 +1,5 @@
-start_server {tags {"tracking network"}} {
+# logreqres:skip because it seems many of these tests rely heavily on RESP2
+start_server {tags {"tracking network logreqres:skip"}} {
     # Create a deferred client we'll use to redirect invalidation
     # messages to.
     set rd_redirection [redis_deferring_client]
@@ -40,20 +41,20 @@ start_server {tags {"tracking network"}} {
     } {*OK}
 
     test {The other connection is able to get invalidations} {
-        r SET a 1
-        r SET b 1
-        r GET a
-        r INCR b ; # This key should not be notified, since it wasn't fetched.
-        r INCR a
+        r SET a{t} 1
+        r SET b{t} 1
+        r GET a{t}
+        r INCR b{t} ; # This key should not be notified, since it wasn't fetched.
+        r INCR a{t}
         set keys [lindex [$rd_redirection read] 2]
         assert {[llength $keys] == 1}
-        assert {[lindex $keys 0] eq {a}}
+        assert {[lindex $keys 0] eq {a{t}}}
     }
 
     test {The client is now able to disable tracking} {
         # Make sure to add a few more keys in the tracking list
         # so that we can check for leaks, as a side effect.
-        r MGET a b c d e f g
+        r MGET a{t} b{t} c{t} d{t} e{t} f{t} g{t}
         r CLIENT TRACKING off
     } {*OK}
 
@@ -62,28 +63,28 @@ start_server {tags {"tracking network"}} {
     } {*OK*}
 
     test {The connection gets invalidation messages about all the keys} {
-        r MSET a 1 b 2 c 3
+        r MSET a{t} 1 b{t} 2 c{t} 3
         set keys [lsort [lindex [$rd_redirection read] 2]]
-        assert {$keys eq {a b c}}
+        assert {$keys eq {a{t} b{t} c{t}}}
     }
 
     test {Clients can enable the BCAST mode with prefixes} {
         r CLIENT TRACKING off
         r CLIENT TRACKING on BCAST REDIRECT $redir_id PREFIX a: PREFIX b:
         r MULTI
-        r INCR a:1
-        r INCR a:2
-        r INCR b:1
-        r INCR b:2
+        r INCR a:1{t}
+        r INCR a:2{t}
+        r INCR b:1{t}
+        r INCR b:2{t}
         # we should not get this key
-        r INCR c:1
+        r INCR c:1{t}
         r EXEC
         # Because of the internals, we know we are going to receive
         # two separated notifications for the two different prefixes.
         set keys1 [lsort [lindex [$rd_redirection read] 2]]
         set keys2 [lsort [lindex [$rd_redirection read] 2]]
         set keys [lsort [list {*}$keys1 {*}$keys2]]
-        assert {$keys eq {a:1 a:2 b:1 b:2}}
+        assert {$keys eq {a:1{t} a:2{t} b:1{t} b:2{t}}}
     }
 
     test {Adding prefixes to BCAST mode works} {
@@ -96,16 +97,16 @@ start_server {tags {"tracking network"}} {
     test {Tracking NOLOOP mode in standard mode works} {
         r CLIENT TRACKING off
         r CLIENT TRACKING on REDIRECT $redir_id NOLOOP
-        r MGET otherkey1 loopkey otherkey2
-        $rd_sg SET otherkey1 1; # We should get this
-        r SET loopkey 1 ; # We should not get this
-        $rd_sg SET otherkey2 1; # We should get this
+        r MGET otherkey1{t} loopkey{t} otherkey2{t}
+        $rd_sg SET otherkey1{t} 1; # We should get this
+        r SET loopkey{t} 1 ; # We should not get this
+        $rd_sg SET otherkey2{t} 1; # We should get this
         # Because of the internals, we know we are going to receive
         # two separated notifications for the two different keys.
         set keys1 [lsort [lindex [$rd_redirection read] 2]]
         set keys2 [lsort [lindex [$rd_redirection read] 2]]
         set keys [lsort [list {*}$keys1 {*}$keys2]]
-        assert {$keys eq {otherkey1 otherkey2}}
+        assert {$keys eq {otherkey1{t} otherkey2{t}}}
     }
 
     test {Tracking NOLOOP mode in BCAST mode works} {
@@ -221,6 +222,36 @@ start_server {tags {"tracking network"}} {
         $rd_sg CLIENT TRACKING off
     }
 
+    test {Tracking only occurs for scripts when a command calls a read-only command} {
+        r CLIENT TRACKING off
+        r CLIENT TRACKING on
+        $rd_sg MSET key2{t} 1 key2{t} 1
+
+        # If a script doesn't call any read command, don't track any keys
+        r EVAL "redis.call('set', 'key3{t}', 'bar')" 2 key1{t} key2{t} 
+        $rd_sg MSET key2{t} 2 key1{t} 2
+        assert_equal "PONG" [r ping]
+
+        # If a script calls a read command, just the read keys
+        r EVAL "redis.call('get', 'key2{t}')" 2 key1{t} key2{t}
+        $rd_sg MSET key2{t} 2 key3{t} 2
+        assert_equal {invalidate key2{t}} [r read]
+        assert_equal "PONG" [r ping]
+
+        # RO variants work like the normal variants
+
+        # If a RO script doesn't call any read command, don't track any keys
+        r EVAL_RO "redis.call('ping')" 2 key1{t} key2{t}
+        $rd_sg MSET key2{t} 2 key1{t} 2
+        assert_equal "PONG" [r ping]
+
+        # If a RO script calls a read command, just the read keys
+        r EVAL_RO "redis.call('get', 'key2{t}')" 2 key1{t} key2{t}
+        $rd_sg MSET key2{t} 2 key3{t} 2
+        assert_equal {invalidate key2{t}} [r read]
+        assert_equal "PONG" [r ping]
+    }
+
     test {RESP3 Client gets tracking-redir-broken push message after cached key changed when rediretion client is terminated} {
         r CLIENT TRACKING on REDIRECT $redir_id
         $rd_sg SET key1 1
@@ -249,16 +280,16 @@ start_server {tags {"tracking network"}} {
         r CLIENT TRACKING on REDIRECT $redir_id
         $rd CLIENT TRACKING on REDIRECT $redir_id 
         assert_equal OK [$rd read] ; # Consume the TRACKING reply
-        $rd_sg MSET key1 1 key2 1
-        r GET key1
-        $rd GET key2 
+        $rd_sg MSET key1{t} 1 key2{t} 1
+        r GET key1{t}
+        $rd GET key2{t} 
         assert_equal 1 [$rd read] ; # Consume the GET reply
-        $rd_sg INCR key1
-        $rd_sg INCR key2
+        $rd_sg INCR key1{t}
+        $rd_sg INCR key2{t}
         set res1 [lindex [$rd_redirection read] 2]
         set res2 [lindex [$rd_redirection read] 2]
-        assert {$res1 eq {key1}}
-        assert {$res2 eq {key2}}
+        assert {$res1 eq {key1{t}}}
+        assert {$res2 eq {key2{t}}}
     }
 
     test {Different clients using different protocols can track the same key} {
@@ -382,7 +413,7 @@ start_server {tags {"tracking network"}} {
         $r CLIENT TRACKING OFF
     }
 
-    test {hdel deliver invlidate message after response in the same connection} {
+    test {hdel deliver invalidate message after response in the same connection} {
         r CLIENT TRACKING off
         r HELLO 3
         r CLIENT TRACKING on
@@ -437,7 +468,11 @@ start_server {tags {"tracking network"}} {
         r CLIENT TRACKING off
         r HELLO 3
         r CLIENT TRACKING on
-        set used [s used_memory]
+
+        # make the previous test is really done before sampling used_memory
+        wait_lazyfree_done r
+
+        set used [expr {[s used_memory] - [s mem_not_counted_for_evict]}]
         set limit [expr {$used+100*1024}]
         set old_policy [lindex [r config get maxmemory-policy] 1]
         r config set maxmemory $limit
@@ -449,7 +484,7 @@ start_server {tags {"tracking network"}} {
         # We use SETBIT here, so we can set a big key and get the used_memory
         # bigger than maxmemory. Next command will evict volatile keys. We
         # can't use SET, as SET uses big input buffer, so it will fail.
-        r setbit big-key 1000000 0
+        r setbit big-key 1600000 0 ;# this will consume 200kb
         # volatile-key is evicted before response.
         set res [r getbit big-key 0]
         assert_equal $res {invalidate volatile-key}
@@ -480,9 +515,9 @@ start_server {tags {"tracking network"}} {
     test {Tracking gets notification on tracking table key eviction} {
         r CLIENT TRACKING off
         r CLIENT TRACKING on REDIRECT $redir_id NOLOOP
-        r MSET key1 1 key2 2
+        r MSET key1{t} 1 key2{t} 2
         # Let the server track the two keys for us
-        r MGET key1 key2
+        r MGET key1{t} key2{t}
         # Force the eviction of all the keys but one:
         r config set tracking-table-max-keys 1
         # Note that we may have other keys in the table for this client,
@@ -492,11 +527,11 @@ start_server {tags {"tracking network"}} {
         # otherwise the test will die for timeout.
         while 1 {
             set keys [lindex [$rd_redirection read] 2]
-            if {$keys eq {key1} || $keys eq {key2}} break
+            if {$keys eq {key1{t}} || $keys eq {key2{t}}} break
         }
         # We should receive an expire notification for one of
         # the two keys (only one must remain)
-        assert {$keys eq {key1} || $keys eq {key2}}
+        assert {$keys eq {key1{t}} || $keys eq {key2{t}}}
     }
 
     test {Invalidation message received for flushall} {
@@ -839,4 +874,29 @@ start_server {tags {"tracking network"}} {
     $rd_redirection close
     $rd_sg close
     $rd close
+}
+
+# Just some extra covergae for --log-req-res, because we do not
+# run the full tracking unit in that mode
+start_server {tags {"tracking network"}} {
+    test {Coverage: Basic CLIENT CACHING} {
+        set rd_redirection [redis_deferring_client]
+        $rd_redirection client id
+        set redir_id [$rd_redirection read]
+        assert_equal {OK} [r CLIENT TRACKING on OPTIN REDIRECT $redir_id]
+        assert_equal {OK} [r CLIENT CACHING yes]
+        r CLIENT TRACKING off
+    } {OK}
+
+    test {Coverage: Basic CLIENT REPLY} {
+        r CLIENT REPLY on
+    } {OK}
+
+    test {Coverage: Basic CLIENT TRACKINGINFO} {
+        r CLIENT TRACKINGINFO
+    } {flags off redirect -1 prefixes {}}
+
+    test {Coverage: Basic CLIENT GETREDIR} {
+        r CLIENT GETREDIR
+    } {-1}
 }

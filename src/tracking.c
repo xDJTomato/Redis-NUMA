@@ -214,26 +214,32 @@ void enableTracking(client *c, uint64_t redirect_to, uint64_t options, robj **pr
  * to the keys the user fetched, so that Redis will know what are the clients
  * that should receive an invalidation message with certain groups of keys
  * are modified. */
-void trackingRememberKeys(client *c) {
+void trackingRememberKeys(client *tracking, client *executing) {
     /* Return if we are in optin/out mode and the right CACHING command
      * was/wasn't given in order to modify the default behavior. */
-    uint64_t optin = c->flags & CLIENT_TRACKING_OPTIN;
-    uint64_t optout = c->flags & CLIENT_TRACKING_OPTOUT;
-    uint64_t caching_given = c->flags & CLIENT_TRACKING_CACHING;
+    uint64_t optin = tracking->flags & CLIENT_TRACKING_OPTIN;
+    uint64_t optout = tracking->flags & CLIENT_TRACKING_OPTOUT;
+    uint64_t caching_given = tracking->flags & CLIENT_TRACKING_CACHING;
     if ((optin && !caching_given) || (optout && caching_given)) return;
 
     getKeysResult result = GETKEYS_RESULT_INIT;
-    int numkeys = getKeysFromCommand(c->cmd,c->argv,c->argc,&result);
+    int numkeys = getKeysFromCommand(executing->cmd,executing->argv,executing->argc,&result);
     if (!numkeys) {
         getKeysFreeResult(&result);
         return;
     }
+    /* Shard channels are treated as special keys for client
+     * library to rely on `COMMAND` command to discover the node
+     * to connect to. These channels doesn't need to be tracked. */
+    if (executing->cmd->flags & CMD_PUBSUB) {
+        return;
+    }
 
-    int *keys = result.keys;
+    keyReference *keys = result.keys;
 
     for(int j = 0; j < numkeys; j++) {
-        int idx = keys[j];
-        sds sdskey = c->argv[idx]->ptr;
+        int idx = keys[j].pos;
+        sds sdskey = executing->argv[idx]->ptr;
         rax *ids = raxFind(TrackingTable,(unsigned char*)sdskey,sdslen(sdskey));
         if (ids == raxNotFound) {
             ids = raxNew();
@@ -241,7 +247,7 @@ void trackingRememberKeys(client *c) {
                                         sdslen(sdskey),ids, NULL);
             serverAssert(inserted == 1);
         }
-        if (raxTryInsert(ids,(unsigned char*)&c->id,sizeof(c->id),NULL,NULL))
+        if (raxTryInsert(ids,(unsigned char*)&tracking->id,sizeof(tracking->id),NULL,NULL))
             TrackingTableTotalItems++;
     }
     getKeysFreeResult(&result);
@@ -249,7 +255,7 @@ void trackingRememberKeys(client *c) {
 
 /* Given a key name, this function sends an invalidation message in the
  * proper channel (depending on RESP version: PubSub or Push message) and
- * to the proper client (in case fo redirection), in the context of the
+ * to the proper client (in case of redirection), in the context of the
  * client 'c' with tracking enabled.
  *
  * In case the 'proto' argument is non zero, the function will assume that
@@ -296,7 +302,7 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
     } else if (using_redirection && c->flags & CLIENT_PUBSUB) {
         /* We use a static object to speedup things, however we assume
          * that addReplyPubsubMessage() will not take a reference. */
-        addReplyPubsubMessage(c,TrackingChannelName,NULL);
+        addReplyPubsubMessage(c,TrackingChannelName,NULL,shared.messagebulk);
     } else {
         /* If are here, the client is not using RESP3, nor is
          * redirecting to another client. We can't send anything to
@@ -313,6 +319,7 @@ void sendTrackingMessage(client *c, char *keyname, size_t keylen, int proto) {
         addReplyArrayLen(c,1);
         addReplyBulkCBuffer(c,keyname,keylen);
     }
+    updateClientMemUsageAndBucket(c);
     if (!(old_flags & CLIENT_PUSHING)) c->flags &= ~CLIENT_PUSHING;
 }
 
@@ -398,7 +405,7 @@ void trackingInvalidateKey(client *c, robj *keyobj, int bcast) {
         /* If target is current client and it's executing a command, we need schedule key invalidation.
          * As the invalidation messages may be interleaved with command
          * response and should after command response. */
-        if (target == server.current_client && server.fixed_time_expire) {
+        if (target == server.current_client && (server.current_client->flags & CLIENT_EXECUTING_COMMAND)) {
             incrRefCount(keyobj);
             listAddNodeTail(server.tracking_pending_keys, keyobj);
         } else {
@@ -414,8 +421,12 @@ void trackingInvalidateKey(client *c, robj *keyobj, int bcast) {
     raxRemove(TrackingTable,(unsigned char*)key,keylen,NULL);
 }
 
-void trackingHandlePendingKeyInvalidations() {
+void trackingHandlePendingKeyInvalidations(void) {
     if (!listLength(server.tracking_pending_keys)) return;
+
+    /* Flush pending invalidation messages only when we are not in nested call.
+     * So the messages are not interleaved with transaction response. */
+    if (server.execution_nesting) return;
 
     listNode *ln;
     listIter li;
@@ -491,7 +502,7 @@ void trackingInvalidateKeysOnFlush(int async) {
  *
  * So Redis allows the user to configure a maximum number of keys for the
  * invalidation table. This function makes sure that we don't go over the
- * specified fill rate: if we are over, we can just evict informations about
+ * specified fill rate: if we are over, we can just evict information about
  * a random key, and send invalidation messages to clients like if the key was
  * modified. */
 void trackingLimitUsedSlots(void) {
@@ -538,7 +549,7 @@ void trackingLimitUsedSlots(void) {
  * include keys that were modified the last time by this client, in order
  * to implement the NOLOOP option.
  *
- * If the resultin array would be empty, NULL is returned instead. */
+ * If the resulting array would be empty, NULL is returned instead. */
 sds trackingBuildBroadcastReply(client *c, rax *keys) {
     raxIterator ri;
     uint64_t count;

@@ -1,0 +1,19 @@
+{
+    "NUMA": {
+        "summary": "A container for NUMA-aware memory management commands.",
+        "complexity": "Depends on subcommand.",
+        "group": "server",
+        "since": "6.2.21",
+        "arity": -2,
+        "function": "numaCommand",
+        "doc_flags": [
+            "SYSCMD"
+        ],
+        "command_flags": [
+            "ADMIN",
+            "NOSCRIPT",
+            "LOADING",
+            "STALE"
+        ]
+    }
+}
