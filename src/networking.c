@@ -917,16 +917,6 @@ void addReplyBigNum(client *c, const char* num, size_t len) {
     }
 }
 
-void addReplyBigNum(client *c, const char* num, size_t len) {
-    if (c->resp == 2) {
-        addReplyBulkCBuffer(c, num, len);
-    } else {
-        addReplyProto(c,"(",1);
-        addReplyProto(c,num,len);
-        addReply(c,shared.crlf);
-    }
-}
-
 /* Add a long double as a bulk reply, but uses a human readable formatting
  * of the double instead of exposing the crude behavior of doubles to the
  * dear user. */
@@ -1229,18 +1219,6 @@ void copyReplicaOutputBuffer(client *dst, client *src) {
     dst->ref_repl_buf_node = src->ref_repl_buf_node;
     dst->ref_block_pos = src->ref_block_pos;
     ((replBufBlock *)listNodeValue(dst->ref_repl_buf_node))->refcount++;
-}
-
-/* Append the listed errors to the server error statistics. the input
- * list is not modified and remains the responsibility of the caller. */
-void deferredAfterErrorReply(client *c, list *errors) {
-    listIter li;
-    listNode *ln;
-    listRewind(errors,&li);
-    while((ln = listNext(&li))) {
-        sds err = ln->value;
-        afterErrorReply(c, err, sdslen(err));
-    }
 }
 
 /* Return true if the specified client has pending reply buffers to write to

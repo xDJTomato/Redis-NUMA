@@ -2773,7 +2773,6 @@ robj *tryObjectEncoding(robj *o);
 robj *tryObjectEncodingEx(robj *o, int try_trim);
 robj *getDecodedObject(robj *o);
 size_t stringObjectLen(robj *o);
-size_t objectComputeSize(robj *o, size_t sample_size);
 robj *createStringObjectFromLongLong(long long value);
 robj *createStringObjectFromLongLongForValue(long long value);
 robj *createStringObjectFromLongLongWithSds(long long value);

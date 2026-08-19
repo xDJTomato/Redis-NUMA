@@ -240,10 +240,6 @@ int _dictExpand(dict *d, unsigned long size, int* malloc_failed)
     if (newsize < size || newsize * sizeof(dictEntry*) < newsize)
         return DICT_ERR;
 
-    /* Detect overflows */
-    if (realsize < size || realsize * sizeof(dictEntry*) < realsize)
-        return DICT_ERR;
-
     /* Rehashing to the same table size is not useful. */
     if (new_ht_size_exp == d->ht_size_exp[0]) return DICT_ERR;
 

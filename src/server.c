@@ -3865,14 +3865,6 @@ uint64_t getCommandFlags(client *c) {
     return cmd_flags;
 }
 
-/* This is called after a command in call, we can do some maintenance job in it. */
-void afterCommand(client *c) {
-    UNUSED(c);
-    /* Flush pending invalidation messages only when we are not in nested call.
-     * So the messages are not interleaved with transaction response. */
-    if (!server.in_nested_call) trackingHandlePendingKeyInvalidations();
-}
-
 /* If this function gets called we already read a whole
  * command, arguments are in the client argv/argc fields.
  * processCommand() execute the command or prepare the

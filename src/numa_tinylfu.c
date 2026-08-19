@@ -29,7 +29,6 @@
 #include <sys/time.h>
 
 extern void _serverLog(int level, const char *fmt, ...);
-extern uint64_t dictGenHashFunction(const void *key, int len);
 
 #define LL_DEBUG   0
 #define LL_VERBOSE 1

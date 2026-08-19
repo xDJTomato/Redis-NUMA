@@ -13,6 +13,7 @@
 #include "quicklist.h"
 #include "intset.h"
 #include "ziplist.h"
+#include "listpack.h"
 #include <string.h>
 #include <stdio.h>
 #include <numa.h>
@@ -158,7 +159,7 @@ int numa_key_migrate_init(void) {
     }
     
     /* Initialize the metadata dict. */
-    global_ctx.key_metadata = dictCreate(&keyMetadataDictType, NULL);
+    global_ctx.key_metadata = dictCreate(&keyMetadataDictType);
     if (!global_ctx.key_metadata) {
         KEY_MIGRATE_LOG(LL_WARNING, "[NUMA Key Migrate] Failed to create metadata dict");
         return NUMA_KEY_MIGRATE_ENOMEM;
@@ -311,6 +312,7 @@ void *numa_object_sample_alloc_ptr(robj *val) {
 
     switch (val->encoding) {
     case OBJ_ENCODING_ZIPLIST:
+    case OBJ_ENCODING_LISTPACK:
     case OBJ_ENCODING_INTSET:
     case OBJ_ENCODING_QUICKLIST:
     case OBJ_ENCODING_SKIPLIST:
@@ -318,13 +320,10 @@ void *numa_object_sample_alloc_ptr(robj *val) {
         return val->ptr;
     case OBJ_ENCODING_HT: {
         dict *d = val->ptr;
-        dictEntry *sample = NULL;
-        for (int t = 0; t <= 1 && !sample; t++) {
-            if (!d->ht[t].table || d->ht[t].used == 0) continue;
-            for (unsigned long i = 0; i < d->ht[t].size && i < 8; i++) {
-                if (d->ht[t].table[i]) { sample = d->ht[t].table[i]; break; }
-            }
-        }
+        if (dictSize(d) == 0) return val->ptr;
+        dictIterator *iter = dictGetIterator(d);
+        dictEntry *sample = dictNext(iter);
+        dictReleaseIterator(iter);
         if (!sample) return val->ptr;
         if (val->type == OBJ_HASH) {
             sds value = dictGetVal(sample);
@@ -351,50 +350,40 @@ size_t numa_object_sample_alloc_size(robj *val) {
     if (val->encoding == OBJ_ENCODING_ZIPLIST)
         return ziplistBlobLen(val->ptr);
 
+    if (val->encoding == OBJ_ENCODING_LISTPACK)
+        return lpBytes(val->ptr);
+
     if (val->encoding == OBJ_ENCODING_INTSET)
         return intsetBlobLen(val->ptr);
 
     if (val->encoding == OBJ_ENCODING_HT) {
         dict *d = val->ptr;
-        dictEntry *sample_de = NULL;
         uint64_t sample_bytes = 0;
         uint64_t sample_count = 0;
-        for (int t = 0; t <= 1 && !sample_de; t++) {
-            if (!d->ht[t].table || d->ht[t].used == 0) continue;
-            for (unsigned long i = 0; i < d->ht[t].size && i < 8; i++) {
-                if (d->ht[t].table[i]) { sample_de = d->ht[t].table[i]; break; }
+        dictIterator *iter = dictGetIterator(d);
+        dictEntry *de;
+        while (sample_count < 8 && (de = dictNext(iter)) != NULL) {
+            if (val->type == OBJ_HASH) {
+                sds field = dictGetKey(de);
+                sds value = dictGetVal(de);
+                if (field) sample_bytes += sdsAllocSize(field);
+                if (value) sample_bytes += sdsAllocSize(value);
+            } else if (val->type == OBJ_SET) {
+                sds member = dictGetKey(de);
+                if (member) sample_bytes += sdsAllocSize(member);
             }
+            sample_bytes += dictEntryMemUsage();
+            sample_count++;
         }
-        for (int t = 0; t <= 1 && sample_count < 8; t++) {
-            if (!d->ht[t].table || d->ht[t].used == 0) continue;
-            for (unsigned long i = 0; i < d->ht[t].size && sample_count < 8; i++) {
-                dictEntry *de = d->ht[t].table[i];
-                while (de && sample_count < 8) {
-                    if (val->type == OBJ_HASH) {
-                        sds field = dictGetKey(de);
-                        sds value = dictGetVal(de);
-                        if (field) sample_bytes += sdsAllocSize(field);
-                        if (value) sample_bytes += sdsAllocSize(value);
-                    } else if (val->type == OBJ_SET) {
-                        sds member = dictGetKey(de);
-                        if (member) sample_bytes += sdsAllocSize(member);
-                    }
-                    sample_bytes += sizeof(dictEntry);
-                    sample_count++;
-                    de = de->next;
-                }
-            }
-        }
+        dictReleaseIterator(iter);
         if (sample_count > 0) {
             uint64_t elements = dictSize(d);
             uint64_t avg = (sample_bytes + sample_count - 1) / sample_count;
             uint64_t estimated = avg * elements;
-            uint64_t table_slots = d->ht[0].size + d->ht[1].size;
-            estimated += table_slots * sizeof(dictEntry *);
+            estimated += dictSlots(d) * sizeof(dictEntry *);
             if (estimated > SIZE_MAX) return SIZE_MAX;
             return (size_t)estimated;
         }
-        (void)sample_de;
     }
 
     return 0;
@@ -474,13 +463,14 @@ int migrate_string_type(robj *key_obj, robj *val_obj, int target_node) {
 int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
     (void)key_obj;  /* Unused parameter. */
     
-    if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
+    if (val_obj->encoding == OBJ_ENCODING_ZIPLIST || val_obj->encoding == OBJ_ENCODING_LISTPACK) {
         unsigned char *old_zl = val_obj->ptr;
         int cur_node = numa_get_node_id(old_zl);
         if (cur_node == target_node)
             return NUMA_KEY_MIGRATE_OK;
 
-        size_t zl_len = ziplistBlobLen(old_zl);
+        size_t zl_len = val_obj->encoding == OBJ_ENCODING_LISTPACK ?
+            lpBytes(old_zl) : ziplistBlobLen(old_zl);
 
         unsigned char *new_zl = numa_zmalloc_onnode(zl_len, target_node);
         if (!new_zl) {
@@ -494,7 +484,8 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
         numa_set_migrated(val_obj, 1);
 
         KEY_MIGRATE_LOG(LL_DEBUG,
-            "[NUMA Key Migrate] Hash (ziplist) migrated, size: %zu bytes", zl_len);
+            "[NUMA Key Migrate] Hash (%s) migrated, size: %zu bytes",
+            val_obj->encoding == OBJ_ENCODING_LISTPACK ? "listpack" : "ziplist", zl_len);
         return NUMA_KEY_MIGRATE_OK;
 
     } else if (val_obj->encoding == OBJ_ENCODING_HT) {
@@ -506,7 +497,7 @@ int migrate_hash_type(robj *key_obj, robj *val_obj, int target_node) {
         /* Hashtable encoding: migrate the dict and all sds field/value pairs.
          * Since SDS headers are complex, use the standard sds functions. */
         numa_alloc_push_node(target_node);
-        dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
+        dict *new_dict = dictCreate(old_dict->type);
         if (!new_dict) {
             numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
@@ -623,7 +614,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
             quicklistNode *cleanup = new_ql->head;
             while (cleanup) {
                 quicklistNode *next = cleanup->next;
-                if (cleanup->zl) zfree(cleanup->zl);
+                if (cleanup->entry) zfree(cleanup->entry);
                 zfree(cleanup);
                 cleanup = next;
             }
@@ -646,15 +637,15 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
         /* Migrate the ziplist data. */
         if (old_node->encoding == QUICKLIST_NODE_ENCODING_LZF) {
             /* LZF-compressed encoding. */
-            quicklistLZF *old_lzf = (quicklistLZF *)old_node->zl;
+            quicklistLZF *old_lzf = (quicklistLZF *)old_node->entry;
             size_t lzf_sz = sizeof(quicklistLZF) + old_lzf->sz;
-            new_node->zl = zmalloc(lzf_sz);
-            if (!new_node->zl) {
+            new_node->entry = zmalloc(lzf_sz);
+            if (!new_node->entry) {
                 zfree(new_node);
                 quicklistNode *cleanup = new_ql->head;
                 while (cleanup) {
                     quicklistNode *next = cleanup->next;
-                    if (cleanup->zl) zfree(cleanup->zl);
+                    if (cleanup->entry) zfree(cleanup->entry);
                     zfree(cleanup);
                     cleanup = next;
                 }
@@ -662,16 +653,16 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
                 numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
-            memcpy(new_node->zl, old_node->zl, lzf_sz);
+            memcpy(new_node->entry, old_node->entry, lzf_sz);
         } else {
             /* Plain ziplist. */
-            new_node->zl = zmalloc(old_node->sz);
-            if (!new_node->zl) {
+            new_node->entry = zmalloc(old_node->sz);
+            if (!new_node->entry) {
                 zfree(new_node);
                 quicklistNode *cleanup = new_ql->head;
                 while (cleanup) {
                     quicklistNode *next = cleanup->next;
-                    if (cleanup->zl) zfree(cleanup->zl);
+                    if (cleanup->entry) zfree(cleanup->entry);
                     zfree(cleanup);
                     cleanup = next;
                 }
@@ -679,7 +670,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
                 numa_alloc_pop_node();
                 return NUMA_KEY_MIGRATE_ENOMEM;
             }
-            memcpy(new_node->zl, old_node->zl, old_node->sz);
+            memcpy(new_node->entry, old_node->entry, old_node->sz);
         }
         
         /* Link the node. */
@@ -700,7 +691,7 @@ int migrate_list_type(robj *key_obj, robj *val_obj, int target_node) {
     old_node = old_ql->head;
     while (old_node) {
         quicklistNode *next = old_node->next;
-        if (old_node->zl) zfree(old_node->zl);
+        if (old_node->entry) zfree(old_node->entry);
         zfree(old_node);
         old_node = next;
     }
@@ -743,7 +734,7 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
         numa_alloc_push_node(target_node);
 
         dict *old_dict = val_obj->ptr;
-        dict *new_dict = dictCreate(old_dict->type, old_dict->privdata);
+        dict *new_dict = dictCreate(old_dict->type);
         if (!new_dict) {
             numa_alloc_pop_node();
             return NUMA_KEY_MIGRATE_ENOMEM;
@@ -802,22 +793,24 @@ int migrate_set_type(robj *key_obj, robj *val_obj, int target_node) {
 int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
     (void)key_obj;  /* Unused parameter. */
 
-    if (val_obj->encoding == OBJ_ENCODING_ZIPLIST) {
-        /* Ziplist encoding: migrate as a whole. */
+    if (val_obj->encoding == OBJ_ENCODING_ZIPLIST || val_obj->encoding == OBJ_ENCODING_LISTPACK) {
+        /* Ziplist/listpack encoding: migrate as a whole. */
         unsigned char *old_zl = val_obj->ptr;
-        size_t zl_len = ziplistBlobLen(old_zl);
-        
+        size_t zl_len = val_obj->encoding == OBJ_ENCODING_LISTPACK ?
+            lpBytes(old_zl) : ziplistBlobLen(old_zl);
+
         unsigned char *new_zl = numa_zmalloc_onnode(zl_len, target_node);
         if (!new_zl) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
-        
+
         memcpy(new_zl, old_zl, zl_len);
         val_obj->ptr = new_zl;
         zfree(old_zl);
-        
-        KEY_MIGRATE_LOG(LL_DEBUG, 
-            "[NUMA Key Migrate] Zset (ziplist) migrated, size: %zu bytes", zl_len);
+
+        KEY_MIGRATE_LOG(LL_DEBUG,
+            "[NUMA Key Migrate] Zset (%s) migrated, size: %zu bytes",
+            val_obj->encoding == OBJ_ENCODING_LISTPACK ? "listpack" : "ziplist", zl_len);
         return NUMA_KEY_MIGRATE_OK;
         
     } else if (val_obj->encoding == OBJ_ENCODING_SKIPLIST) {
@@ -839,7 +832,7 @@ int migrate_zset_type(robj *key_obj, robj *val_obj, int target_node) {
             return NUMA_KEY_MIGRATE_ENOMEM;
         }
 
-        new_zs->dict = dictCreate(old_zs->dict->type, old_zs->dict->privdata);
+        new_zs->dict = dictCreate(old_zs->dict->type);
         if (!new_zs->dict) {
             zslFree(new_zs->zsl);
             zfree(new_zs);

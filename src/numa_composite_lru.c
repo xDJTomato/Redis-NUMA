@@ -96,7 +96,7 @@ static uint64_t heat_map_hash(const void *key) {
      * pointer hashing dictFetchValue would always miss, adding a new entry on
      * every threshold crossing and never updating the old one, causing memory
      * leaks and repeated idle migrations. */
-    return dictGenHashFunction(key, (int)sdslen((const sds)key));
+    return dictGenHashFunction(key, sdslen((const sds)key));
 }
 
 static int heat_map_key_compare(void *privdata, const void *key1, const void *key2) {
@@ -692,7 +692,7 @@ int composite_lru_init(numa_strategy_t *strategy) {
     data->scan_iter        = NULL;
 
     /* Create the dictionary fallback heat map. */
-    data->key_heat_map = dictCreate(&heat_map_dict_type, NULL);
+    data->key_heat_map = dictCreate(&heat_map_dict_type);
     if (!data->key_heat_map) {
         zfree(data->hot_candidates);
         zfree(data);
