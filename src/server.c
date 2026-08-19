@@ -3627,14 +3627,6 @@ void call(client *c, int flags) {
         replicationFeedMonitors(c,server.monitors,c->db->id,argv,argc);
     }
 
-    /* Send the command to clients in MONITOR mode if applicable.
-     * Administrative commands are considered too dangerous to be shown. */
-    if (!(c->cmd->flags & (CMD_SKIP_MONITOR|CMD_ADMIN))) {
-        robj **argv = c->original_argv ? c->original_argv : c->argv;
-        int argc = c->original_argv ? c->original_argc : c->argc;
-        replicationFeedMonitors(c,server.monitors,c->db->id,argv,argc);
-    }
-
     /* Clear the original argv.
      * If the client is blocked we will handle slowlog when it is unblocked. */
     if (!(c->flags & CLIENT_BLOCKED))
