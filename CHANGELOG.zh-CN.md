@@ -5,6 +5,71 @@
 
 > 本文档是 [`CHANGELOG.md`](CHANGELOG.md) 的中文版本；英文版是权威原文，两者并存。
 
+## [未发布] — NUMA 迁移策略收敛（ADR-08）
+
+### 变更（破坏性）
+
+- **三个迁移策略（`caat`/`composite_lru`/`tinylfu`）现在唯一存在于 NUMAflow
+  原子操作引擎中**（`numaflow/src/nf_strategy.c`）——内核原生实现
+  （`src/numa_strategy_slots.{c,h}`、`src/numa_composite_lru.{c,h}`、
+  `src/numa_tinylfu.{c,h}`）已被删除。详见
+  [`docs/new/09-architecture-decisions.md`](docs/new/09-architecture-decisions.md)
+  的 ADR-08。
+- `NUMA STRATEGY` 命令整体移除（slot 的 insert/enable/disable/schedule/
+  status/list）。改用 `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT` 以及新增的
+  `NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>`。
+- 移除 `numa-migrate-config` / `NUMA CONFIG LOAD`（composite-lru JSON 热重载）。
+  替换为 `numa-flow-default-strategy`（默认 `caat`）与
+  `numa-flow-interval-sec`，启动时自动作为 NUMAflow 的 `default` 工作流条目
+  加载——现在不需要手动 `NUMA FLOW LOAD` 就能得到迁移行为。`composite_lru.json`
+  仍保留在仓库中，但只作为字段名参考；内核不再读取它。
+- `NUMA CONFIG GET`/`NUMA MIGRATE STATS` 的响应不再包含
+  `access_tracking_enabled`/`locality_stats_enabled`/`debug_logging_enabled`/
+  `composite_*`/`accesses_local`/`accesses_remote`/`tinylfu_*` 字段（它们的数据
+  来源已不存在）。`NUMA MIGRATE SCAN` 现在改为执行一次 NUMAflow 的 `default`
+  条目，而不是一次 composite-lru 扫描；`COUNT` 参数为兼容旧 CLI 而保留，但会被
+  忽略。
+- 默认迁移行为从 Composite LRU 改为 CAAT（Cost-Aware Adaptive Tiering）——
+  ADR-04 自己的评测显示 CAAT 的净代价比 Composite LRU 低约 37%。
+
+### 修复
+
+- **TinyLFU 和 CAAT 通过 Redis 集成（`src/numa_flow.c`）实际上从未真正迁移过
+  任何数据**，这个问题在本次收敛之前就已经存在——`cms_estimate`（Count-Min
+  Sketch 的频率读取）永远返回 0，因为桥接层里没有任何地方调用
+  `nf_tracker_observe()`（CMS 的写入入口）；只有 numaflow 自己的独立基准测试
+  harness（`numaflow/src/nf_bench.c`）会调用它，这也是为什么 `ADR-04` 的评测
+  数字是真实的，但真实的桥接路径却一直静默失效。修复方式是让追踪器从
+  `numa_key_migrate_touch()` 同一条真实访问路径喂数据：新增
+  `numa_flow_observe_access()`（`src/numa_flow.c`/`.h`），在 `src/db.c` 里每次
+  真实 key 访问时调用。
+- **CAAT 还会丢失每一个被降级、但没有同时满足晋升条件的 item**
+  （`numaflow/src/nf_strategy.c` 的 `build_caat`，以及 `numaflow/src/nf_adapt.c`
+  里等价的 `NF_ADAPT_AGGRESSIVE` 模板）。`nf_exec_run()` 的结果只是图中所有
+  *终止（sink）节点*输出的并集；旧版是一条线性链，降级阶段的变更直接喂给晋升
+  阶段的过滤器，于是一个被降级但没通过晋升过滤条件的 item，会在到达任何终止
+  节点之前就被丢弃——它的降级其实已经真实执行过，但桥接层从未看到、也从未
+  上报/应用。修复方式是在两个阶段各自发生任何变更之前，先按每个 item 的原始
+  驻留位置分叉图结构（通过 `filter_local`/`filter_remote` 原子操作），让每个
+  item 最多被变更一次，并且总能到达且仅到达一个终止节点。用一个独立的
+  harness 直接驱动真实的桥接/引擎代码端到端验证了修复效果。
+- 之前，per-key 热度追踪（zmalloc 分配前缀上的 `numa_get_hotness`/
+  `numa_get_access_count`）只在（现已移除的）Composite LRU/TinyLFU 槎位启用时
+  才会更新。现在通过 `numa_key_migrate_touch()`
+  （`src/numa_key_migrate.c`/`src/db.c`）无条件更新，这样无论当前启用哪个（或
+  不启用任何）迁移策略，NUMAflow 的 `enumerate()` 都能拿到一个真实信号。
+- `numa_configurable_strategy` 的 `PRESSURE_AWARE` 分配策略此前读取
+  `numa_config_get_node_utilization()`——一个无上限的、以 GB 为单位的字节计数
+  器，而不是一个 0.0–1.0 的比例——却拿它去和一个 `1.0` 的最小种子值比较，一旦
+  任何节点分配超过 1GB 就会悄悄破坏节点排序。现在改为读取 `evict_numa` 同样
+  使用的、规范的 `numa_bw_get_node_pressure()` 信号。
+- `evict_numa.c` 和 `numa_configurable_strategy.c` 曾各自维护一套独立的
+  节点压力计算逻辑，公式和缓存 TTL 都不同。现已合并为单一的
+  `numa_bw_get_node_pressure()`（`src/numa_bw_monitor.c`）。
+- `WEIGHTED_INTERLEAVE` 曾是 `WEIGHTED` 加权随机节点选择循环的逐字节复制，
+  唯一区别只是读取哪个权重数组。现在两种情况共用同一个
+  `select_weighted_node()` 辅助函数。
+
 ## [未发布] — `feat/redis7-port` 分支上的 Redis 7 迁移
 
 ### 变更

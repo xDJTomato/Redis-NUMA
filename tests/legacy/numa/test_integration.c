@@ -1,5 +1,10 @@
 /*
  * Integration test: Composite LRU + PREFIX Heat Tracking
+ *
+ * ARCHIVED (ADR-08, docs/new/09-architecture-decisions.md): src/numa_composite_lru.h
+ * has been removed - Composite LRU now lives only as a NUMAflow preset
+ * (numaflow/src/nf_strategy.c's build_composite_lru). This file will not
+ * compile against the current tree; kept for historical reference only.
  */
 
 #define _GNU_SOURCE

@@ -68,31 +68,44 @@ allocator. You need `libnuma-dev` (Debian/Ubuntu) or `numactl-devel`
 
 ## What's in this fork
 
-Ten modules layered on top of Redis core, all guarded by `#ifdef HAVE_NUMA`
-(see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full breakdown):
+Eight modules layered on top of Redis core, all guarded by `#ifdef HAVE_NUMA`,
+plus the NUMAflow atomic-op engine (`numaflow/`) which now owns all
+migration-strategy logic (see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
+full breakdown):
 
 - **numa_pool** — custom allocator: 33 size classes, bitmap-managed
   two-tier slab allocation (small/large) with a thread-local cache
   (tcache) for a lock-free fast path.
 - **numa_migrate** / **numa_key_migrate** — block- and key-granular
   cross-node migration, with full type adapters for STRING/HASH/LIST/SET/ZSET.
-- **numa_strategy_slots** + **numa_composite_lru** + **numa_tinylfu** — a
-  16-slot pluggable migration-strategy framework; Composite LRU is the
-  default (slot 1), TinyLFU is available but disabled by default (slot 2).
-- **numa_configurable_strategy** — 9 allocation strategies at the `zmalloc`
-  layer (LOCAL_FIRST, INTERLEAVE, ROUND_ROBIN, WEIGHTED, PRESSURE_AWARE,
-  CXL_OPTIMIZED, WEIGHTED_INTERLEAVE, ADAPTIVE, LATENCY_AWARE).
-- **numa_command** — the unified `NUMA` command (`MIGRATE`/`CONFIG`/`STRATEGY`).
-- **numa_bw_monitor** — real-time per-node bandwidth monitoring.
+- **numa_configurable_strategy** — 7 independent allocation strategies at the
+  `zmalloc` layer (LOCAL_FIRST, INTERLEAVE, ROUND_ROBIN, WEIGHTED/
+  WEIGHTED_INTERLEAVE share one weighted-random implementation,
+  PRESSURE_AWARE, CXL_OPTIMIZED). ADAPTIVE/LATENCY_AWARE are kernel-side
+  placeholders whose real implementation lives in NUMAflow.
+- **numa_command** — the unified `NUMA` command (`MIGRATE`/`CONFIG`/`FLOW`).
+- **numa_bw_monitor** — real-time per-node bandwidth monitoring, plus the
+  canonical node-pressure getter shared with `evict_numa`.
 - **evict_numa** — NUMA-aware eviction that demotes keys before evicting them.
-- **numa_flow.c** — bridges Redis to the NUMAflow subsystem's strategy
-  catalog via `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`.
+- **numa_flow.c** — the Redis-side bridge to the NUMAflow atomic-op engine.
+  Migration strategy (`caat`/`composite_lru`/`tinylfu`/`noop`) is implemented
+  *only* here, as NUMAflow DAG presets — there is no native kernel
+  implementation. Auto-loads `numa-flow-default-strategy` (default `caat`)
+  at startup; switch it at runtime with `NUMA FLOW DEFAULT <name>` or load
+  custom workflows with `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`.
+
+The old 16-slot vtable strategy framework (`numa_strategy_slots`) and its
+native Composite LRU / TinyLFU implementations have been retired — see ADR-08
+in `docs/new/09-architecture-decisions.md`.
 
 ## Configuration
 
 - `redis.conf` lines 1184-1208: `numa-demote-*` settings.
-- `redis.conf` lines 2342-2354: `numa-enabled` and `numa-migrate-config`
-  (points at `composite_lru.json`).
+- `redis.conf` numa migration section: `numa-enabled`,
+  `numa-flow-default-strategy` (default `caat`; also accepts
+  `composite_lru`/`tinylfu`/`noop`), `numa-flow-interval-sec`.
+  `composite_lru.json` is kept only as a field-name reference for custom
+  NUMAflow workflow JSON — the kernel no longer reads it.
 
 ## Documentation map
 

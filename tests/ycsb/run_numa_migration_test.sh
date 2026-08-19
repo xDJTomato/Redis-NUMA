@@ -190,27 +190,15 @@ config_numa() {
     log_info "当前 NUMA 配置:"
     "$REDIS_CLI" -h 127.0.0.1 -p "$REDIS_PORT" NUMA CONFIG GET 2>/dev/null || true
 
-    # 创建复合 LRU 配置文件 (降低阈值，更容易触发迁移)
-    local config_file="/tmp/composite_lru_migration.json"
-    cat > "$config_file" <<EOF
-{
-    "migrate_hotness_threshold": $MIGRATION_THRESHOLD,
-    "hot_candidates_size": 512,
-    "scan_batch_size": 500,
-    "decay_threshold_sec": 5,
-    "auto_migrate_enabled": 1,
-    "overload_threshold": 0.8,
-    "bandwidth_threshold": 0.9,
-    "pressure_threshold": 0.7,
-    "stability_count": 2
-}
-EOF
-
-    log_info "加载复合 LRU 配置 (阈值=$MIGRATION_THRESHOLD)"
-    "$REDIS_CLI" -h 127.0.0.1 -p "$REDIS_PORT" NUMA CONFIG LOAD "$config_file" 2>/dev/null || {
-        log_warn "CONFIG LOAD 失败，尝试手动配置"
-        "$REDIS_CLI" -h 127.0.0.1 -p "$REDIS_PORT" NUMA STRATEGY SLOT 1 composite-lru 2>/dev/null || true
-    }
+    # ADR-08 之后 Composite LRU 只作为 NUMAflow 预设存在
+    # (numaflow/src/nf_strategy.c 的 build_composite_lru，固定
+    # filter_hot threshold=5)，不再支持通过 composite_lru.json 微调
+    # migrate_hotness_threshold；如需自定义阈值，写一份自定义 NUMAflow
+    # workflow JSON 并用 `NUMA FLOW LOAD` 加载。这里退化为直接切换到内置
+    # 预设，忽略 --threshold（$MIGRATION_THRESHOLD）。
+    log_info "切换到 Composite LRU 策略 (NUMA FLOW DEFAULT composite_lru)"
+    "$REDIS_CLI" -h 127.0.0.1 -p "$REDIS_PORT" NUMA FLOW DEFAULT composite_lru 2>/dev/null || \
+        log_warn "NUMA FLOW DEFAULT composite_lru 失败"
 }
 
 # ── 加载数据 ───────────────────────────────────────────────────────────────
@@ -323,7 +311,7 @@ check_migration() {
         echo "无法获取策略统计"
 
     echo -e "\n${BOLD}${CYAN}策略列表:${NC}"
-    "$REDIS_CLI" -h 127.0.0.1 -p "$REDIS_PORT" NUMA STRATEGY LIST 2>/dev/null || \
+    "$REDIS_CLI" -h 127.0.0.1 -p "$REDIS_PORT" NUMA FLOW LIST 2>/dev/null || \
         echo "无法获取策略列表"
 
     echo -e "\n${BOLD}${CYAN}热点 Key 示例:${NC}"

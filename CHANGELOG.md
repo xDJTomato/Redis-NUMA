@@ -5,6 +5,85 @@
 All notable changes to this fork are documented here, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — NUMA migration-strategy consolidation (ADR-08)
+
+### Changed (breaking)
+
+- **All three migration strategies (`caat`/`composite_lru`/`tinylfu`) now
+  live exclusively in the NUMAflow atomic-op engine**
+  (`numaflow/src/nf_strategy.c`) — the native kernel implementations
+  (`src/numa_strategy_slots.{c,h}`, `src/numa_composite_lru.{c,h}`,
+  `src/numa_tinylfu.{c,h}`) have been deleted. See ADR-08 in
+  [`docs/new/09-architecture-decisions.md`](docs/new/09-architecture-decisions.md).
+- `NUMA STRATEGY` command removed entirely (slot insert/enable/disable/
+  schedule/status/list). Use `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`
+  and the new `NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>`.
+- `numa-migrate-config` / `NUMA CONFIG LOAD` (composite-lru JSON hot-reload)
+  removed. Replaced by `numa-flow-default-strategy` (default `caat`) and
+  `numa-flow-interval-sec`, auto-loaded at startup as the NUMAflow `default`
+  workflow entry — migration now runs out of the box without an explicit
+  `NUMA FLOW LOAD`. `composite_lru.json` stays in the repo as a field-name
+  reference only; the kernel no longer reads it.
+- `NUMA CONFIG GET`/`NUMA MIGRATE STATS` responses no longer include the
+  `access_tracking_enabled`/`locality_stats_enabled`/`debug_logging_enabled`/
+  `composite_*`/`accesses_local`/`accesses_remote`/`tinylfu_*` fields (their
+  source no longer exists). `NUMA MIGRATE SCAN` now runs the NUMAflow
+  `default` entry once instead of a composite-lru scan pass; `COUNT` is
+  accepted for CLI compatibility but ignored.
+- Default migration behavior changed from Composite LRU to CAAT
+  (Cost-Aware Adaptive Tiering) — ADR-04's own benchmark showed CAAT's net
+  cost is ~37% lower.
+
+### Fixed
+
+- **TinyLFU and CAAT never actually migrated anything through the Redis
+  integration** (`src/numa_flow.c`), even before this consolidation —
+  `cms_estimate` (the Count-Min Sketch frequency read) always returned 0
+  because nothing in the bridge ever called `nf_tracker_observe()` (the CMS
+  write side); only numaflow's own standalone benchmark harness
+  (`numaflow/src/nf_bench.c`) did that, which is why `ADR-04`'s benchmark
+  numbers were real but the live bridge path was silently inert. Fixed by
+  feeding the tracker from the same real access path as
+  `numa_key_migrate_touch()`: `numa_flow_observe_access()`
+  (`src/numa_flow.c`/`.h`), called from `src/db.c` on every real key access.
+- **CAAT additionally lost every demoted item that didn't also qualify for
+  promotion** (`numaflow/src/nf_strategy.c`'s `build_caat`, and the
+  equivalent `NF_ADAPT_AGGRESSIVE` template in `numaflow/src/nf_adapt.c`).
+  `nf_exec_run()`'s result is the union of graph *sink* node outputs only;
+  the old single linear chain fed demote's `emit_migrate` straight into the
+  promote phase's `filter_freq`/`filter_benefit`, so any item that got
+  demoted but didn't survive those filters was dropped from the graph
+  before reaching any sink — its demotion had already executed
+  (`current_node` mutated, `ctx.stats.migrations_done` incremented) but the
+  bridge's enumerate-vs-result diff never saw it, so the host's `apply()`
+  callback (what performs a *real* migration) was never called. Fixed by
+  forking the graph *before* either phase mutates anything, splitting on
+  each item's original residency: DRAM residents only ever go through
+  demote (decide, then a terminal `emit_migrate`), off-DRAM residents only
+  ever go through promote (filters narrow first, mutate last) — every item
+  is mutated at most once and always reaches exactly one sink. Verified
+  with a standalone harness exercising the real bridge/engine code
+  end-to-end: CAAT now correctly demotes cold DRAM residents *and* promotes
+  hot CXL residents in the same run.
+- Per-key hotness tracking (`numa_get_hotness`/`numa_get_access_count` on
+  the zmalloc allocation prefix) was previously only updated when the
+  now-removed Composite LRU/TinyLFU slots were enabled. It's now updated
+  unconditionally via `numa_key_migrate_touch()`
+  (`src/numa_key_migrate.c`/`src/db.c`), so NUMAflow's `enumerate()` keeps
+  a real signal regardless of which (if any) migration strategy is active.
+- `numa_configurable_strategy`'s `PRESSURE_AWARE` allocation strategy read
+  `numa_config_get_node_utilization()` — an unbounded GB-of-bytes counter,
+  not a 0.0-1.0 ratio — against a min-seed of `1.0`, silently breaking node
+  ranking once any node passed 1GB allocated. It now reads the same
+  canonical `numa_bw_get_node_pressure()` signal `evict_numa` uses.
+- `evict_numa.c` and `numa_configurable_strategy.c` each maintained an
+  independent node-pressure computation with different formulas and cache
+  TTLs. Consolidated into a single getter,
+  `numa_bw_get_node_pressure()` (`src/numa_bw_monitor.c`).
+- `WEIGHTED_INTERLEAVE` was a byte-for-byte duplicate of `WEIGHTED`'s
+  weighted-random node-selection loop, differing only in which weight array
+  it read. Both cases now call one shared `select_weighted_node()` helper.
+
 ## [Unreleased] — Redis 7 port on `feat/redis7-port`
 
 ### Changed

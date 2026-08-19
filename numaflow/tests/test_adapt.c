@@ -97,14 +97,14 @@ static void test_adapt(void) {
     a.mode = NF_ADAPT_CONSERVATIVE; nf_adapt_build_graph(&a, &g);
     CHECK(g.node_count == 7, "conservative has 7 nodes");
     a.mode = NF_ADAPT_AGGRESSIVE; nf_adapt_build_graph(&a, &g);
-    CHECK(g.node_count == 11, "aggressive has 11 nodes");
+    CHECK(g.node_count == 13, "aggressive has 13 nodes");
     a.mode = NF_ADAPT_BALANCED; nf_adapt_build_graph(&a, &g);
-    CHECK(g.node_count == 10, "balanced (CAAT) has 10 nodes");
+    CHECK(g.node_count == 12, "balanced (CAAT) has 12 nodes");
 
     /* apply_params writes tuned values back into the graph */
     a.mode = NF_ADAPT_BALANCED; nf_adapt_build_graph(&a, &g);
     nf_adapt_apply_params(&a, &g);
-    const nf_gnode_t *n = nf_graph_find_node(&g, "n3");
+    const nf_gnode_t *n = nf_graph_find_node(&g, "d1");
     CHECK(n != NULL && n->params.count > 0, "tuned param applied to graph");
     nf_graph_free(&g);
 }

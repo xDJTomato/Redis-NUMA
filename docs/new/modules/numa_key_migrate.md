@@ -8,10 +8,10 @@
 `numa_key_migrate` 把迁移的最小粒度从"一整块内存"提升到"一个 Redis key"：给定
 一个 `robj`，把它当前占用的全部内存（包括 value 内部所有子结构）搬到指定的
 NUMA 节点上，对客户端与其它模块完全透明。它是 [numa_migrate](numa_migrate.md)
-（裸的 `numa_alloc_onnode` + `memcpy` 块迁移原语）与
-[numa_composite_lru](numa_composite_lru.md) / [numa_tinylfu](numa_tinylfu.md)
-等上层迁移策略之间的桥梁：策略只负责"决定迁移哪个 key、迁到哪个节点"，具体
-"怎么把这个 key 安全地搬过去"完全由本模块承担。
+（裸的 `numa_alloc_onnode` + `memcpy` 块迁移原语）与 NUMAflow（[ADR-08](../09-architecture-decisions.md)
+之后，唯一的迁移策略来源，通过 Redis 桥接 `src/numa_flow.c` 驱动）之间的桥梁：
+策略只负责"决定迁移哪个 key、迁到哪个节点"，具体"怎么把这个 key 安全地搬过
+去"完全由本模块承担。
 
 核心职责边界：
 
@@ -61,8 +61,10 @@ void numa_reset_migration_statistics(void);
 
 调用方：`numa_migrate_single_key`（按 `robj*`）供 `NUMA MIGRATE KEY` 手动命令
 使用，内部走 `dictFind`；`numa_migrate_key_by_name`（按 SDS key 名）供
-Composite LRU / TinyLFU 的自动迁移路径使用——候选池里存的是 `sdsdup` 出来的
-key 名副本，两条入口共享同一套类型适配器，区别只在查找方式。
+NUMAflow 通过 `src/numa_flow.c` 桥接触发的自动迁移使用——桥接层的 `apply()`
+回调按 NUMAflow DAG 跑出来的迁移决策（`caat`/`composite_lru`/`tinylfu` 预设，
+均定义在 `numaflow/src/nf_strategy.c`）调用这个入口，两条入口共享同一套类型适
+配器，区别只在查找方式。
 
 ## 3. 内部结构与关键路径（Internal Structure & Key Paths）
 
@@ -136,25 +138,40 @@ numa_migrate_single_key(db, key, target_node)
   7. stats.successful_migrations++ / total_bytes_migrated += size
 ```
 
-### 3.4 LRU 集成的热度追踪与阶梯式惰性衰减
+### 3.4 无条件的热度追踪与阶梯式惰性衰减
 
 热度追踪不是本模块自己独立跑的定时任务，而是**挂在每次 key 访问的路径上**，
-由 [numa_composite_lru](numa_composite_lru.md) 的
-`composite_lru_record_access(strategy, key, val, current_time)` 驱动：
+由 `numa_key_migrate_touch(data_ptr, current_time)` 驱动——`src/db.c` 的
+`lookupKeyReadWithFlags()` 每次真实命中都无条件调用它：
 
 ```
-lookupKey() 命中
-  → composite_lru_record_access()
-      1. numa_get_hotness(val)              读 PREFIX 热度
+lookupKeyReadWithFlags() 命中
+  → numa_key_migrate_touch()                无条件调用，不判断任何策略是否启用
+      1. numa_get_hotness(data_ptr)              读 PREFIX 热度
       2. 按空闲时长做阶梯衰减（见下）
       3. 热度 +1，上限 7（HOTNESS_MAX_LEVEL）
       4. 写回 PREFIX（hotness / access_count / last_access）
-      5. 同步 key_numa_metadata_t 兼容字典（供扫描通道读取）
-      6. 热度首次越过阈值且不在本地节点 → 写入候选池
+  → numa_flow_observe_access(key->ptr)        单独喂 NUMAflow 的 CMS+Doorkeeper 频率估计器
 ```
 
-**阶梯式惰性衰减**（`src/numa_key_migrate.h` 常量，与
-`numa_composite_lru.h` 保持一致，避免两处热度语义漂移）：
+**[ADR-08](../09-architecture-decisions.md) 之后的两个关键变化**：
+
+1. `numa_key_migrate_touch()` 原来内联在已删除的 `composite_lru_record_access()`
+   里，被"槎位 1/2 是否 enabled"的判断锁着；现在提取成中立函数，从 `db.c` 无条
+   件调用，是 NUMAflow 的 `enumerate()`（通过桥接 `src/numa_flow.c`）读取的唯一
+   热度 ground truth，不再依赖任何迁移策略是否启用。上文"5. 同步
+   `key_numa_metadata_t` 兼容字典"/"6. 写入候选池"两步（原设计里紧跟在热度更新
+   之后）已经随 `numa_composite_lru.c` 一起删除——候选池是该模块自己的影子状态，
+   不是本模块的职责。
+2. 光更新 PREFIX 的热度/访问计数还不够——`cms_estimate`（TinyLFU/CAAT 用的
+   Count-Min Sketch 频率读，定义在 `numaflow/src/nf_ops.c`）读的是另一个信号
+   （频率而非热度），此前整条 Redis 桥接路径都没有调用过它唯一的写入口
+   `nf_tracker_observe()`，导致 `freq_est` 永远是 0（见
+   [ADR-09](../09-architecture-decisions.md)）。修复方式是新增
+   `numa_flow_observe_access()`（`src/numa_flow.c`/`.h`），从 `db.c` 里与
+   `numa_key_migrate_touch()` 完全同一个真实访问路径调用，两者现在总是成对触发。
+
+**阶梯式惰性衰减**（`src/numa_key_migrate.h` 常量）：
 
 | 空闲时长（LRU 时钟秒） | 衰减量 |
 | --- | --- |
@@ -190,13 +207,14 @@ lookupKey() 命中
 
 ## 5. 与其他模块的关系（Relations to Other Modules）
 
-- **被 [numa_composite_lru](numa_composite_lru.md) / [numa_tinylfu](numa_tinylfu.md)
-  调用**：两条策略的快速通道与扫描通道都通过 `numa_migrate_key_by_name()`（按
-  SDS key 名）触发实际迁移；策略层只做"决定"，本模块做"执行"。
+- **被 NUMAflow 桥接（`src/numa_flow.c`）调用**：`caat`/`composite_lru`/
+  `tinylfu` 三个预设（`numaflow/src/nf_strategy.c`）跑出的迁移决策，经桥接层的
+  `apply()` 回调，通过 `numa_migrate_key_by_name()`（按 SDS key 名）触发实际迁
+  移；策略只做"决定"，本模块做"执行"。
 - **被 [numa_command](numa_command.md) 调用**：`NUMA MIGRATE KEY` →
   `numa_migrate_single_key()`；`NUMA MIGRATE DB` →
-  `numa_migrate_entire_database()`；`NUMA MIGRATE SCAN` 触发的是 Composite LRU
-  的扫描通道，间接落到本模块的迁移入口。
+  `numa_migrate_entire_database()`；`NUMA MIGRATE SCAN` 触发的是 NUMAflow
+  `default` 工作流跑一次，间接落到本模块的迁移入口。
 - **依赖 [zmalloc_numa](zmalloc_numa.md)**：所有目标节点上的新内存分配都经过
   `zmalloc_onnode()` / `numa_zmalloc_onnode()`，由 `numa_alloc_push_node`/
   `pop_node` 建立的节点上下文决定实际落在哪个节点。
@@ -213,6 +231,8 @@ lookupKey() 命中
   `memcpy`），如果未来两种编码的内部布局出现语义差异（而不仅仅是长度计算函数
   不同），这里需要重新审视。
 - 大对象（如超大 hashtable/skiplist）的逐元素重建是同步阻塞操作，发生在
-  Redis 主线程内——没有分片/让出机制，这是 [17-ae-strategy-scheduler
-  的设计动机](ae_strategy_scheduler.md)之一，但目前 AE 调度覆盖的是"策略执行"
-  这一层，尚未下探到"单次大 key 迁移内部可中断"这一层。
+  Redis 主线程内——没有分片/让出机制。这曾是已退役的
+  [AE 策略调度器](ae_strategy_scheduler.md)（[ADR-08](../09-architecture-decisions.md)
+  之后随槎位框架一起失效）想解决的同一类问题的下一层："单次大 key 迁移内部可
+  中断"；NUMAflow 目前的调度模型（`numa_flow_cron()` 按 `interval_sec` 判断是否
+  该跑一次工作流）同样没有下探到这一层，一次 `apply()` 回调内部仍是不可中断的。

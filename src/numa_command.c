@@ -3,10 +3,14 @@
  * All NUMA-related Redis commands are implemented in this file, organized into sub-domains:
  *
  *   NUMA MIGRATE ...   - key-level migration (formerly NUMAMIGRATE)
- *   NUMA CONFIG  ...   - memory allocation policy + composite-lru JSON config (formerly NUMACONFIG + NUMAMIGRATE CONFIG)
- *   NUMA STRATEGY ...  - strategy slot management (new)
- *   NUMA FLOW     ...  - NUMAflow DAG workflow load/run/list/status (new)
+ *   NUMA CONFIG  ...   - memory allocation policy (formerly NUMACONFIG)
+ *   NUMA FLOW     ...  - NUMAflow DAG workflow load/run/list/status/default
  *   NUMA HELP          - help
+ *
+ * Migration strategy (caat/composite_lru/tinylfu/noop) lives entirely in the
+ * NUMAflow atomic-op engine (numaflow/src/nf_strategy.c) as of the retirement
+ * of the numa_strategy_slots vtable framework; NUMA FLOW is its only command
+ * surface, including switching the auto-loaded default via NUMA FLOW DEFAULT.
  *
  * Business logic (statistics/migration execution, etc.) stays in its own modules; this file only handles argument parsing and addReply*.
  */
@@ -14,9 +18,6 @@
 #define _GNU_SOURCE
 #include "server.h"
 #include "numa_key_migrate.h"
-#include "numa_composite_lru.h"
-#include "numa_tinylfu.h"
-#include "numa_strategy_slots.h"
 #include "numa_configurable_strategy.h"
 #include "numa_flow.h"
 #include "numa_pool.h"
@@ -128,42 +129,7 @@ static void numa_cmd_migrate(client *c) {
         numa_key_migrate_stats_t stats;
         numa_get_migration_statistics(&stats);
 
-        /* Composite LRU access distribution stats. */
-        uint64_t acc_local = 0, acc_remote = 0;
-        numa_strategy_t *clru = numa_strategy_slot_get(1);
-        if (clru && clru->private_data) {
-            composite_lru_data_t *d = clru->private_data;
-            acc_local  = d->accesses_local;
-            acc_remote = d->accesses_remote;
-        }
-
-        /* TinyLFU stats. */
-        uint64_t tlfu_accesses = 0, tlfu_filtered = 0, tlfu_enqueued = 0;
-        uint64_t tlfu_migrated = 0, tlfu_failed = 0, tlfu_resets = 0;
-        uint64_t tlfu_acc_local = 0, tlfu_acc_remote = 0;
-        uint64_t tlfu_acc_node0 = 0, tlfu_acc_node1 = 0, tlfu_acc_node2 = 0, tlfu_acc_node3 = 0;
-        uint64_t tlfu_acc_unknown = 0;
-        int tlfu_enabled = 0;
-        numa_strategy_t *tlfu = numa_strategy_slot_get(2);
-        if (tlfu && tlfu->private_data) {
-            tinylfu_data_t *td = tlfu->private_data;
-            tlfu_enabled = tlfu->enabled;
-            tlfu_accesses = td->stat_accesses;
-            tlfu_filtered = td->stat_doorkeeper_filtered;
-            tlfu_enqueued = td->stat_candidates_enqueued;
-            tlfu_migrated = td->stat_migrations_done;
-            tlfu_failed   = td->stat_migrations_failed;
-            tlfu_resets   = td->stat_resets;
-            tlfu_acc_local  = td->stat_accesses_local;
-            tlfu_acc_remote = td->stat_accesses_remote;
-            tlfu_acc_node0  = td->stat_accesses_node0;
-            tlfu_acc_node1  = td->stat_accesses_node1;
-            tlfu_acc_node2  = td->stat_accesses_node2;
-            tlfu_acc_node3  = td->stat_accesses_node3;
-            tlfu_acc_unknown = td->stat_accesses_unknown;
-        }
-
-        addReplyArrayLen(c, 50);
+        addReplyArrayLen(c, 18);
         addReplyBulkCString(c, "total_migrations");
         addReplyLongLong(c, stats.total_migrations);
         addReplyBulkCString(c, "successful_migrations");
@@ -176,10 +142,6 @@ static void numa_cmd_migrate(client *c) {
         addReplyLongLong(c, stats.total_migration_time_us);
         addReplyBulkCString(c, "peak_concurrent_migrations");
         addReplyLongLong(c, stats.peak_concurrent_migrations);
-        addReplyBulkCString(c, "accesses_local");
-        addReplyLongLong(c, acc_local);
-        addReplyBulkCString(c, "accesses_remote");
-        addReplyLongLong(c, acc_remote);
         {
             extern redisAtomic unsigned long long dboverwrite_realloc_count;
             extern redisAtomic unsigned long long dboverwrite_check_count;
@@ -195,34 +157,6 @@ static void numa_cmd_migrate(client *c) {
             addReplyBulkCString(c, "dbset_overwrite_seen");
             addReplyLongLong(c, sc);
         }
-        addReplyBulkCString(c, "tinylfu_enabled");
-        addReplyLongLong(c, tlfu_enabled);
-        addReplyBulkCString(c, "tinylfu_accesses");
-        addReplyLongLong(c, tlfu_accesses);
-        addReplyBulkCString(c, "tinylfu_doorkeeper_filtered");
-        addReplyLongLong(c, tlfu_filtered);
-        addReplyBulkCString(c, "tinylfu_candidates_enqueued");
-        addReplyLongLong(c, tlfu_enqueued);
-        addReplyBulkCString(c, "tinylfu_migrations_done");
-        addReplyLongLong(c, tlfu_migrated);
-        addReplyBulkCString(c, "tinylfu_migrations_failed");
-        addReplyLongLong(c, tlfu_failed);
-        addReplyBulkCString(c, "tinylfu_resets");
-        addReplyLongLong(c, tlfu_resets);
-        addReplyBulkCString(c, "tinylfu_accesses_local");
-        addReplyLongLong(c, tlfu_acc_local);
-        addReplyBulkCString(c, "tinylfu_accesses_remote");
-        addReplyLongLong(c, tlfu_acc_remote);
-        addReplyBulkCString(c, "tinylfu_accesses_node0");
-        addReplyLongLong(c, tlfu_acc_node0);
-        addReplyBulkCString(c, "tinylfu_accesses_node1");
-        addReplyLongLong(c, tlfu_acc_node1);
-        addReplyBulkCString(c, "tinylfu_accesses_node2");
-        addReplyLongLong(c, tlfu_acc_node2);
-        addReplyBulkCString(c, "tinylfu_accesses_node3");
-        addReplyLongLong(c, tlfu_acc_node3);
-        addReplyBulkCString(c, "tinylfu_accesses_unknown");
-        addReplyLongLong(c, tlfu_acc_unknown);
         return;
     }
 
@@ -278,35 +212,20 @@ static void numa_cmd_migrate(client *c) {
         return;
     }
 
-    /* NUMA MIGRATE SCAN [COUNT n] */
+    /* NUMA MIGRATE SCAN -- runs the "default" NUMAflow entry once on demand.
+     * COUNT is accepted for CLI compatibility but ignored: NUMAflow's per-run
+     * budget is a property of the workflow graph, not of this command. */
     if (!strcasecmp(sub, "SCAN")) {
-        uint32_t batch = 0;
-        /* argv: NUMA MIGRATE SCAN [COUNT n] → argc 3 or 5 */
-        if (c->argc >= 5 && !strcasecmp(c->argv[3]->ptr, "COUNT")) {
-            long cnt;
-            if (getLongFromObjectOrReply(c, c->argv[4], &cnt, "Invalid COUNT") != C_OK)
-                return;
-            if (cnt <= 0) {
-                addReplyError(c, "COUNT must be positive");
-                return;
-            }
-            batch = (uint32_t)cnt;
-        } else if (c->argc != 3) {
+        if (c->argc == 5 && strcasecmp(c->argv[3]->ptr, "COUNT") != 0) {
+            addReplyError(c, "Usage: NUMA MIGRATE SCAN [COUNT n]");
+            return;
+        } else if (c->argc != 3 && c->argc != 5) {
             addReplyError(c, "Usage: NUMA MIGRATE SCAN [COUNT n]");
             return;
         }
-        numa_strategy_t *strat = numa_strategy_slot_get(1);
-        if (!strat) {
-            addReplyError(c, "No active strategy on slot 1");
-            return;
-        }
-        if (batch == 0) {
-            composite_lru_data_t *d = strat->private_data;
-            batch = (d && d->config.scan_batch_size) ? d->config.scan_batch_size : 200;
-        }
         uint64_t scanned = 0, migrated = 0;
-        if (composite_lru_scan_once(strat, batch, &scanned, &migrated) != NUMA_STRATEGY_OK) {
-            addReplyError(c, "Scan failed");
+        if (numa_flow_run_default(&scanned, &migrated) != C_OK) {
+            addReplyError(c, "No default NUMA FLOW strategy loaded");
             return;
         }
         addReplyArrayLen(c, 4);
@@ -349,9 +268,19 @@ static void numa_cmd_config(client *c) {
             addReplyError(c, "NUMA configuration not available");
             return;
         }
-        addReplyArrayLen(c, 32);
+        addReplyArrayLen(c, 20);
         addReplyBulkCString(c, "strategy");
         addReplyBulkCString(c, get_strategy_name(cfg->strategy_type));
+        addReplyBulkCString(c, "strategy_note");
+        if (cfg->strategy_type == NUMA_STRATEGY_CONFIG_ADAPTIVE ||
+            cfg->strategy_type == NUMA_STRATEGY_CONFIG_LATENCY_AWARE) {
+            addReplyBulkCString(c,
+                "placeholder in the kernel allocator (behaves as LOCAL_FIRST); "
+                "full implementation is the matching alloc_* op in NUMAflow, "
+                "load it via NUMA FLOW LOAD");
+        } else {
+            addReplyBulkCString(c, "");
+        }
         addReplyBulkCString(c, "nodes");
         addReplyLongLong(c, cfg->num_nodes);
         addReplyBulkCString(c, "balance_threshold");
@@ -378,43 +307,6 @@ static void numa_cmd_config(client *c) {
             addReplyBulkCBuffer(c, nodes, sdslen(nodes));
             sdsfree(nodes);
         }
-        numa_strategy_t *strat = numa_strategy_slot_get(1);
-        char vbuf[64];
-        addReplyBulkCString(c, "access_tracking_enabled");
-        if (strat && composite_lru_get_config(strat, "access_tracking_enabled", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
-            addReplyBulkCString(c, vbuf);
-        else
-            addReplyBulkCString(c, "unavailable");
-        addReplyBulkCString(c, "locality_stats_enabled");
-        if (strat && composite_lru_get_config(strat, "locality_stats_enabled", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
-            addReplyBulkCString(c, vbuf);
-        else
-            addReplyBulkCString(c, "unavailable");
-        addReplyBulkCString(c, "debug_logging_enabled");
-        if (strat && composite_lru_get_config(strat, "debug_logging_enabled", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
-            addReplyBulkCString(c, vbuf);
-        else
-            addReplyBulkCString(c, "unavailable");
-        addReplyBulkCString(c, "composite_heat_updates");
-        if (strat && composite_lru_get_config(strat, "heat_updates", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
-            addReplyBulkCString(c, vbuf);
-        else
-            addReplyBulkCString(c, "unavailable");
-        addReplyBulkCString(c, "composite_migrations_triggered");
-        if (strat && composite_lru_get_config(strat, "migrations_triggered", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
-            addReplyBulkCString(c, vbuf);
-        else
-            addReplyBulkCString(c, "unavailable");
-        addReplyBulkCString(c, "composite_candidates_written");
-        if (strat && composite_lru_get_config(strat, "candidates_written", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
-            addReplyBulkCString(c, vbuf);
-        else
-            addReplyBulkCString(c, "unavailable");
-        addReplyBulkCString(c, "composite_scan_keys_checked");
-        if (strat && composite_lru_get_config(strat, "scan_keys_checked", vbuf, sizeof(vbuf)) == NUMA_STRATEGY_OK)
-            addReplyBulkCString(c, vbuf);
-        else
-            addReplyBulkCString(c, "unavailable");
         addReplyBulkCString(c, "node_weights");
         addReplyArrayLen(c, cfg->num_nodes);
         for (int i = 0; i < cfg->num_nodes; i++) {
@@ -538,60 +430,7 @@ static void numa_cmd_config(client *c) {
                 addReplyError(c, "Failed to set enabled nodes");
             return;
         }
-        if (!strcasecmp(param, "access_tracking") ||
-            !strcasecmp(param, "access_tracking_enabled") ||
-            !strcasecmp(param, "locality_stats") ||
-            !strcasecmp(param, "locality_stats_enabled") ||
-            !strcasecmp(param, "debug_logging") ||
-            !strcasecmp(param, "debug_logging_enabled") ||
-            !strcasecmp(param, "auto_migrate_enabled")) {
-            numa_strategy_t *strat = numa_strategy_slot_get(1);
-            if (!strat) {
-                addReplyError(c, "No active strategy on slot 1");
-                return;
-            }
-            char normalized[64];
-            const char *key = param;
-            if (!strcasecmp(param, "access_tracking")) key = "access_tracking_enabled";
-            if (!strcasecmp(param, "locality_stats")) key = "locality_stats_enabled";
-            if (!strcasecmp(param, "debug_logging")) key = "debug_logging_enabled";
-            snprintf(normalized, sizeof(normalized), "%s", key);
-            if (composite_lru_set_config(strat, normalized, val) == NUMA_STRATEGY_OK)
-                addReplyStatus(c, "OK");
-            else
-                addReplyError(c, "Failed to set composite-lru config");
-            return;
-        }
         addReplyErrorFormat(c, "Unknown NUMA CONFIG SET parameter: %s", param);
-        return;
-    }
-
-    /* NUMA CONFIG LOAD [/path] -- hot-load the composite-lru JSON. */
-    if (!strcasecmp(sub, "LOAD")) {
-        const char *path = (c->argc >= 4) ? c->argv[3]->ptr : NULL;
-#ifdef HAVE_NUMA
-        if (!path) path = server.numa_migrate_config_file;
-#endif
-        if (!path) {
-            addReplyError(c, "No config file path specified and none configured");
-            return;
-        }
-        numa_strategy_t *strat = numa_strategy_slot_get(1);
-        if (!strat) {
-            addReplyError(c, "No active strategy on slot 1");
-            return;
-        }
-        composite_lru_config_t cfg;
-        if (composite_lru_load_config(path, &cfg) != NUMA_STRATEGY_OK) {
-            addReplyErrorFormat(c, "Failed to load config from: %s", path);
-            return;
-        }
-        if (composite_lru_apply_config(strat, &cfg) != NUMA_STRATEGY_OK) {
-            addReplyError(c, "Failed to apply config");
-            return;
-        }
-        addReplyStatus(c, "OK");
-        serverLog(LL_NOTICE, "[NUMA] composite-lru config hot-reloaded from: %s", path);
         return;
     }
 
@@ -679,149 +518,14 @@ static void numa_cmd_config(client *c) {
     addReplyErrorFormat(c, "Unknown NUMA CONFIG subcommand '%s'", sub);
 }
 
-/* ========== NUMA STRATEGY sub-domain ========== */
-
-/*
- * NUMA STRATEGY SLOT <slot_id> <strategy_name>  -- insert a strategy into a slot
- * NUMA STRATEGY SLOT ENABLE <slot_id>           -- enable a slot
- * NUMA STRATEGY SLOT DISABLE <slot_id>          -- disable a slot
- * NUMA STRATEGY LIST                             -- list the state of all slots
- */
-static void numa_cmd_strategy(client *c) {
-    if (c->argc < 3) {
-        addReplyError(c, "Usage: NUMA STRATEGY <SLOT|LIST> [args]");
-        return;
-    }
-
-    const char *sub = c->argv[2]->ptr;
-
-    /* NUMA STRATEGY SLOT ... */
-    if (!strcasecmp(sub, "SLOT")) {
-        if (c->argc < 4) {
-            addReplyError(c, "Usage: NUMA STRATEGY SLOT <ENABLE|DISABLE|slot_id> ...");
-            return;
-        }
-
-        const char *arg3 = c->argv[3]->ptr;
-
-        /* NUMA STRATEGY SLOT ENABLE <slot_id> */
-        if (!strcasecmp(arg3, "ENABLE")) {
-            if (c->argc != 5) {
-                addReplyError(c, "Usage: NUMA STRATEGY SLOT ENABLE <slot_id>");
-                return;
-            }
-            long slot_id;
-            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
-                return;
-            int ret = numa_strategy_slot_enable((int)slot_id);
-            if (ret == NUMA_STRATEGY_OK)
-                addReplyStatus(c, "OK");
-            else
-                addReplyErrorFormat(c, "Failed to enable slot %ld (err=%d)", slot_id, ret);
-            return;
-        }
-
-        /* NUMA STRATEGY SLOT DISABLE <slot_id> */
-        if (!strcasecmp(arg3, "DISABLE")) {
-            if (c->argc != 5) {
-                addReplyError(c, "Usage: NUMA STRATEGY SLOT DISABLE <slot_id>");
-                return;
-            }
-            long slot_id;
-            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
-                return;
-            int ret = numa_strategy_slot_disable((int)slot_id);
-            if (ret == NUMA_STRATEGY_OK)
-                addReplyStatus(c, "OK");
-            else
-                addReplyErrorFormat(c, "Failed to disable slot %ld (err=%d)", slot_id, ret);
-            return;
-        }
-
-        /* NUMA STRATEGY SLOT SCHEDULE <slot_id> ae|servercron */
-        if (!strcasecmp(arg3, "SCHEDULE")) {
-            if (c->argc != 6) {
-                addReplyError(c, "Usage: NUMA STRATEGY SLOT SCHEDULE <slot_id> ae|servercron");
-                return;
-            }
-            long slot_id;
-            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
-                return;
-            const char *mode = c->argv[5]->ptr;
-            int ret;
-            if (!strcasecmp(mode, "ae")) {
-                ret = numa_strategy_slot_schedule_ae((int)slot_id);
-            } else if (!strcasecmp(mode, "servercron")) {
-                ret = numa_strategy_slot_unschedule_ae((int)slot_id);
-            } else {
-                addReplyError(c, "Invalid scheduler mode, expected ae or servercron");
-                return;
-            }
-            if (ret == NUMA_STRATEGY_OK)
-                addReplyStatus(c, "OK");
-            else
-                addReplyErrorFormat(c, "Failed to switch slot %ld scheduler to %s (err=%d)", slot_id, mode, ret);
-            return;
-        }
-
-        /* NUMA STRATEGY SLOT STATUS <slot_id> */
-        if (!strcasecmp(arg3, "STATUS")) {
-            if (c->argc != 5) {
-                addReplyError(c, "Usage: NUMA STRATEGY SLOT STATUS <slot_id>");
-                return;
-            }
-            long slot_id;
-            if (getLongFromObjectOrReply(c, c->argv[4], &slot_id, "Invalid slot ID") != C_OK)
-                return;
-            char buf[1024];
-            int ret = numa_strategy_slot_status((int)slot_id, buf, sizeof(buf));
-            if (ret == NUMA_STRATEGY_OK || ret == NUMA_STRATEGY_ENOENT)
-                addReplyBulkCString(c, buf);
-            else
-                addReplyErrorFormat(c, "Failed to read slot %ld status (err=%d)", slot_id, ret);
-            return;
-        }
-
-        /* NUMA STRATEGY SLOT <id> <name> - insert a strategy into a slot. */
-        if (c->argc != 5) {
-            addReplyError(c, "Usage: NUMA STRATEGY SLOT <slot_id> <strategy_name>");
-            return;
-        }
-        long slot_id;
-        if (getLongFromObjectOrReply(c, c->argv[3], &slot_id, "Invalid slot ID") != C_OK)
-            return;
-        const char *name = c->argv[4]->ptr;
-        int ret = numa_strategy_slot_insert((int)slot_id, name);
-        if (ret == NUMA_STRATEGY_OK)
-            addReplyStatus(c, "OK");
-        else
-            addReplyErrorFormat(c, "Failed to insert strategy '%s' into slot %ld (err=%d)",
-                name, slot_id, ret);
-        return;
-    }
-
-    /* NUMA STRATEGY LIST */
-    if (!strcasecmp(sub, "LIST")) {
-        char buf[4096];
-        if (numa_strategy_slot_list(buf, sizeof(buf)) == NUMA_STRATEGY_OK) {
-            addReplyBulkCString(c, buf);
-        } else {
-            addReplyBulkCString(c, "(no strategies registered)");
-        }
-        return;
-    }
-
-    addReplyErrorFormat(c, "Unknown NUMA STRATEGY subcommand '%s'", sub);
-}
-
 /* ========== NUMA HELP ========== */
 
 static void numa_cmd_help(client *c) {
-    addReplyArrayLen(c, 25);
+    addReplyArrayLen(c, 22);
     /* MIGRATE */
     addReplyBulkCString(c, "NUMA MIGRATE KEY <key> <node>      - Migrate a key to target NUMA node");
     addReplyBulkCString(c, "NUMA MIGRATE DB <node>             - Migrate entire database to target NUMA node");
-    addReplyBulkCString(c, "NUMA MIGRATE SCAN [COUNT n]        - Trigger one round of progressive key scan");
+    addReplyBulkCString(c, "NUMA MIGRATE SCAN [COUNT n]        - Run the default NUMA FLOW strategy once");
     addReplyBulkCString(c, "NUMA MIGRATE STATS                 - Show migration statistics");
     addReplyBulkCString(c, "NUMA MIGRATE RESET                 - Reset migration statistics");
     addReplyBulkCString(c, "NUMA MIGRATE INFO <key>            - Get NUMA metadata for a key");
@@ -831,20 +535,17 @@ static void numa_cmd_help(client *c) {
     addReplyBulkCString(c, "NUMA CONFIG SET weight <node> <w>  - Set node weight");
     addReplyBulkCString(c, "NUMA CONFIG SET cxl_optimization <on|off>");
     addReplyBulkCString(c, "NUMA CONFIG SET balance_threshold <percent>");
-    addReplyBulkCString(c, "NUMA CONFIG SET access_tracking <0|1>");
-    addReplyBulkCString(c, "NUMA CONFIG SET locality_stats <0|1>");
-    addReplyBulkCString(c, "NUMA CONFIG SET debug_logging <0|1>");
     addReplyBulkCString(c, "NUMA CONFIG SET enabled_nodes <all|n[,m]>");
-    addReplyBulkCString(c, "NUMA CONFIG LOAD [/path]           - Hot-reload composite-lru JSON config");
     addReplyBulkCString(c, "NUMA CONFIG REBALANCE              - Trigger manual rebalance");
     addReplyBulkCString(c, "NUMA CONFIG STATS                  - Show per-node allocation statistics");
-    /* STRATEGY */
-    addReplyBulkCString(c, "NUMA STRATEGY SLOT <id> <name>     - Insert strategy into slot");
-    addReplyBulkCString(c, "NUMA STRATEGY SLOT ENABLE <id>     - Enable a strategy slot");
-    addReplyBulkCString(c, "NUMA STRATEGY SLOT DISABLE <id>    - Disable a strategy slot");
-    addReplyBulkCString(c, "NUMA STRATEGY SLOT SCHEDULE <id> ae|servercron - Switch slot scheduler");
-    addReplyBulkCString(c, "NUMA STRATEGY SLOT STATUS <id>     - Show one strategy slot status");
-    addReplyBulkCString(c, "NUMA STRATEGY LIST                 - List all registered strategy slots");
+    /* FLOW */
+    addReplyBulkCString(c, "NUMA FLOW LOAD <name> <path> [interval_sec] [ADAPT] - Load a workflow");
+    addReplyBulkCString(c, "NUMA FLOW RUN [name]               - Run one or all loaded workflows");
+    addReplyBulkCString(c, "NUMA FLOW LIST                     - List loaded workflows");
+    addReplyBulkCString(c, "NUMA FLOW STATUS <name>            - Show one workflow's last-run stats");
+    addReplyBulkCString(c, "NUMA FLOW UNLOAD <name>            - Unload a workflow");
+    addReplyBulkCString(c, "NUMA FLOW ADAPT <name> <ON|OFF>    - Toggle self-adaptation for a workflow");
+    addReplyBulkCString(c, "NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop> - Switch the default strategy");
     /* HELP */
     addReplyBulkCString(c, "NUMA HELP                          - Show this help message");
 }
@@ -854,11 +555,11 @@ static void numa_cmd_help(client *c) {
 /*
  * numaCommand - top-level routing of the NUMA command
  *
- * Usage: NUMA <MIGRATE|CONFIG|STRATEGY|HELP> [subcommand] [args...]
+ * Usage: NUMA <MIGRATE|CONFIG|FLOW|HELP> [subcommand] [args...]
  */
 void numaCommand(client *c) {
     if (c->argc < 2) {
-        addReplyError(c, "Usage: NUMA <MIGRATE|CONFIG|STRATEGY|FLOW|HELP> [args...]");
+        addReplyError(c, "Usage: NUMA <MIGRATE|CONFIG|FLOW|HELP> [args...]");
         return;
     }
 
@@ -868,8 +569,6 @@ void numaCommand(client *c) {
         numa_cmd_migrate(c);
     } else if (!strcasecmp(domain, "CONFIG")) {
         numa_cmd_config(c);
-    } else if (!strcasecmp(domain, "STRATEGY")) {
-        numa_cmd_strategy(c);
     } else if (!strcasecmp(domain, "FLOW")) {
         numa_flow_command(c);
     } else if (!strcasecmp(domain, "HELP")) {

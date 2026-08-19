@@ -10,6 +10,8 @@
 
 #define _GNU_SOURCE
 #include "numa_bw_monitor.h"
+#include "server.h"
+#include "zmalloc.h"
 
 #ifdef HAVE_NUMA
 
@@ -311,8 +313,82 @@ double numa_bw_get_usage(int node_id) {
 double numa_bw_get_current_mbps(int node_id) {
     if (!g_bw_monitor.initialized) return -1.0;
     if (node_id < 0 || node_id >= g_bw_monitor.num_nodes) return -1.0;
-    
+
     return g_bw_monitor.nodes[node_id].current_bw_mbps;
+}
+
+/* Node pressure cache: same 1s TTL evict_numa.c used to keep independently. */
+#define NODE_PRESSURE_CACHE_TTL_MS 1000
+static double g_node_pressure_cache[NUMA_BW_MAX_NODES];
+static long long g_pressure_cache_time_ms[NUMA_BW_MAX_NODES];
+
+double numa_bw_get_node_pressure(int node_id) {
+    int max_node = numa_max_node();
+    if (node_id < 0 || node_id > max_node || node_id >= NUMA_BW_MAX_NODES) {
+        return 1.0; /* Invalid nodes report full pressure. */
+    }
+
+    long long now = mstime();
+    if (g_pressure_cache_time_ms[node_id] > 0 &&
+        (now - g_pressure_cache_time_ms[node_id]) < NODE_PRESSURE_CACHE_TTL_MS) {
+        return g_node_pressure_cache[node_id];
+    }
+
+    double pressure;
+
+    /*
+     * When maxmemory > 0, use the per-node quota share as the denominator:
+     *   per_node_quota = server.maxmemory / num_nodes
+     *   pressure       = node_used_bytes / per_node_quota
+     *
+     * This way pressure reflects how much of Redis's own memory share on the
+     * node is used, instead of the whole physical node memory (which on a
+     * large multi-hundred-GB dual-socket server would stay near-zero and
+     * never trigger migration/demotion).
+     */
+    if (server.maxmemory > 0) {
+        int num_nodes = max_node + 1;
+        size_t per_node_quota = server.maxmemory / (size_t)num_nodes;
+        size_t node_used = zmalloc_used_memory_node(node_id);
+
+        if (per_node_quota > 0) {
+            pressure = (double)node_used / (double)per_node_quota;
+            if (pressure > 1.0) pressure = 1.0;
+        } else {
+            pressure = 1.0;
+        }
+    } else {
+        /* maxmemory not set: fall back to the physical node memory pressure. */
+        char path[128];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/node/node%d/meminfo", node_id);
+
+        FILE *fp = fopen(path, "r");
+        if (!fp) {
+            pressure = 1.0;
+        } else {
+            unsigned long mem_total = 0, mem_free = 0;
+            char line[256];
+            while (fgets(line, sizeof(line), fp)) {
+                if (strstr(line, "MemTotal")) {
+                    char *colon = strchr(line, ':');
+                    if (colon) mem_total = strtoul(colon + 1, NULL, 10);
+                } else if (strstr(line, "MemFree")) {
+                    char *colon = strchr(line, ':');
+                    if (colon) mem_free = strtoul(colon + 1, NULL, 10);
+                }
+            }
+            fclose(fp);
+
+            pressure = (mem_total > 0) ?
+                       (1.0 - ((double)mem_free / (double)mem_total)) : 1.0;
+        }
+    }
+
+    g_node_pressure_cache[node_id] = pressure;
+    g_pressure_cache_time_ms[node_id] = now;
+
+    return pressure;
 }
 
 /* Set the max bandwidth of a node. */
@@ -360,6 +436,7 @@ int numa_bw_monitor_init(void) { return -1; }
 void numa_bw_monitor_sample(void) { }
 double numa_bw_get_usage(int node_id) { (void)node_id; return -1.0; }
 double numa_bw_get_current_mbps(int node_id) { (void)node_id; return -1.0; }
+double numa_bw_get_node_pressure(int node_id) { (void)node_id; return 1.0; }
 void numa_bw_set_max_bandwidth(int node_id, double max_mbps) { (void)node_id; (void)max_mbps; }
 const char* numa_bw_get_backend_name(void) { return "disabled"; }
 const numa_bw_monitor_t* numa_bw_get_monitor(void) { return NULL; }

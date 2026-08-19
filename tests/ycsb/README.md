@@ -122,6 +122,52 @@ cd tests/ycsb
 
 ---
 
+## run_algorithm_comparison.sh — 迁移策略全量对比
+
+### 用途
+
+依次跑通 5 组单一变量对比（Vanilla Redis 7.2.6 / Redis-NUMA 禁用迁移(noop) /
+Redis-NUMA Composite LRU / Redis-NUMA TinyLFU / Redis-NUMA CAAT（NUMAflow 默认
+策略，见 `numaflow/` 及 `docs/new/09-architecture-decisions.md` 的 ADR-08）），
+每组都复用 `run_bw_benchmark.sh` / `run_bw_benchmark_vanilla.sh` 的三阶段负载
+(Fill→Hotspot→Sustain)，最后用 `scripts/visualize_bw_benchmark.py`（旧的画图
+方案）一次性画出 5 组吞吐量/本地访问率曲线图和阶段延迟对比图。ADR-08 之后三个
+迁移策略统一收敛到 NUMAflow 的原子操作框架，`composite_lru`/`tinylfu`/`caat`
+三组都是 `run_bw_benchmark.sh` 内部调用 `NUMA FLOW DEFAULT <name>` 直接切换
+（不再需要导出/加载 workflow JSON 文件），三者走的是同一套执行引擎，只是加载
+的预设不同。
+
+### 快速开始
+
+```bash
+cd tests/ycsb
+./run_algorithm_comparison.sh                       # 跑全部 5 组，maxmem 统一为 8gb
+./run_algorithm_comparison.sh --only noop,tinylfu,caat   # 只跑指定的组
+```
+
+### 输出
+
+结果写到仓库最外层的 `Results/algorithms_<timestamp>/`（不是本目录下的
+`results/`），每组一个子目录（`vanilla/` `noop/` `composite_lru/` `tinylfu/`
+`caat/`，内容同 `run_bw_benchmark.sh` 的输出），外加：
+
+| 文件 | 内容 |
+|------|------|
+| `comparison_report.png` | 5 组吞吐量曲线 + 本地 NUMA 访问率（阶段对齐） |
+| `comparison_report_latency.png` | 5 组按阶段的平均延迟柱状图 |
+| `summary.txt` | 5 组每阶段吞吐量/延迟文本摘要 |
+
+### 依赖
+
+同 `run_bw_benchmark_vanilla.sh`：需要预先生成同版本的原版 Redis 7.2.6 对比基线
+（`git worktree add ../redis-7.2.6-vanilla 7.2.6 && cd ../redis-7.2.6-vanilla/src
+&& make -j$(nproc)`）。`composite_lru`/`tinylfu`/`caat` 三组都只依赖已编译好的
+`redis-server`/`redis-cli`（NUMA FLOW 命令内置在内核里），不需要单独构建
+`numaflow/` 的 CLI 二进制。
+
+
+---
+
 ## run_bw_benchmark.sh — NUMA 带宽饱和基准测试
 
 ### 用途

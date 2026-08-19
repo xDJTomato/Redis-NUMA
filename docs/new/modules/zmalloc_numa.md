@@ -1,7 +1,7 @@
 # zmalloc — NUMA 分配集成点
 
-> 这不是 `ARCHITECTURE.md` 里列出的十个 NUMA 模块之一，而是所有模块最终都要经过
-> 的**关键集成点**：Redis 原生的内存分配入口 `src/zmalloc.c`/`zmalloc.h`。十个模
+> 这不是 `ARCHITECTURE.md` 里列出的八个 NUMA 模块之一，而是所有模块最终都要经过
+> 的**关键集成点**：Redis 原生的内存分配入口 `src/zmalloc.c`/`zmalloc.h`。八个模
 > 块里除了 `numa_command`（纯命令路由），几乎都通过读写这里定义的元数据、或调用
 > 这里暴露的接口来工作。
 
@@ -11,9 +11,9 @@
 listpack、quicklist 节点等等，最终都通过 `zmalloc()`/`zfree()`/`zrealloc()` 走到
 这里。本集成点要解决的问题是：**在不改变这个入口对外行为（同样的函数签名、同样
 的返回语义）的前提下，让每一次分配都带上 NUMA 元数据，并让分配本身按策略落到指
-定的 NUMA 节点上**——这样上层的 `numa_key_migrate`、`numa_composite_lru` 等模块才
-有"元数据"和"迁移目标"可用，而不需要为每个 Redis 对象单独维护一张外部映射表（那
-样代价是一次额外的哈希查找，而不是一次指针运算）。
+定的 NUMA 节点上**——这样上层的 `numa_key_migrate`、NUMAflow（经桥接
+`src/numa_flow.c`）等模块才有"元数据"和"迁移目标"可用，而不需要为每个 Redis 对
+象单独维护一张外部映射表（那样代价是一次额外的哈希查找，而不是一次指针运算）。
 
 ## 接口
 
@@ -26,8 +26,8 @@ listpack、quicklist 节点等等，最终都通过 `zmalloc()`/`zfree()`/`zreal
 | `zrealloc(ptr, size)` | 重新分配，返回新用户指针或 `NULL` |
 | `zmalloc_local(size)` / `zcalloc_local(size)` / `ztrycalloc_local(size)` | `dict.c` 专用的分配入口（见下方「与其他模块的关系」） |
 
-面向 NUMA 模块的元数据读写接口（供 `numa_composite_lru`/`numa_key_migrate` 等使
-用，均基于同一个 `numa_get_prefix()` 指针运算）：
+面向 NUMA 模块的元数据读写接口（供 `numa_key_migrate`、NUMAflow 的 Redis 桥接
+等使用，均基于同一个 `numa_get_prefix()` 指针运算）：
 
 | 函数 | 功能 |
 | --- | --- |
@@ -108,7 +108,8 @@ tcache（先缓存，可能之后被复用）或直接归还 slab/系统。
 ## 质量与性能特性
 
 - **线程安全**：PREFIX 本身的读写发生在 Redis 单线程事件循环里，不需要额外同
-  步；热度更新集中在 `composite_lru_record_access()` 里串行执行；跨节点共享的统
+  步；热度更新集中在 `numa_key_migrate_touch()` 里串行执行（`db.c` 的每次真实
+  key 访问无条件调用一次）；跨节点共享的统
   计计数器用 `atomicIncr`/`atomicDecr` 无锁更新；两级 TLS 缓存天生每线程独立，没
   有共享状态竞争。
 - **为什么不能用 jemalloc**：本集成点是直接接管 `zmalloc`/`zfree` 语义的，如果
@@ -124,10 +125,15 @@ tcache（先缓存，可能之后被复用）或直接归还 slab/系统。
   `numa_slab_alloc()`/`numa_slab_free()`。
 - **`numa_configurable_strategy`**：每次分配调用
   `numa_config_get_best_node(size)` 决定目标节点。
-- **`numa_composite_lru`**（以及其他迁移策略）：通过本集成点暴露的
-  `numa_get_hotness`/`numa_set_hotness` 等接口读写 PREFIX 里的热度字段；
-  `db.c` 的 `lookupKey()` 在每次访问时调用 `composite_lru_record_access()`，
-  该函数直接对 `numa_get_prefix()` 拿到的 PREFIX 做阶梯式惰性衰减 + 热度递增。
+- **`numa_key_migrate` / NUMAflow 桥接（`src/numa_flow.c`）**：通过本集成点暴露
+  的 `numa_get_hotness`/`numa_set_hotness` 等接口读写 PREFIX 里的热度字段；
+  `db.c` 的 `lookupKeyReadWithFlags()` 在每次真实访问时无条件调用
+  `numa_key_migrate_touch()`，该函数直接对 `numa_get_prefix()` 拿到的 PREFIX 做
+  阶梯式惰性衰减 + 热度递增——这是 NUMAflow `enumerate()` 读取的唯一热度 ground
+  truth（[ADR-08](../09-architecture-decisions.md)）。同一处访问路径上还会调用
+  `numa_flow_observe_access()`，单独喂 NUMAflow 的 CMS+Doorkeeper 频率估计器
+  （PREFIX 本身没有"频率"这个字段），修复了 TinyLFU/CAAT 此前从未被真实喂过
+  频率信号的 bug（[ADR-09](../09-architecture-decisions.md)）。
 - **一个必须记住的边界情况——不是所有二进制都会初始化 NUMA 状态**：`numa_init()`
   只在 `redis-server` 的 `main()` 里被调用。`redis-cli`、`redis-benchmark`、
   `redis-check-rdb`/`redis-check-aof`、`redis-sentinel` 同样链接了 `zmalloc.o`，

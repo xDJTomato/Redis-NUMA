@@ -11,51 +11,60 @@
    ——这是 NUMA 分配器最早初始化的一环，不在 `server.c` 里，而是挂在
    `zmalloc` 自己的初始化路径上。
 2. `initServer()` 返回后，`#ifdef HAVE_NUMA` 块依次调用：
-   - `numa_strategy_init()`（`src/server.c:7371`）：注册槎位 0（no-op）、
-     槎位 1（`numa_composite_lru_register()`）、槎位 2（`numa_tinylfu_register()`，
-     默认禁用）。
    - `numa_config_strategy_init()`（`src/server.c:7384`），随后
      `numa_config_set_strategy(WEIGHTED_INTERLEAVE)`（`src/server.c:7385`）
      把默认分配策略设为加权轮询插值。
    - `numa_key_migrate_init()`（`src/server.c:7390`）。
    - `numa_bw_monitor_init()`（`src/server.c:7395`）。
-   - 若配置了 `numa-migrate-config`：`composite_lru_load_config()` 读 JSON，
-     `composite_lru_apply_config()` 应用到槎位 1 的运行时状态
-     （`src/server.c:7408-7410`）。
-3. 进入 `aeMain()` 事件循环，NUMA 模块此后只在 `serverCron`（或槎位若切到
-   AE 调度模式，见 [`modules/ae_strategy_scheduler.md`](modules/ae_strategy_scheduler.md)）
-   和命令处理路径中被驱动。
+   - `numa_flow_init()`：初始化 NUMAflow 桥接状态；除非
+     `numa-enabled no`，随后自动读取 `numa-flow-default-strategy`（默认
+     `caat`）与 `numa-flow-interval-sec`，用 `nf_strategy_build()` 把对应的
+     原子操作 DAG 登记为 `default` 工作流条目——不需要手动 `NUMA FLOW LOAD`
+     就能得到迁移行为。
+3. 进入 `aeMain()` 事件循环，NUMA 模块此后只在 `serverCron`（`numa_flow_cron()`
+   按 `interval_sec` 判断是否该跑已加载的工作流，没有 AE time event 变体，见
+   ADR-08）和命令处理路径中被驱动。
 
 要点：`numa_init()`／`numa_slab_init()` 必须先于 `initServer()` 建立的状态完成，
-而策略/迁移/带宽监控模块的初始化必须晚于 `initServer()`——顺序颠倒是启动期崩溃
-最常见的原因（见 [`08-crosscutting-concepts.md`](08-crosscutting-concepts.md)）。
+而按键迁移/带宽监控/NUMAflow 桥接模块的初始化必须晚于 `initServer()`——顺序颠倒
+是启动期崩溃最常见的原因（见 [`08-crosscutting-concepts.md`](08-crosscutting-concepts.md)）。
 
 ## 6.2 场景：GET 命令触发热度追踪
 
 1. 客户端发 `GET user:100`，`getCommand()` → `lookupKeyRead()` → `lookupKey()`
    在 `db->dict` 里找到 `val`。
-2. `#ifdef HAVE_NUMA` 分支里，槎位 1（Composite LRU）调用
-   `composite_lru_record_access(strategy, key, val, lru_clock)`：
+2. `#ifdef HAVE_NUMA` 分支里，`db.c` 无条件调用 `numa_key_migrate_touch()`：
    - 读出 PREFIX 里的当前热度与上次访问时间；
    - 按空闲时长做阶梯式惰性衰减；
-   - 热度 +1（上限 7）；
-   - 若热度首次越过阈值且数据当前在远端节点，把这个 key 的 SDS 拷贝写入
-     「热候选池」（快路径的输入）。
-3. 若槎位 2（TinyLFU）也启用，`tinylfu_record_access()` 并行做一套独立的
-   Doorkeeper → CMS 频率估计，满足阈值时把 key 推入自己的环形缓冲区。
-4. 返回值给客户端——整个追踪过程不阻塞、不改变返回结果，只更新 PREFIX 元数据。
+   - 热度 +1（上限 7）——这是 NUMAflow `enumerate()` 读取的唯一中立
+     ground truth，不再依赖任何策略槎位是否 enabled。
+3. 同一处访问路径上，`db.c` 也调用 `numa_flow_observe_access(key)`
+   （`src/numa_flow.c`）：把这次真实访问喂给 `nf_tracker_observe()`——这是
+   Redis 桥接里唯一调用该函数的地方（此前的一个真实 bug：这一步完全缺失，
+   TinyLFU/CAAT 的 `cms_estimate` 永远读到 0，见 [ADR-09](09-architecture-decisions.md)）。
+4. 返回值给客户端——整个追踪过程不阻塞、不改变返回结果，只更新 PREFIX 元数据
+   与 NUMAflow 的频率追踪器。
 
 ## 6.3 场景：serverCron 驱动的自动迁移
 
-1. `serverCron()` 每秒调用 `numa_strategy_run_all()`。
-2. 槎位 1 执行 `composite_lru_execute()`：
-   - 快路径：遍历上一节写入的热候选池，重读当前热度、按源节点带宽调整生效
-     阈值、检查目标节点资源状态，满足条件则调用
-     `numa_migrate_key_by_name()`；
-   - 慢路径：`composite_lru_scan_once()` 按批次渐进扫描 `key_heat_map`，
-     捕获快路径没覆盖到的冷门热 key 或需要降级的冷 key。
-3. 槎位 2（若启用）执行 `tinylfu_execute()`：遍历候选环形缓冲区，用 CMS 重新
-   估计频率，达到阈值同样调用 `numa_migrate_key_by_name()`。
+1. `serverCron()` 每秒调用 `numa_flow_cron()`；对每个已加载的工作流（至少有
+   启动时自动登记的 `default`），若到达其 `interval_sec` 就调用
+   `nf_bridge_run()`。
+2. `nf_bridge_run()` 通过桥接回调 `enumerate()`（`src/numa_flow.c`）枚举候选
+   key（读取 `numa_key_migrate_touch()` 维护的热度信号），构造 NUMAflow 的
+   执行上下文，驱动该工作流对应的原子操作 DAG（`caat`/`composite_lru`/
+   `tinylfu`/`noop` 预设，定义于 `numaflow/src/nf_strategy.c`）：
+   - `caat` 预设先按每个 item 的原始驻留位置分叉（`filter_local`/
+     `filter_remote`），DRAM 上的走降级子链（决策后终止于 `emit_migrate`），
+     非 DRAM 的走晋升子链（先过滤候选，最后才变更）——这个分叉写法本身是
+     ADR-09 修复的一部分：旧的单链设计会在降级后过滤晋升条件时，把已经
+     执行过降级的 item 丢出结果之外。
+   - `composite_lru`/`tinylfu` 预设分别复刻热度阶梯衰减双通道 / CMS+
+     Doorkeeper 频率估计的原子操作链。
+3. `nf_exec_run()` 的结果是图上所有终止（无出边）节点输出的并集；
+   `nf_bridge_run()` 拿它跟入队时的原始驻留节点做 diff，对每个发生变化的
+   item 调用桥接回调 `apply()`（`src/numa_flow.c`），后者调用
+   `numa_migrate_key_by_name()`。
 4. `numa_migrate_key_by_name()` 内部按 `val->type` 分派到对应的类型迁移适配器
    （STRING/HASH/LIST/SET/ZSET），完成「目标节点分配 → memcpy → 原子指针切换
    → 释放旧内存 → 更新 PREFIX 节点标记」。
@@ -71,13 +80,17 @@ direct（`numa_alloc_onnode()`）→ 写入 16 字节 `numa_alloc_prefix_t` 前�
 `numa_slab_free()`（原子位图标记空闲）或 `numa_free_onnode()`（direct 释放）→
 更新分配统计。
 
-## 6.5 场景：配置热加载
+## 6.5 场景：运行时切换迁移策略
 
-`redis-cli NUMA CONFIG LOAD /path/to/composite_lru.json` → `numaCommand()` →
-`numa_cmd_config()` → `numa_cmd_config_load()`：读取并解析 JSON → 校验参数范围
-（`composite_lru_load_config()`）→ `composite_lru_apply_config()` 把新参数应用
-到槎位 1 的运行时状态（候选池大小变化时重建，重置扫描游标）→ 返回 `OK`，无需
-重启进程。
+`redis-cli NUMA FLOW DEFAULT composite_lru` → `numaCommand()` →
+`numa_cmd_flow()` → 在 `caat`/`composite_lru`/`tinylfu`/`noop` 四个预设名里校验
+参数 → `nf_strategy_build("composite_lru", ...)` 重新构造对应的原子操作 DAG →
+替换 `default` 工作流条目当前挂载的图 → 返回 `OK`，无需重启进程，下一次
+`numa_flow_cron()` 触发时就会跑新策略。加载自定义 DAG（GUI 编排导出的 JSON）走
+`NUMA FLOW LOAD <name> <path.json> [interval_sec] [ADAPT]` 这条独立命令，不经过
+预设名校验。`numa-migrate-config`／`NUMA CONFIG LOAD`（composite-lru JSON 热
+加载）已随 ADR-08 整体移除；`composite_lru.json` 现在只是字段名参考，内核不再
+读取它。
 
 ## 6.6 场景：压力权重更新（服务于分配决策）
 

@@ -474,7 +474,7 @@ start_server {tags {"introspection"}} {
             set-proc-title
             lua-enable-deprecated-api
             numa-enabled
-            numa-migrate-config
+            numa-flow-default-strategy
             cluster-config-file
             cluster-port
             oom-score-adj

@@ -3118,7 +3118,8 @@ standardConfig static_configs[] = {
     createStringConfig("proc-title-template", NULL, MODIFIABLE_CONFIG, ALLOW_EMPTY_STRING, server.proc_title_template, CONFIG_DEFAULT_PROC_TITLE_TEMPLATE, isValidProcTitleTemplate, updateProcTitleTemplate),
     #ifdef HAVE_NUMA
     createBoolConfig("numa-enabled", NULL, IMMUTABLE_CONFIG, server.numa_enabled, 1, NULL, NULL),
-    createStringConfig("numa-migrate-config", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.numa_migrate_config_file, NULL, NULL, NULL),
+    createStringConfig("numa-flow-default-strategy", NULL, IMMUTABLE_CONFIG, EMPTY_STRING_IS_NULL, server.numa_flow_default_strategy, "caat", NULL, NULL),
+    createIntConfig("numa-flow-interval-sec", NULL, MODIFIABLE_CONFIG, 1, 3600, server.numa_flow_interval_sec, 1, INTEGER_CONFIG, NULL, NULL),
     #endif
     createStringConfig("bind-source-addr", NULL, MODIFIABLE_CONFIG, EMPTY_STRING_IS_NULL, server.bind_source_addr, NULL, NULL, NULL),
     createStringConfig("logfile", NULL, IMMUTABLE_CONFIG, ALLOW_EMPTY_STRING, server.logfile, "", NULL, NULL),

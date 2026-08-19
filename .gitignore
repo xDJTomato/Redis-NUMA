@@ -88,3 +88,6 @@ CXLMemSim/
 
 # Full validation report output
 results/
+
+# Top-level aggregated benchmark/comparison output (e.g. run_algorithm_comparison.sh)
+Results/

@@ -4,8 +4,8 @@
 #
 # 覆盖范围:
 #   NUMA MIGRATE KEY/DB/SCAN/STATS/RESET/INFO
-#   NUMA CONFIG GET/SET/LOAD/REBALANCE/STATS
-#   NUMA STRATEGY SLOT/LIST
+#   NUMA CONFIG GET/SET/REBALANCE/STATS
+#   NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT/DEFAULT
 #   NUMA HELP
 #   错误路径（参数缺失、越界、无效值）
 #
@@ -16,7 +16,6 @@
 #   -p <port>      Redis 端口（默认 6399）
 #   -H <host>      Redis 地址（默认 127.0.0.1）
 #   -b <bindir>    redis-server/redis-cli 所在目录（默认 ./src）
-#   -c <cfgfile>   composite-lru JSON 配置文件路径（用于 CONFIG LOAD 测试）
 #   -k             测试结束后保留 Redis 进程（默认自动关闭）
 #   -q             仅输出 PASS/FAIL 摘要，不打印中间日志
 #   -h             打印帮助信息
@@ -32,7 +31,6 @@ set -uo pipefail
 REDIS_PORT=6399
 REDIS_HOST="127.0.0.1"
 BIN_DIR="./src"
-CXL_CFG_FILE=""
 KEEP_REDIS=0
 QUIET=0
 
@@ -131,12 +129,11 @@ usage() {
     exit 0
 }
 
-while getopts "p:H:b:c:kqh" opt; do
+while getopts "p:H:b:kqh" opt; do
     case $opt in
         p) REDIS_PORT="$OPTARG" ;;
         H) REDIS_HOST="$OPTARG" ;;
         b) BIN_DIR="$OPTARG" ;;
-        c) CXL_CFG_FILE="$OPTARG" ;;
         k) KEEP_REDIS=1 ;;
         q) QUIET=1 ;;
         h) usage ;;
@@ -218,7 +215,7 @@ suite_help() {
     out=$(cli NUMA HELP)
     assert_contains "HELP 包含 MIGRATE 提示"  "$out" "MIGRATE"
     assert_contains "HELP 包含 CONFIG 提示"   "$out" "CONFIG"
-    assert_contains "HELP 包含 STRATEGY 提示" "$out" "STRATEGY"
+    assert_contains "HELP 包含 FLOW 提示"     "$out" "FLOW"
     assert_contains "HELP 包含 HELP 提示"     "$out" "HELP"
 }
 
@@ -370,54 +367,62 @@ suite_config() {
     out=$(cli NUMA CONFIG STATS)
     assert_ok "CONFIG STATS 返回数据" "$out"
 
-    # 4-12 LOAD（有配置文件时测试）
-    if [[ -n "$CXL_CFG_FILE" && -f "$CXL_CFG_FILE" ]]; then
-        out=$(cli NUMA CONFIG LOAD "$CXL_CFG_FILE")
-        assert_eq "CONFIG LOAD 指定路径返回 OK" "$out" "OK"
-    else
-        skip_test "CONFIG LOAD 指定路径" "未提供 -c <cfgfile>"
-    fi
-
-    # 4-13 LOAD 不存在的路径
-    out=$(cli NUMA CONFIG LOAD /nonexistent/path/cfg.json)
-    assert_error "CONFIG LOAD 不存在路径应报错" "$out"
-
-    # 4-14 CONFIG 缺少子命令
+    # 4-12 CONFIG 缺少子命令
     out=$(cli NUMA CONFIG)
     assert_error "CONFIG 无子命令应报错" "$out"
 
-    # 4-15 CONFIG 未知子命令
+    # 4-13 CONFIG 未知子命令
     out=$(cli NUMA CONFIG BADCMD)
     assert_error "CONFIG 未知子命令应报错" "$out"
 
-    # 4-16 SET 参数不足
+    # 4-14 SET 参数不足
     out=$(cli NUMA CONFIG SET)
     assert_error "CONFIG SET 无参数应报错" "$out"
 }
 
-# ── 5. NUMA STRATEGY ──────────────────────────────────────────────────────────
-suite_strategy() {
-    header "Suite: NUMA STRATEGY"
+# ── 5. NUMA FLOW ──────────────────────────────────────────────────────────────
+suite_flow() {
+    header "Suite: NUMA FLOW"
 
-    # 5-1 LIST（直接查看当前注册状态）
-    out=$(cli NUMA STRATEGY LIST)
-    assert_ok "STRATEGY LIST 返回内容" "$out"
+    # 5-1 LIST（默认策略应已在启动时自动加载为 "default" 条目）
+    out=$(cli NUMA FLOW LIST)
+    assert_contains "FLOW LIST 包含自动加载的 default 条目" "$out" "default"
 
-    # 5-2 SLOT 插入非法 strategy name（应报错）
-    out=$(cli NUMA STRATEGY SLOT 99 no_such_strategy_xyz)
-    assert_error "STRATEGY SLOT 插入不存在的策略名应报错" "$out"
+    # 5-2 STATUS default
+    out=$(cli NUMA FLOW STATUS default)
+    assert_contains "FLOW STATUS default 返回内容" "$out" "default"
 
-    # 5-3 STRATEGY 缺少子命令
-    out=$(cli NUMA STRATEGY)
-    assert_error "STRATEGY 无子命令应报错" "$out"
+    # 5-3 DEFAULT 切换到 composite_lru
+    out=$(cli NUMA FLOW DEFAULT composite_lru)
+    assert_eq "FLOW DEFAULT composite_lru 返回 OK" "$out" "OK"
 
-    # 5-4 STRATEGY 未知子命令
-    out=$(cli NUMA STRATEGY BADCMD)
-    assert_error "STRATEGY 未知子命令应报错" "$out"
+    # 5-4 DEFAULT 切换到 tinylfu
+    out=$(cli NUMA FLOW DEFAULT tinylfu)
+    assert_eq "FLOW DEFAULT tinylfu 返回 OK" "$out" "OK"
 
-    # 5-5 SLOT 参数不足
-    out=$(cli NUMA STRATEGY SLOT 1)
-    assert_error "STRATEGY SLOT 参数不足应报错" "$out"
+    # 5-5 DEFAULT 换回 caat
+    out=$(cli NUMA FLOW DEFAULT caat)
+    assert_eq "FLOW DEFAULT caat 返回 OK" "$out" "OK"
+
+    # 5-6 DEFAULT 未知预设名应报错
+    out=$(cli NUMA FLOW DEFAULT no_such_strategy_xyz)
+    assert_error "FLOW DEFAULT 未知预设名应报错" "$out"
+
+    # 5-7 RUN（不带 name，跑所有已加载的工作流）
+    out=$(cli NUMA FLOW RUN)
+    assert_ok "FLOW RUN 返回内容" "$out"
+
+    # 5-8 FLOW 缺少子命令
+    out=$(cli NUMA FLOW)
+    assert_error "FLOW 无子命令应报错" "$out"
+
+    # 5-9 FLOW 未知子命令
+    out=$(cli NUMA FLOW BADCMD)
+    assert_error "FLOW 未知子命令应报错" "$out"
+
+    # 5-10 LOAD 参数不足
+    out=$(cli NUMA FLOW LOAD)
+    assert_error "FLOW LOAD 参数不足应报错" "$out"
 }
 
 # ── 6. 并发安全（连续快速调用不崩溃）────────────────────────────────────────
@@ -460,7 +465,6 @@ main() {
     echo "╚══════════════════════════════════════════╝"
     echo "  Redis : $REDIS_HOST:$REDIS_PORT"
     echo "  BinDir: $BIN_DIR"
-    [[ -n "$CXL_CFG_FILE" ]] && echo "  CfgFile: $CXL_CFG_FILE"
     echo ""
 
     check_or_start_redis
@@ -480,7 +484,7 @@ main() {
     ensure_redis_alive
     suite_config
     ensure_redis_alive
-    suite_strategy
+    suite_flow
     ensure_redis_alive
     suite_stability
 

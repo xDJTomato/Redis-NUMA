@@ -63,29 +63,29 @@ See `TESTING.md` for the full breakdown of every tier.
 
 ### NUMA Module Layer (added on top of Redis core)
 
-Ten modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
+Eight modules in `src/`, all guarded by `#ifdef HAVE_NUMA`, plus the NUMAflow atomic-op engine (`numaflow/`) which now owns all migration-strategy logic (see ADR-08 in `docs/new/09-architecture-decisions.md`):
 
 1. **numa_pool** — Custom memory allocator. 33 size classes (8B–64KB), bump-pointer O(1) allocation, 64KB slab allocator for ≤4KB objects, chunk compaction for <30% utilization chunks.
 2. **numa_migrate** — Low-level block migration between NUMA nodes via `numa_alloc_onnode` + memcpy.
-3. **numa_key_migrate** — Per-key migration (robj as unit). LRU-integrated heat tracking with lazy step decay. Full type adapters for all 5 Redis types: STRING (RAW/EMBSTR), HASH (listpack/ziplist/hashtable), LIST (quicklist with LZF/raw and PLAIN/PACKED container sub-paths), SET (intset/hashtable), ZSET (listpack/ziplist/skiplist).
-4. **numa_strategy_slots** — 16-slot pluggable strategy framework with vtable-based polymorphism. Slot 0 = no-op, Slot 1 = Composite LRU, Slot 2 = TinyLFU (disabled by default). Runs via `serverCron` every second.
-5. **numa_composite_lru** — Default migration strategy (Slot 1). Dual-channel: hot candidate ring buffer (fast path) + progressive dictionary scan (slow path). JSON-configurable.
-6. **numa_tinylfu** — Frequency-driven migration strategy (Slot 2, disabled by default). Count-Min Sketch (4×16384, 4-bit) + Doorkeeper Bloom Filter. Fixed ~40KB memory, O(1) hot data discovery. Must be manually enabled to avoid conflict with Composite LRU.
-7. **numa_configurable_strategy** — 9 allocation strategies (LOCAL_FIRST, INTERLEAVE, ROUND_ROBIN, WEIGHTED, PRESSURE_AWARE, CXL_OPTIMIZED, WEIGHTED_INTERLEAVE, ADAPTIVE, LATENCY_AWARE) at the zmalloc layer.
-8. **numa_command** — Unified `NUMA` Redis command: `NUMA MIGRATE`, `NUMA CONFIG`, `NUMA STRATEGY`.
-9. **numa_bw_monitor** — Real-time per-node bandwidth monitoring (resctrl/numastat/manual backends).
-10. **evict_numa** — NUMA-aware eviction: demotes keys to less-pressured nodes before eviction. Weighted scoring: distance(40%) + pressure(30%) + bandwidth(30%).
+3. **numa_key_migrate** — Per-key migration (robj as unit). `numa_key_migrate_touch()` unconditionally updates the neutral zmalloc-prefix hotness signal on every real access; this is the single ground truth NUMAflow's `enumerate()` reads. Full type adapters for all 5 Redis types: STRING (RAW/EMBSTR), HASH (listpack/ziplist/hashtable), LIST (quicklist with LZF/raw and PLAIN/PACKED container sub-paths), SET (intset/hashtable), ZSET (listpack/ziplist/skiplist).
+4. **numa_configurable_strategy** — 7 independent allocation-node-selection behaviors at the zmalloc layer (LOCAL_FIRST, INTERLEAVE, ROUND_ROBIN, WEIGHTED/WEIGHTED_INTERLEAVE share one weighted-random implementation with different weight sources, PRESSURE_AWARE, CXL_OPTIMIZED). ADAPTIVE/LATENCY_AWARE are kernel-side placeholders (behave as LOCAL_FIRST, self-report via a startup log and `NUMA CONFIG GET`'s `strategy_note` field) — their real implementation is the matching `alloc_adaptive`/`alloc_latency_aware` atomic op in NUMAflow.
+5. **numa_command** — Unified `NUMA` Redis command: `NUMA MIGRATE`, `NUMA CONFIG`, `NUMA FLOW`.
+6. **numa_bw_monitor** — Real-time per-node bandwidth monitoring (resctrl/numastat/manual backends) and the single canonical node-pressure getter (`numa_bw_get_node_pressure()`), shared by `evict_numa` and `numa_configurable_strategy`.
+7. **evict_numa** — NUMA-aware eviction: demotes keys to less-pressured nodes before eviction. Weighted scoring: distance(40%) + pressure(30%) + bandwidth(30%); pressure comes from `numa_bw_monitor`.
+8. **numa_flow** (`src/numa_flow.c`) — Redis-side bridge to the NUMAflow atomic-op engine. Migration strategy (`caat`/`composite_lru`/`tinylfu`/`noop`) is implemented *only* here, as NUMAflow DAG presets (`numaflow/src/nf_strategy.c`) — there is no native kernel implementation of any of them. Auto-loads `numa-flow-default-strategy` (default `caat`) as the `default` workflow entry at startup unless `numa-enabled no`; switch it at runtime with `NUMA FLOW DEFAULT <name>` or load custom workflows with `NUMA FLOW LOAD`.
+
+The 16-slot vtable strategy framework (`numa_strategy_slots`) and its native Composite LRU / TinyLFU implementations (`numa_composite_lru`, `numa_tinylfu`) have been retired — see `docs/new/09-architecture-decisions.md` ADR-08 and the corresponding (now-archived) module docs under `docs/new/modules/`.
 
 ### Key Integration Points in Redis Core
 
 - **zmalloc.c/h** — All `zmalloc/zfree/zrealloc` routed through NUMA allocator when available. 16-byte `numa_alloc_prefix_t` prefix on every allocation tracks size, node, hotness, access metadata. `NO_MALLOC_USABLE_SIZE` is forced.
 - **server.h** — NUMA stats counters and config fields in `redisServer` struct. NUMA headers included under `#ifdef HAVE_NUMA`.
-- **server.c** — `numa_init()` in `main()` before `initServer()`. Strategy/key-migration/bw-monitor init after `initServer()`. Periodic compaction and strategy execution in `serverCron`.
+- **server.c** — `numa_init()` in `main()` before `initServer()`. Key-migration/bw-monitor/NUMAflow-bridge init after `initServer()`; NUMAflow's default strategy auto-loads there too. Periodic compaction and `numa_flow_cron()` run in `serverCron`.
 - **evict.h** — Extended `evictionPoolEntry` with `current_node`, `object_size`, `numa_migrated` fields.
 
 ### Module Dependency Order (bottom to top)
 
-libnuma → numa_pool → numa_migrate → numa_key_migrate → numa_composite_lru / numa_tinylfu / numa_strategy_slots → numa_command → evict_numa → server.c
+libnuma → numa_pool → numa_migrate → numa_key_migrate → numa_bw_monitor → numa_configurable_strategy → numa_flow (NUMAflow bridge) → numa_command → evict_numa → server.c
 
 ### NUMAflow subsystem (`numaflow/`, pure C11, no Redis/libnuma dependency)
 
@@ -105,8 +105,8 @@ The Redis adapter `src/numa_flow.c` (compiled only under `HAVE_NUMA`) implements
 ## Configuration
 
 - `redis.conf` lines 1184–1208: `numa-demote-*` settings (enable, min-size, max-migrate, pressure-threshold, weights)
-- `redis.conf` lines 2342–2354: `numa-enabled` and `numa-migrate-config` path to `composite_lru.json`
-- `composite_lru.json`: per-node bandwidth baselines and migration tuning parameters
+- `redis.conf` numa migration section: `numa-enabled`, `numa-flow-default-strategy` (default `caat`; also accepts `composite_lru`/`tinylfu`/`noop`), `numa-flow-interval-sec`
+- `composite_lru.json`: retired as a kernel-consumed config file (see ADR-08); kept as a field-name reference for writing custom NUMAflow workflow JSON
 
 ## Documentation
 

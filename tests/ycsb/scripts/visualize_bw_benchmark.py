@@ -123,6 +123,8 @@ PHASE_LABELS = {
 NAMED_PALETTE = {
     "Redis-NUMA (Composite LRU)": "#1565C0",
     "Redis-NUMA (TinyLFU)": "#D32F2F",
+    "Redis-NUMA (Noop)": "#F57C00",
+    "Redis-NUMA (CAAT)": "#7B1FA2",
     "Redis-NUMA": "#1565C0",
     "Vanilla Redis": "#2E7D32",
     "Vanilla Redis (local)": "#2E7D32",
@@ -355,6 +357,9 @@ def main():
     parser.add_argument('--compare-input3', help='Path to fourth metrics.csv')
     parser.add_argument('--compare-label3', default='Redis-NUMA (TinyLFU)', help='Label for fourth input')
     parser.add_argument('--compare-phase-dir3', help='Directory containing fourth phase*.txt files')
+    parser.add_argument('--compare-input4', help='Path to fifth metrics.csv')
+    parser.add_argument('--compare-label4', default='Redis-NUMA (CAAT)', help='Label for fifth input')
+    parser.add_argument('--compare-phase-dir4', help='Directory containing fifth phase*.txt files')
     parser.add_argument('--title', default=None, help='Figure title')
     parser.add_argument('--dpi', type=int, default=150, help='DPI (default: 150)')
     args = parser.parse_args()
@@ -373,47 +378,27 @@ def main():
     }]
     print(f"  {len(primary['time'])} points")
 
-    if args.compare_input:
-        if not os.path.exists(args.compare_input):
-            print(f"ERROR: File not found: {args.compare_input}")
+    extra_slots = [
+        (args.compare_input, args.compare_label, args.compare_phase_dir),
+        (args.compare_input2, args.compare_label2, args.compare_phase_dir2),
+        (args.compare_input3, args.compare_label3, args.compare_phase_dir3),
+        (args.compare_input4, args.compare_label4, args.compare_phase_dir4),
+    ]
+    for extra_input, extra_label, extra_phase_dir in extra_slots:
+        if not extra_input:
+            continue
+        if not os.path.exists(extra_input):
+            print(f"ERROR: File not found: {extra_input}")
             sys.exit(1)
-        print(f"Parsing: {args.compare_input}")
-        compare, _, compare_first_ts = parse_csv(args.compare_input, args.compare_label)
-        compare['first_ts'] = compare_first_ts
-        datasets.append(compare)
+        print(f"Parsing: {extra_input}")
+        extra, _, extra_first_ts = parse_csv(extra_input, extra_label)
+        extra['first_ts'] = extra_first_ts
+        datasets.append(extra)
         latency_sets.append({
-            'label': args.compare_label,
-            'latencies': parse_phase_latency(args.compare_phase_dir or os.path.dirname(args.compare_input)),
+            'label': extra_label,
+            'latencies': parse_phase_latency(extra_phase_dir or os.path.dirname(extra_input)),
         })
-        print(f"  {len(compare['time'])} points")
-
-    if args.compare_input2:
-        if not os.path.exists(args.compare_input2):
-            print(f"ERROR: File not found: {args.compare_input2}")
-            sys.exit(1)
-        print(f"Parsing: {args.compare_input2}")
-        compare2, _, compare2_first_ts = parse_csv(args.compare_input2, args.compare_label2)
-        compare2['first_ts'] = compare2_first_ts
-        datasets.append(compare2)
-        latency_sets.append({
-            'label': args.compare_label2,
-            'latencies': parse_phase_latency(args.compare_phase_dir2 or os.path.dirname(args.compare_input2)),
-        })
-        print(f"  {len(compare2['time'])} points")
-
-    if args.compare_input3:
-        if not os.path.exists(args.compare_input3):
-            print(f"ERROR: File not found: {args.compare_input3}")
-            sys.exit(1)
-        print(f"Parsing: {args.compare_input3}")
-        compare3, _, compare3_first_ts = parse_csv(args.compare_input3, args.compare_label3)
-        compare3['first_ts'] = compare3_first_ts
-        datasets.append(compare3)
-        latency_sets.append({
-            'label': args.compare_label3,
-            'latencies': parse_phase_latency(args.compare_phase_dir3 or os.path.dirname(args.compare_input3)),
-        })
-        print(f"  {len(compare3['time'])} points")
+        print(f"  {len(extra['time'])} points")
 
     ok = plot_report(datasets, latency_sets, args.output, args.title, args.dpi)
     latency_output = os.path.splitext(args.output)[0] + '_latency.png'

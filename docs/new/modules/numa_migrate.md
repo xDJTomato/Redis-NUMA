@@ -112,7 +112,8 @@ int numa_migrate_init(void) {
 - **依赖 `numa_pool`**（通过 `zmalloc.c` 暴露的 `numa_zmalloc_onnode`）：目标节点
   上的实际分配由 `numa_pool` 的 slab/尺寸类逻辑完成。
 - **理论上应被 `numa_key_migrate` 复用，但实际并未被调用**：见第 6 节。
-- **不直接被 `numa_composite_lru`/`numa_tinylfu` 调用**：这两个策略触发迁移时，
+- **不直接被 NUMAflow 迁移策略调用**：`caat`/`composite_lru`/`tinylfu` 三个预设
+  （`numaflow/src/nf_strategy.c`，经桥接 `src/numa_flow.c`）触发迁移时，最终
   调用的是 `numa_key_migrate.c` 暴露的 `numa_migrate_single_key()`/
   `numa_migrate_multiple_keys()`，而不是本模块的 `numa_migrate_memory()`。
 
@@ -137,7 +138,8 @@ int numa_migrate_init(void) {
   数非法/节点越界，排查"迁移为什么变少了"时不能只看这一个计数器。
 - **头文件注释仍标注"Phase 1: basic migration functionality for testing"**：
   `numa_migrate.h` 顶部注释写着这是测试阶段的基础功能，Phase 2（自动负载均衡+
-  热度追踪）"planned"——但热度追踪和自动迁移调度实际已经在
-  `numa_key_migrate`/`numa_composite_lru`/`numa_tinylfu` 中实现，只是没有经过本模
-  块。这条注释已经过时，容易让读代码的人误以为"自动迁移还没做"，是一处应当更
-  新（或删除）的注释债务，本文档予以指出但未改动源码本身。
+  热度追踪）"planned"——但热度追踪已经在 `numa_key_migrate` 中无条件实现，自动
+  迁移调度已经在 NUMAflow（经桥接 `src/numa_flow.c` 驱动 `caat`/`composite_lru`/
+  `tinylfu` 三个预设）中实现，只是没有经过本模块。这条注释已经过时，容易让读
+  代码的人误以为"自动迁移还没做"，是一处应当更新（或删除）的注释债务，本文档
+  予以指出但未改动源码本身。

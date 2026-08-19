@@ -41,21 +41,9 @@ redisAtomic unsigned long long dbset_overwrite_seen_count = 0;
 #endif
 
 #ifdef HAVE_NUMA
-#include "numa_strategy_slots.h"
-#include "numa_composite_lru.h"
 #include "numa_key_migrate.h"
+#include "numa_flow.h"
 #include "zmalloc.h"
-
-static void *numaObjectDataAllocPtr(robj *val) {
-    if (!val || !val->ptr) return NULL;
-
-    if (val->type == OBJ_STRING) {
-        if (val->encoding == OBJ_ENCODING_RAW) return sdsAllocPtr(val->ptr);
-        return NULL;
-    }
-
-    return val->ptr;
-}
 
 static void *numaObjectSampleAllocPtr(robj *val) {
     return numa_object_sample_alloc_ptr(val);
@@ -153,38 +141,33 @@ robj *lookupKey(redisDb *db, robj *key, int flags) {
             }
 
 #ifdef HAVE_NUMA
-            /* NUMA Composite LRU hotness tracking: only updated on real "touching"
-             * accesses, using the same condition as the LRU update above - NOTOUCH
-             * lookups (EXISTS/TYPE/SCAN) and the BGSAVE child process do not refresh
-             * hotness, avoiding inflated hotness and reducing COW. data_ptr is the
-             * allocation base of the actual data (the zmalloc return value), used to
-             * read the NUMA node from the PREFIX.
+            /* NUMA hotness tracking: only updated on real "touching" accesses,
+             * using the same condition as the LRU update above - NOTOUCH
+             * lookups (EXISTS/TYPE/SCAN) and the BGSAVE child process do not
+             * refresh hotness, avoiding inflated hotness and reducing COW.
+             * data_ptr is the allocation base of the actual data (the zmalloc
+             * return value), used to read/update the NUMA node and hotness
+             * from the PREFIX.
              *
              * Key point: dict/robj metadata is forced onto DRAM (Node 0) by
              * zmalloc_local, so the PREFIX of val->ptr (dict *) always reports Node 0
              * and cannot represent the real data location. For hash/set with
              * OBJ_ENCODING_HT, probe the SDS value of a dictEntry to get the node of
-             * the actual field data. */
-            {
-                numa_strategy_t *clru = numa_strategy_slot_get(1);
-                if (clru && clru->enabled && clru->private_data) {
-                    composite_lru_data_t *clru_data = clru->private_data;
-                    if (clru_data->config.access_tracking_enabled) {
-                        clru_data->db = db;
-                        void *data_ptr = clru_data->config.locality_stats_enabled ?
-                                         numaObjectSampleAllocPtr(val) : numaObjectDataAllocPtr(val);
-                        composite_lru_record_access(clru, key->ptr, val, data_ptr,
-                                                    (uint16_t)(server.lruclock & 0xFFFF));
-                    }
-                }
-                numa_strategy_t *tlfu = numa_strategy_slot_get(2);
-                if (tlfu && tlfu->enabled && tlfu->private_data) {
-                    tinylfu_data_t *tlfu_data = tlfu->private_data;
-                    tlfu_data->db = db;
-                    void *data_ptr = numaObjectSampleAllocPtr(val);
-                    tinylfu_record_access(tlfu, key->ptr, val, data_ptr);
-                }
-            }
+             * the actual field data.
+             *
+             * This call is unconditional (not gated on any migration strategy
+             * being enabled) so the PREFIX counters remain the single ground
+             * truth that NUMA FLOW's enumerate() step reads from.
+             *
+             * numa_flow_observe_access() separately feeds the NUMAflow
+             * tracker's CMS+Doorkeeper frequency estimator by key name (the
+             * PREFIX has no notion of "frequency", only hotness/access_count)
+             * - without this, cms_estimate always reads 0 and the tinylfu/
+             * caat presets' frequency-gated stages silently drop/demote
+             * everything. */
+            numa_key_migrate_touch(numaObjectSampleAllocPtr(val),
+                                    (uint16_t)(server.lruclock & 0xFFFF));
+            numa_flow_observe_access(key->ptr);
 #endif
         }
 

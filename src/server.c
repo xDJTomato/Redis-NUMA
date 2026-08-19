@@ -1503,10 +1503,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         numa_config_update_pressure_weights();
     }
 
-    /* Run NUMA strategy slot framework */
+    /* Run due NUMAflow workflows (including the auto-loaded default strategy). */
     run_with_period(1000) {
-        numa_strategy_run_all();
-        numa_strategy_scheduler_cron();
         numa_flow_cron();
     }
 #endif
@@ -7361,25 +7359,6 @@ int main(int argc, char **argv) {
     initServer();
     
 #ifdef HAVE_NUMA
-    /* Pin the main-thread NUMA node to prevent background threads from triggering migration ping-pong. */
-    int main_thread_numa_node = 0;
-    if (numa_available() >= 0) main_thread_numa_node = numa_node_of_cpu(sched_getcpu());
-    composite_lru_set_main_thread();
-    tinylfu_set_main_thread_node(main_thread_numa_node);
-
-    /* Initialize the NUMA strategy slot framework (must run after initServer()). */
-    numa_strategy_init();
-    numa_strategy_scheduler_init(server.el);
-
-    /* numa-enabled master switch: when off, disable migration policies and demotion, keeping only NUMA allocation. */
-    if (!server.numa_enabled) {
-        numa_strategy_slot_disable(1);
-        numa_strategy_slot_disable(2);
-        server.numa_demote_enabled = 0;
-        serverLog(LL_NOTICE, "NUMA management disabled by config (numa-enabled no); "
-                             "NUMA-aware allocation remains active");
-    }
-
     /* Initialize the configurable allocation policy (pressure-aware weighted interleave by default); benchmarks can switch strategies at runtime. */
     if (numa_config_strategy_init() == C_OK) {
         numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE);
@@ -7398,24 +7377,23 @@ int main(int argc, char **argv) {
         serverLog(LL_WARNING, "NUMA bandwidth monitor init failed, using defaults");
     }
 
-    /* Initialize the NUMAflow DAG bridge (NUMA FLOW command). */
+    /* Initialize the NUMAflow DAG bridge (NUMA FLOW command) and, unless
+     * numa-enabled is off, auto-load numa-flow-default-strategy as the
+     * "default" workflow entry so migration runs out of the box without
+     * requiring an explicit NUMA FLOW LOAD. This is the single migration
+     * engine: caat/composite_lru/tinylfu/noop are all NUMAflow atomic-op
+     * presets (numaflow/src/nf_strategy.c), not separate native modules. */
     numa_flow_init();
-
-    /* If numa-migrate-config is set in the config file, load the JSON config and apply it to the default strategy. */
-    if (server.numa_migrate_config_file) {
-        composite_lru_config_t numa_cfg;
-        numa_strategy_t *active = numa_strategy_slot_get(1);
-        if (composite_lru_load_config(server.numa_migrate_config_file, &numa_cfg) == NUMA_STRATEGY_OK) {
-            if (active) {
-                composite_lru_apply_config(active, &numa_cfg);
-            } else {
-                serverLog(LL_WARNING,
-                    "[NUMA] numa-migrate-config loaded but no active strategy on slot 1");
-            }
-        } else {
-            serverLog(LL_WARNING,
-                "[NUMA] Failed to load numa-migrate-config: %s", server.numa_migrate_config_file);
+    if (server.numa_enabled) {
+        if (numa_flow_load_default(server.numa_flow_default_strategy,
+                                    server.numa_flow_interval_sec) != C_OK) {
+            serverLog(LL_WARNING, "[NUMA] Failed to auto-load default strategy '%s'",
+                      server.numa_flow_default_strategy);
         }
+    } else {
+        server.numa_demote_enabled = 0;
+        serverLog(LL_NOTICE, "NUMA management disabled by config (numa-enabled no); "
+                             "NUMA-aware allocation remains active");
     }
 #endif
     

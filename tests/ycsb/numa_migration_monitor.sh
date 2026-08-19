@@ -79,8 +79,8 @@ show_allocation_stats() {
 # ── 策略状态 ────────────────────────────────────────────────────────────────
 show_strategy_status() {
     echo -e "\n${BOLD}${CYAN}=== 策略状态 ===${NC}"
-    
-    $REDIS_CLI -h $REDIS_HOST -p $REDIS_PORT NUMA STRATEGY LIST 2>/dev/null || {
+
+    $REDIS_CLI -h $REDIS_HOST -p $REDIS_PORT NUMA FLOW LIST 2>/dev/null || {
         echo "无法获取策略状态"
     }
 }

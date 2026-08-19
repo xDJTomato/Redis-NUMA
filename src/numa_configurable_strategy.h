@@ -12,7 +12,14 @@
 #include "atomicvar.h"
 #include <stddef.h>
 
-/* Configurable NUMA strategy types. */
+/* Configurable NUMA strategy types.
+ * 9 enum values, but only 7 independent behaviors: WEIGHTED_INTERLEAVE
+ * shares its node-selection code with WEIGHTED (select_weighted_node() in
+ * numa_configurable_strategy.c, differing only in weight source), and
+ * ADAPTIVE/LATENCY_AWARE are kernel-side placeholders that behave as
+ * LOCAL_FIRST - their real implementation is the matching alloc_adaptive/
+ * alloc_latency_aware atomic op in NUMAflow (numaflow/src/nf_ops.c),
+ * reachable via NUMA FLOW LOAD, not the zmalloc hot path. */
 typedef enum {
     NUMA_STRATEGY_CONFIG_LOCAL_FIRST = 0,    /* Local-first policy. */
     NUMA_STRATEGY_CONFIG_INTERLEAVE,         /* Interleaved allocation policy. */

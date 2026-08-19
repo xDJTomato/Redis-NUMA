@@ -49,6 +49,15 @@ void numa_bw_monitor_sample(void);
 /* Get the bandwidth utilization of a node (0.0~1.0), -1 for an invalid node. */
 double numa_bw_get_usage(int node_id);
 
+/* Get the memory pressure of a node (0.0~1.0, higher = more pressure). Single
+ * source of truth for node pressure: when server.maxmemory is set, this is
+ * node_used_bytes / (maxmemory / num_nodes); otherwise it falls back to the
+ * node's physical /sys meminfo usage. 1-second internal cache. Used by both
+ * evict_numa.c (demotion candidate scoring) and numa_configurable_strategy.c
+ * (PRESSURE_AWARE / pressure-adjusted WEIGHTED_INTERLEAVE) so the two never
+ * disagree about how loaded a node is. */
+double numa_bw_get_node_pressure(int node_id);
+
 /* Get the current bandwidth (MB/s). */
 double numa_bw_get_current_mbps(int node_id);
 

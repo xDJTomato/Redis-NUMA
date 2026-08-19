@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include "numa_key_migrate.h"
 #include "numa_migrate.h"
+#include "numa_pool.h"
 #include "zmalloc.h"
 #include "sds.h"
 #include "dict.h"
@@ -298,6 +299,40 @@ void numa_perform_heat_decay(void) {
     
     dictReleaseIterator(iter);
     pthread_mutex_unlock(&global_ctx.mutex);
+}
+
+/*
+ * numa_key_migrate_touch - neutral hotness bookkeeping on the access path
+ *
+ * Updates only the zmalloc-prefix ground truth (staircase lazy decay +
+ * hotness increment + access_count + last_access), independent of any
+ * migration strategy. This used to live inline in composite_lru_record_access,
+ * gated on that module being enabled; extracted here so NUMA FLOW's
+ * enumerate() keeps getting real signal no matter which (if any) migration
+ * strategy is active.
+ */
+void numa_key_migrate_touch(void *data_ptr, uint16_t current_time) {
+    if (!data_ptr) return;
+    if (numa_pool_num_nodes() <= 1) return;
+
+    uint8_t hotness = numa_get_hotness(data_ptr);
+    uint16_t last_access = numa_get_last_access(data_ptr);
+    uint16_t elapsed = calculate_time_delta(current_time, last_access);
+    uint8_t decay = compute_key_lazy_decay_steps(elapsed);
+    if (decay > 0) {
+        uint8_t decayed = (decay >= hotness) ? 0 : (hotness - decay);
+        if (decayed != hotness) {
+            numa_set_hotness(data_ptr, decayed);
+            hotness = decayed;
+        }
+    }
+
+    if (hotness < HOTNESS_MAX_LEVEL) {
+        numa_set_hotness(data_ptr, hotness + 1);
+    }
+
+    numa_increment_access_count(data_ptr);
+    numa_set_last_access(data_ptr, current_time);
 }
 
 /* ========== Type-specific migration adapters ========== */

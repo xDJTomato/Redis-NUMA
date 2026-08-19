@@ -234,7 +234,7 @@ fi
 
 scp -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$SSH_PORT" -i "$SSH_KEY" \
     "$BIN_SRC/redis-server" "$BIN_SRC/redis-cli" "$BIN_SRC/redis-benchmark" \
-    "$PROJECT_ROOT/redis.conf" "$PROJECT_ROOT/composite_lru.json" \
+    "$PROJECT_ROOT/redis.conf" \
     numatest@127.0.0.1:/home/numatest/ || {
     log_err "scp of binaries failed"
     write_result "failed" "scp of built binaries into guest failed"
@@ -248,13 +248,13 @@ set -x
 cd /home/numatest
 chmod +x redis-server redis-cli redis-benchmark
 cat /sys/devices/system/node/node*/meminfo 2>/dev/null | grep -E "MemTotal|Node" || true
-./redis-server ./redis.conf --daemonize yes --port 7799 --logfile server.log --numa-migrate-config /home/numatest/composite_lru.json
+./redis-server ./redis.conf --daemonize yes --port 7799 --logfile server.log
 sleep 2
 ./redis-cli -p 7799 ping
 ./redis-cli -p 7799 set numatest:key1 "hello-numa"
 ./redis-cli -p 7799 get numatest:key1
 ./redis-cli -p 7799 numa config get 2>&1 || true
-./redis-cli -p 7799 numa strategy list 2>&1 || true
+./redis-cli -p 7799 numa flow list 2>&1 || true
 ./redis-benchmark -p 7799 -q -n 20000 -c 20 -t set,get
 ./redis-cli -p 7799 numa migrate stats 2>&1 || true
 ./redis-cli -p 7799 shutdown nosave 2>&1 || true

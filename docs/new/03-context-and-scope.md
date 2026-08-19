@@ -14,9 +14,9 @@
 | 角色 | 通过什么接口 | 交换什么数据 |
 | --- | --- | --- |
 | 普通业务客户端 | 标准 RESP 协议（`SET`/`GET`/`HSET`/... 全部原生命令不变） | 正常的 key-value 读写；对客户端完全透明——不知道、也不需要知道数据实际被分配在哪个 NUMA 节点 |
-| 运维/监控客户端 | `NUMA CONFIG GET/SET/STATS`、`NUMA MIGRATE STATS/INFO`、`NUMA STRATEGY LIST` | 查询当前分配策略、各节点内存占用、迁移统计；调整策略参数（权重、阈值等） |
-| 高级用户 / 二次开发者 | `NUMA MIGRATE KEY/DB/SCAN`、`NUMA STRATEGY SLOT`、`NUMA FLOW LOAD/RUN/...` | 手动触发迁移；插入自定义迁移策略到某个槎位；加载 NUMAflow 编排出的自定义 DAG 工作流 |
-| 部署/运维脚本 | `redis.conf` 中的 `numa-enabled`、`numa-demote-*`、`numa-migrate-config` 等配置项 | 启动前静态配置分配策略、降级阈值、Composite LRU 参数文件路径 |
+| 运维/监控客户端 | `NUMA CONFIG GET/SET/STATS`、`NUMA MIGRATE STATS/INFO`、`NUMA FLOW LIST/STATUS` | 查询当前分配策略、各节点内存占用、迁移统计；调整策略参数（权重、阈值等） |
+| 高级用户 / 二次开发者 | `NUMA MIGRATE KEY/DB/SCAN`、`NUMA FLOW LOAD/RUN/DEFAULT/ADAPT/...` | 手动触发迁移；用 `NUMA FLOW DEFAULT` 在 `caat`/`composite_lru`/`tinylfu`/`noop` 间切换；加载 NUMAflow 编排出的自定义 DAG 工作流 |
+| 部署/运维脚本 | `redis.conf` 中的 `numa-enabled`、`numa-demote-*`、`numa-flow-default-strategy`、`numa-flow-interval-sec` 等配置项 | 启动前静态配置分配策略、降级阈值、NUMAflow 默认迁移策略及其运行间隔 |
 
 命令语法的完整参考见 [`modules/numa_command.md`](modules/numa_command.md)；`redis.conf`
 配置项的完整清单见仓库根目录 `redis.conf`（第 1184–1211、2338–2354 行）。

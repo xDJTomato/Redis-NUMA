@@ -88,7 +88,7 @@ gitignore），通过 `-object memory-backend-ram` + `-numa node,memdev=...` 模
 2 个 NUMA 节点，带一个诚实的 SSH 等待超时（默认 480 秒——本机没有 `/dev/kvm`，
 启动走的是纯软件 TCG 模拟，本来就慢），把本地编译好的
 `redis-server`/`redis-cli`/`redis-benchmark` 拷进去，在客户机内跑
-`PING`/`SET`/`GET`、`NUMA CONFIG GET`、`NUMA STRATEGY LIST` 以及一次
+`PING`/`SET`/`GET`、`NUMA CONFIG GET`、`NUMA FLOW LIST` 以及一次
 `redis-benchmark`。NUMA 节点的可见性是直接读取 `/sys/devices/system/node/` 来
 检查的，而不是靠 `numactl`——云镜像默认没装这个包，装它需要一次在 TCG 慢速
 slirp NAT 下可能耗时数分钟的 `apt-get`，相比直接读 sysfs 没有任何好处。

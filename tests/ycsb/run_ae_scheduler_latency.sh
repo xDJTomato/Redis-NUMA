@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 # ============================================================================
+# ARCHIVED (ADR-08, docs/new/09-architecture-decisions.md): this benchmark
+# compares the per-slot AE-time-event vs serverCron scheduling modes that
+# `numa_strategy_slots` (ADR-07) used to offer via `NUMA STRATEGY SLOT
+# SCHEDULE`. That framework, and the AE/servercron toggle with it, has been
+# removed - migration is now driven solely by NUMAflow's `numa_flow_cron()`
+# on serverCron, with no AE time-event variant. This script will fail against
+# current builds (`NUMA STRATEGY` no longer exists); kept for historical
+# reference only. Do not port it without first deciding whether an
+# AE-scheduled NUMAflow mode is worth building - that is a new feature, not
+# a like-for-like migration of this one.
+# ============================================================================
+#
 # Redis-NUMA AE Strategy Scheduler latency disturbance benchmark
 #
 # Runs a fixed-window YCSB hotspot workload while migration pressure is injected

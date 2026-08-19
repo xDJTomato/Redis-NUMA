@@ -1,5 +1,13 @@
 # 构件详情：numa_composite_lru（Composite LRU 策略，Slot 1 默认策略）
 
+> **已退役（[ADR-08](../09-architecture-decisions.md)）**：`src/numa_composite_lru.{c,h}`
+> 已从代码库删除。Composite LRU 的算法（staircase 热度衰减 + 双通道候选发现）
+> 现在只作为 NUMAflow 的原子操作预设存在（`numaflow/src/nf_strategy.c` 的
+> `build_composite_lru`），通过 `NUMA FLOW DEFAULT composite_lru` 或
+> `NUMA FLOW LOAD` 使用，不再有内核原生实现或独立的 `key_heat_map`/热点环形
+> 缓冲状态。`composite_lru.json` 保留在仓库根目录作为字段参考，但内核不再读取
+> 它。以下内容保留作为该模块曾经存在过的设计记录。
+
 > arc42 §5 Building Block View 的构件详情页。对应源码：`src/numa_composite_lru.c` /
 > `src/numa_composite_lru.h`，配置文件 `composite_lru.json`。本文档取代原
 > `docs/new/06-numa-composite-lru.md`。

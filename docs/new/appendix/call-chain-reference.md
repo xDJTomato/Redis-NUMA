@@ -25,35 +25,35 @@
 │  │                                                              │   │
 │  │  ┌────────────────────────────────────────────────────────┐  │   │
 │  │  │           统一命令接口 (numa_command.c)                 │  │   │
-│  │  │     MIGRATE │ CONFIG │ STRATEGY │ HELP                 │  │   │
+│  │  │     MIGRATE │ CONFIG │ FLOW │ HELP                     │  │   │
 │  │  └────────┬──────────────────────────┬────────────────────┘  │   │
 │  │           │                          │                        │   │
 │  │           ▼                          ▼                        │   │
 │  │  ┌─────────────────┐        ┌──────────────────────┐         │   │
-│  │  │ Key 迁移模块     │        │ 策略插槽框架          │         │   │
-│  │  │ (key_migrate)   │        │ (strategy_slots)     │         │   │
-│  │  │                 │        │   ┌──────────────┐   │         │   │
-│  │  │ ├─ String 适配器│        │   │ Slot 0: Noop │   │         │   │
-│  │  │ ├─ Hash 适配器  │        │   │ Slot 1: C-LRU│◄──┼─────┐   │   │
-│  │  │ ├─ List 适配器  │        │   │ Slot 2: TLFU │   │     │   │   │
-│  │  │ ├─ Set 适配器   │        │   │ Slot 3-15:   │   │     │   │   │
-│  │  │ └─ ZSet 适配器  │        │   │   自定义扩展  │   │     │   │   │
+│  │  │ Key 迁移模块     │        │ NUMAflow 桥接         │         │   │
+│  │  │ (key_migrate)   │        │ (numa_flow.c)         │         │   │
+│  │  │                 │        │  enumerate()/apply()  │         │   │
+│  │  │ ├─ String 适配器│        │  回调 ──────────────┐  │         │   │
+│  │  │ ├─ Hash 适配器  │        │                      │  │         │   │
+│  │  │ ├─ List 适配器  │        │  default 工作流：    │  │         │   │
+│  │  │ ├─ Set 适配器   │        │  caat / composite_lru│  │         │   │
+│  │  │ └─ ZSet 适配器  │        │  / tinylfu / noop    │  │         │   │
 │  │  └────────┬────────┘        └──────────┬───────────┘     │   │   │
 │  │           │                            │                  │   │   │
 │  │           └────────────┬───────────────┘                  │   │   │
 │  │                        │                                  │   │   │
 │  │                        ▼                                  │   │   │
 │  │           ┌────────────────────────┐                      │   │   │
-│  │           │  Composite LRU 策略     │                      │   │   │
-│  │           │  ├─ 快速通道(候选池)    │                      │   │   │
-│  │           │  └─ 兜底通道(渐进扫描)  │                      │   │   │
+│  │           │  NUMAflow 原子操作 DAG  │                      │   │   │
+│  │           │  （numaflow/src/       │                      │   │   │
+│  │           │   nf_strategy.c 预设） │                      │   │   │
 │  │           └────────────┬───────────┘                      │   │   │
 │  │                        │                                  │   │   │
 │  │           ┌────────────┼───────────┐                      │   │   │
 │  │           ▼            ▼           ▼                      │   │   │
 │  │  ┌────────────┐ ┌────────────┐ ┌────────────────────┐    │   │   │
-│  │  │ 内存迁移    │ │ 可配置策略  │ │ JSON 配置加载       │    │   │   │
-│  │  │ (migrate)  │ │ (config)   │ │                    │    │   │   │
+│  │  │ 内存迁移    │ │ 可配置策略  │ │ NUMA FLOW LOAD      │    │   │   │
+│  │  │ (migrate)  │ │ (config)   │ │ （自定义 DAG JSON） │    │   │   │
 │  │  └─────┬──────┘ └─────┬──────┘ └────────────────────┘    │   │   │
 │  │        │              │                                   │   │   │
 │  └────────┼──────────────┼───────────────────────────────────┘   │   │
@@ -86,17 +86,13 @@ main()
     │     │
     │     ├── loadServerConfig()
     │     │     │
-    │     │     └── 解析 numa-enabled, numa-migrate-config 等参数
+    │     │     └── 解析 numa-enabled, numa-flow-default-strategy,
+    │     │           numa-flow-interval-sec 等参数
     │     │
     │     └── zmalloc_init()
     │             └── numa_slab_init()   // src/numa_pool.c:312，由 zmalloc.c:94 调用
     │
     ├── #ifdef HAVE_NUMA  (initServer 之后)
-    │     │
-    │     ├── numa_strategy_init()                // src/server.c:7371
-    │     │     ├── numa_strategy_register_noop()  // 注册 Slot 0
-    │     │     ├── numa_composite_lru_register()  // 注册 Slot 1
-    │     │     └── numa_tinylfu_register()        // 注册 Slot 2（默认禁用）
     │     │
     │     ├── numa_config_strategy_init()          // src/server.c:7384
     │     │     └── numa_config_set_strategy(WEIGHTED_INTERLEAVE)  // src/server.c:7385，设为默认
@@ -105,10 +101,13 @@ main()
     │     │
     │     ├── numa_bw_monitor_init()               // src/server.c:7395
     │     │
-    │     └── if (server.numa_migrate_config_file)
+    │     └── numa_flow_init()
     │             │
-    │             ├── composite_lru_load_config(path, &cfg)     // src/server.c:7408
-    │             └── composite_lru_apply_config(strategy, &cfg) // src/server.c:7410
+    │             └── if (numa-enabled)  // 默认策略自动加载
+    │                     numa_flow_load_default(numa-flow-default-strategy,
+    │                                             numa-flow-interval-sec)
+    │                         └── nf_strategy_build(&graph, "caat" 等)
+    │                               把对应预设登记为 `default` 工作流条目
     │
     └── aeMain()  // 进入事件循环
 ```
@@ -133,33 +132,27 @@ serverCron()  // 每 100ms 执行一次
     │     │     │           w = max(1, (1 - p) * 100)
     │     │     │           atomicSet(pressure_weights[i], w)
     │     │     │
-    │     │     └── numa_strategy_run_all()            // 运行所有策略
+    │     │     └── numa_flow_cron()            // 驱动所有已加载的 NUMAflow 工作流
     │     │             │
-    │     │             ├── Slot 1: Composite LRU（默认启用）
-    │     │             │       │
-    │     │             │       ├── composite_lru_execute()
-    │     │             │       │       │
-    │     │             │       │       ├── 周期衰减
-    │     │             │       │       │
-    │     │             │       │       ├── 快速通道：处理候选池
-    │     │             │       │       │       │
-    │     │             │       │       │       └── numa_migrate_key_by_name()
-    │     │             │       │       │
-    │     │             │       │       └── 兜底通道：渐进扫描
-    │     │             │       │               │
-    │     │             │       │               └── numa_migrate_key_by_name()
-    │     │             │       │
-    │     │             │       └── 更新统计
-    │     │             │
-    │     │             └── Slot 2: TinyLFU（默认禁用，需手动启用）
-    │     │                     │
-    │     │                     ├── tinylfu_execute()
-    │     │                     │       │
-    │     │                     │       ├── 遍历候选环形缓冲区
-    │     │                     │       ├── 重新估计频率（CMS + Doorkeeper）
-    │     │                     │       └── 频率 ≥ 阈值 → numa_migrate_key_by_name()
-    │     │                     │
-    │     │                     └── 更新统计
+    │     │             └── for each loaded entry (至少有 `default`):
+    │     │                   if (now - last_run >= interval_sec)
+    │     │                       numa_flow_run_entry(entry)
+    │     │                           │
+    │     │                           ├── dictGetSafeIterator(db->dict)
+    │     │                           ├── 构造 nf_bridge_t：
+    │     │                           │     enumerate = numa_flow_enumerate
+    │     │                           │     apply     = numa_flow_apply
+    │     │                           │     ctx.budget = 256
+    │     │                           │
+    │     │                           └── nf_bridge_run(&br, &entry->graph, &result)
+    │     │                                   │
+    │     │                                   ├── 对每个枚举出的 key 跑该工作流的
+    │     │                                   │     原子操作 DAG（见下方"自动迁移"）
+    │     │                                   │
+    │     │                                   └── 结果（终止节点输出的并集）与
+    │     │                                         入队时的原始节点做 diff，
+    │     │                                         对变化项调用 apply()
+    │     │                                             └── numa_migrate_key_by_name()
     │     │
     │     └── (无 10 秒 compact 任务 — 旧版 numa_pool_try_compact 已移除)
     │
@@ -185,12 +178,7 @@ lookupKeyRead(c->db, c->argv[1], flags)
     │     │
     │     └── #ifdef HAVE_NUMA
     │             │
-    │             ├── 绑定 db 到 Composite LRU（无条件赋值）
-    │             │     composite_lru_data_t *data = clru->private_data;
-    │             │     data->db = db;
-    │             │
-    │             ├── composite_lru_record_access(strategy, key->ptr, val, lru_clock)
-    │             │       │                             ↑ SDS string
+    │             ├── numa_key_migrate_touch(val)     // 无条件调用，不再判断任何策略是否 enabled
     │             │       │
     │             │       ├── 1. 读取 PREFIX 热度
     │             │       │     hotness = numa_get_hotness(val)
@@ -206,41 +194,22 @@ lookupKeyRead(c->db, c->argv[1], flags)
     │             │       ├── 4. 热度 +1
     │             │       │     if (hotness < 7) hotness++
     │             │       │
-    │             │       ├── 5. 写回 PREFIX + 同步 key_heat_map
-    │             │       │     numa_set_hotness(val, hotness)
-    │             │       │     numa_set_last_access(val, lru_clock)
-    │             │       │
-    │             │       └── 6. 判断是否写入候选池
-    │             │             if (首次越过阈值 && Key 在远程节点)
-    │             │                 sds key_copy = sdsdup(key);
-    │             │                 hot_candidates[idx].key = key_copy;
+    │             │       └── 5. 写回 PREFIX
+    │             │             numa_set_hotness(val, hotness)
+    │             │             numa_set_last_access(val, lru_clock)
+    │             │             ↑ 这是 NUMAflow enumerate() 读取的唯一 ground truth
     │             │
-    │             └── TinyLFU（Slot 2, 若启用）
-    │                   │
-    │                   ├── 绑定 db 到 TinyLFU（无条件赋值）
-    │                   │     tinylfu_data_t *tlfu_data = tlfu->private_data;
-    │                   │     tlfu_data->db = db;
-    │                   │
-    │                   └── tinylfu_record_access(tlfu, key->ptr, val, data_ptr)
-    │                           │
-    │                           ├── 1. Doorkeeper 检查
-    │                           │     if (!dk_test(&doorkeeper, hash))
-    │                           │         dk_add(&doorkeeper, hash)  // 首次访问
-    │                           │         统计本地/远程访问
-    │                           │
-    │                           ├── 2. CMS 递增（通过 Doorkeeper 后）
-    │                           │     cms_record(&cms, hash)
-    │                           │
-    │                           ├── 3. 频率估计
-    │                           │     freq = cms_estimate(&cms, hash)
-    │                           │
-    │                           ├── 4. 迁移条件检查
-    │                           │     if (freq >= threshold && 数据在远程节点)
-    │                           │         ring_push(key, val, target_node, freq)
-    │                           │
-    │                           └── 5. 全局衰减检查
-    │                                 if (total_ops >= reset_interval)
-    │                                     cms_halve + dk_clear
+    │             └── numa_flow_observe_access(key->ptr)   // src/numa_flow.c
+    │                     │
+    │                     └── nf_tracker_observe(&g_tracker, key)
+    │                             │
+    │                             ├── Doorkeeper 检查：首次访问只记入 Doorkeeper
+    │                             ├── CMS 递增（通过 Doorkeeper 后）
+    │                             └── 全局衰减：total_ops 达到 reset_interval 时
+    │                                   cms_halve + dk_clear
+    │                     ↑ 这是 Redis 桥接里唯一调用 nf_tracker_observe() 的地方
+    │                       （修复前完全缺失，见 ADR-09：TinyLFU/CAAT 的
+    │                       cms_estimate 曾永远读到 0）
     │
     └── 返回 Value 给客户端
 ```
@@ -274,7 +243,7 @@ setCommand(c)
     │     └── 设置 Key-Value
     │           dbAdd(db, key, val)
     │
-    └── (热度在首次 GET 时由 composite_lru_record_access 初始化)
+    └── (热度在首次 GET 时由 numa_key_migrate_touch 初始化)
 ```
 
 ## Key 迁移调用链（完整版）
@@ -327,54 +296,53 @@ numaCommand(c)
     └── 返回 OK/ERR
 ```
 
-### 自动迁移（Composite LRU 触发）
+### 自动迁移（NUMAflow `default` 工作流触发，默认 CAAT）
 
 ```
 serverCron()  // 每秒
     │
     ▼
-numa_strategy_run_all()
+numa_flow_cron()
     │
-    └── composite_lru_execute(strategy)
+    └── numa_flow_run_entry(default 工作流)
             │
-            ├── 快速通道（候选池处理）
-            │     │
-            │     └── for each candidate in hot_candidates:
-            │             │
-            │             ├── 重读 PREFIX 当前热度
-            │             │     cur_hotness = numa_get_hotness(cand->val)
-            │             │     mem_node = numa_get_node_id(cand->val)
-            │             │
-            │             ├── 带宽感知门槛调整
-            │             │     if (src_bw > 0.7) effective_threshold--
-            │             │
-            │             ├── 检查资源状态
-            │             │     status = check_resource_status(cand->target_node)
-            │             │
-            │             ├── 满足条件 ──► 迁移
-            │             │     numa_migrate_key_by_name(data->db, cand->key, cand->target_node)
-            │             │
-            │             ├── 带宽饱和 ──► data->migrations_bw_blocked++
-            │             ├── 过载/压力 ──► data->migrations_overloaded++
-            │             │
-            │             └── 释放 SDS 副本
-            │                   sdsfree(cand->key)
-            │                   cand->key = NULL
+            ├── enumerate() 枚举 db->dict 里的每个 key（读 PREFIX 热度/节点信息）
             │
-            └── 兜底通道（渐进扫描 key_heat_map）
+            └── nf_bridge_run() 驱动该工作流的原子操作 DAG——以默认的 CAAT
+                  预设（`build_caat`，numaflow/src/nf_strategy.c）为例：
                   │
-                  └── composite_lru_scan_once()
-                          │
-                          ├── 扫描 key_heat_map（每次 batch_size 个条目）
-                          │     │
-                          │     ├── 热度 >= 阈值 且 在远程
-                          │     │     └── numa_migrate_key_by_name(data->db, dictGetKey(de), preferred_node)
-                          │     │
-                          │     └── 冷 Key 在本地 且 压力高
-                          │           └── numa_migrate_key_by_name(data->db, dictGetKey(de), remote_node)
-                          │
-                          └── 更新扫描统计
+                  ├── 打分（对每个候选 key 都跑一遍）
+                  │     cms_estimate ──► score_cost_benefit
+                  │
+                  ├── 按原始驻留位置分叉（ADR-09 修复点：必须在任何一侧
+                  │     发生变更之前分叉，否则被降级但没通过晋升过滤的
+                  │     item 会从结果里丢失）
+                  │     │
+                  │     ├── filter_local（node=0，即在 DRAM 上）
+                  │     │     └── 降级子链：demote_cold(threshold=1)
+                  │     │           ──► emit_migrate（终止节点，唯一一次变更）
+                  │     │
+                  │     └── filter_remote（node=0，即不在 DRAM 上）
+                  │           └── 晋升子链：filter_freq(threshold=1)
+                  │                 ──► filter_benefit(threshold=0)
+                  │                 ──► rank_cost
+                  │                 ──► budget_limit(budget=512)
+                  │                 ──► select_dest_node(require_benefit=1)
+                  │                 ──► emit_migrate（终止节点，唯一一次变更）
+                  │
+                  └── nf_exec_run() 的结果 = 两个终止节点输出的并集
+                        （每个 item 只经过其中一条子链，只被变更一次）
+            │
+            └── 结果与入队时的原始节点 diff，对变化项调用 apply()
+                  └── numa_flow_apply() ──► numa_migrate_key_by_name()
 ```
+
+`composite_lru`（`build_composite_lru`：`score_hotness → filter_hot(threshold=5)
+→ budget_limit(budget=512) → select_dest_node → emit_migrate`，单链、只晋升
+不降级）和 `tinylfu`（`build_tinylfu`：`cms_estimate → filter_freq(threshold=2)
+→ budget_limit → select_dest_node → emit_migrate`，同样只晋升不降级）是另外
+两个预设，通过 `NUMA FLOW DEFAULT composite_lru`/`tinylfu` 切换；`noop` 是空
+图，不做任何迁移。
 
 ### migrate_string_type 内部流程
 
@@ -470,54 +438,49 @@ zfree(ptr)
           update_zmalloc_stat_free(size + PREFIX)
 ```
 
-## 配置加载调用链（完整版）
+## 运行时切换迁移策略调用链（完整版）
 
 ```
-redis-cli NUMA CONFIG LOAD /path/to/composite_lru.json
+redis-cli NUMA FLOW DEFAULT composite_lru
     │
     ▼
 numaCommand(c)
     │
-    ├── numa_cmd_config(c)
+    ├── numa_flow_command(c)   // src/numa_flow.c，NUMA FLOW 域整体路由（不在 numa_command.c 里）
     │     │
-    │     └── numa_cmd_config_load(c)
+    │     └── numa_flow_set_default(name)
     │             │
-    │             ├── path = c->argv[3]->ptr
+    │             ├── name 校验属于 {caat, composite_lru, tinylfu, noop}
     │             │
-    │             ├── composite_lru_load_config(path, &cfg)
-    │             │     │
-    │             │     ├── 打开 JSON 文件
-    │             │     ├── 逐行解析 key=value
-    │             │     └── 验证参数范围
+    │             ├── nf_strategy_build(&new_graph, name)
+    │             │     └── 按预设名重新构造对应的原子操作 DAG
+    │             │           （见上方"自动迁移"一节列出的三条链）
     │             │
-    │             └── composite_lru_apply_config(strategy, &cfg)
-    │                     │
-    │                     ├── 重建候选池（如大小变化）
-    │                     ├── 应用新配置
-    │                     └── 重置扫描游标
+    │             └── 用 new_graph 替换 `default` 工作流条目当前挂载的图
     │
-    └── 返回 OK
+    └── 返回 OK  // 无需重启，下一次 numa_flow_cron() 触发时就跑新策略
 ```
+
+加载自定义 DAG（GUI 编排导出的 JSON，不经过预设名校验）走独立的
+`NUMA FLOW LOAD <name> <path.json> [interval_sec] [ADAPT]` 命令。
+`numa-migrate-config` / `NUMA CONFIG LOAD`（composite-lru JSON 热加载）已随
+ADR-08 整体移除；`composite_lru.json` 现在只是字段名参考，内核不再读取它。
 
 ## 模块依赖关系
 
 ```
 numa_command.c
     ├── numa_key_migrate.c
-    │     ├── numa_migrate.c
-    │     └── numa_composite_lru.c
-    │           └── numa_strategy_slots.c
+    │     └── numa_migrate.c
     │
-    ├── numa_tinylfu.c
-    │     └── numa_strategy_slots.c
+    ├── numa_flow.c                    // NUMAflow 桥接，FLOW 域独立路由
+    │     ├── numaflow/src/nf_strategy.c   （caat/composite_lru/tinylfu/noop 预设）
+    │     ├── numaflow/src/nf_bridge.c     （enumerate/apply 契约 + 执行）
+    │     ├── numaflow/src/nf_track.c      （CMS + Doorkeeper 频率追踪器）
+    │     └── numaflow/src/nf_adapt.c      （ADAPT 开关时的自适应调参/换图）
     │
-    ├── numa_configurable_strategy.c
-    │     └── numaGetNodePressure() (evict.h)
-    │
-    └── numa_strategy_slots.c
-          ├── numa_composite_lru.c
-          ├── numa_tinylfu.c
-          └── (自定义策略)
+    └── numa_configurable_strategy.c
+          └── numa_bw_get_node_pressure() (numa_bw_monitor.c，与 evict_numa.c 共用)
 
 numa_pool.c  (Slab 分配器)
     └── libnuma (系统库)
@@ -525,7 +488,7 @@ numa_pool.c  (Slab 分配器)
 zmalloc.c
     ├── numa_pool.c (Slab 分配器)
     ├── numa_configurable_strategy.c (节点选择)
-    └── numa_composite_lru.c (热度接口)
+    └── numa_key_migrate.c (numa_key_migrate_touch()：热度接口)
 ```
 
 ## 数据流总结
@@ -539,18 +502,16 @@ zmalloc.c
 ### 读路径
 
 ```
-客户端 GET ──► lookupKey ──► Slot 1: composite_lru_record_access() ──► 更新 PREFIX 热度 ──► 可能写入候选池
-                          ──► Slot 2: tinylfu_record_access()（若启用）──► Doorkeeper → CMS ──► 可能入队环形缓冲区
+客户端 GET ──► lookupKey ──► numa_key_migrate_touch() ──► 更新 PREFIX 热度（阶梯衰减 + 1）
+                          ──► numa_flow_observe_access() ──► nf_tracker_observe()（Doorkeeper → CMS）
 ```
 
 ### 迁移路径
 
 ```
-serverCron ──► Slot 1: Composite LRU ──► 选择候选 Key (SDS name)
-    ──► numa_migrate_key_by_name ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
-
-serverCron ──► Slot 2: TinyLFU（若启用）──► 遍历候选环形缓冲区 ──► 重估频率
-    ──► numa_migrate_key_by_name ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
+serverCron ──► numa_flow_cron() ──► default 工作流（默认 CAAT）
+    ──► nf_bridge_run()：enumerate() 枚举 keyspace ──► 原子操作 DAG 打分/过滤/决策
+    ──► apply() ──► numa_migrate_key_by_name() ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
 ```
 
 ### 压力权重更新路径

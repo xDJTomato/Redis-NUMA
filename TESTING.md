@@ -95,7 +95,7 @@ Boots a Debian 12 generic-cloud image (downloaded once, cached under
 an honest timeout (default 480s — this host has no `/dev/kvm`, so boot is
 pure TCG software emulation and slow), copies the locally built
 `redis-server`/`redis-cli`/`redis-benchmark` in, and runs `PING`/`SET`/`GET`,
-`NUMA CONFIG GET`, `NUMA STRATEGY LIST`, and a `redis-benchmark` pass inside
+`NUMA CONFIG GET`, `NUMA FLOW LIST`, and a `redis-benchmark` pass inside
 the guest. NUMA-node visibility is checked by reading
 `/sys/devices/system/node/` directly rather than shelling out to
 `numactl` — that package isn't preinstalled on the cloud image, and

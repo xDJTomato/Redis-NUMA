@@ -1,5 +1,15 @@
 # AE 策略调度器
 
+> **已退役（[ADR-08](../09-architecture-decisions.md)）**：本文档描述的调度机制
+> 是 `numa_strategy_slots`（[numa_strategy_slots.md](numa_strategy_slots.md)）的
+> 调度层扩展，调度对象——策略槎位——本身已随 `src/numa_strategy_slots.{c,h}` 一起
+> 从代码库删除，这套 AE/servercron 逐槎位调度开关随之整体失效，没有留下替代的
+> "内核原生"调度层。三个迁移策略现在统一由 NUMAflow 的原子操作框架实现
+> （`numaflow/src/nf_strategy.c`），调度模型是 `numa_flow_cron()` 按每个工作流
+> 各自的 `interval_sec` 判断是否该跑——单线程 `serverCron` 驱动，没有 AE
+> time-event 变体，也没有"某个工作流单独切到 AE"这样的旋钮。以下内容保留作为
+> 该调度机制曾经存在过的设计记录。
+
 ## 背景
 
 `numa_strategy_slots`（见 [numa_strategy_slots.md](numa_strategy_slots.md)）最初只有一种调度方式：`serverCron` 每秒轮询、串行执行全部已启用的策略槎位。槎位数量少、Composite LRU / TinyLFU 的单次执行开销可控时，这个模型没有明显问题。但它有三个结构性风险：

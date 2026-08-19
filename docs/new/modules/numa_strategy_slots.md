@@ -1,6 +1,12 @@
 # numa_strategy_slots — 策略插槽框架
 
-> 文件：`src/numa_strategy_slots.c` / `src/numa_strategy_slots.h`
+> **已退役（[ADR-08](../09-architecture-decisions.md)）**：`src/numa_strategy_slots.{c,h}`
+> 已从代码库删除。三个迁移策略（`caat`/`composite_lru`/`tinylfu`）现在统一由
+> NUMAflow 的原子操作框架实现（`numaflow/src/nf_strategy.c`），通过
+> `NUMA FLOW` 命令管理，不再有内核原生的槎位/vtable 框架。以下内容保留作为该
+> 框架曾经存在过的设计记录。
+
+> 文件：`src/numa_strategy_slots.c` / `src/numa_strategy_slots.h`（已删除）
 
 ## 1. 职责
 

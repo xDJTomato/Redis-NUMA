@@ -2,6 +2,7 @@
 
 #define _GNU_SOURCE
 #include "numa_configurable_strategy.h"
+#include "numa_bw_monitor.h"
 #include "zmalloc.h"
 #include "server.h"
 #include "evict.h"
@@ -174,6 +175,48 @@ static int nth_enabled_node(int nth, int num_nodes) {
     return first_enabled_node(num_nodes);
 }
 
+/*
+ * select_weighted_node - weighted-random node pick shared by WEIGHTED and
+ * WEIGHTED_INTERLEAVE. The two historical "strategies" only differed in
+ * where each node's weight comes from (an admin-set static array vs. the
+ * cron-updated pressure-adjusted array); the random-weighted-pick loop
+ * itself was duplicated verbatim. use_pressure_weights selects the source.
+ */
+static int select_weighted_node(int num_nodes, int use_pressure_weights) {
+    int selected_node = first_enabled_node(num_nodes);
+    int n = (num_nodes <= 16) ? num_nodes : 16;
+    int w[16];
+    int total_weight = 0;
+
+    if (use_pressure_weights) {
+        for (int i = 0; i < n; i++) {
+            if (!node_enabled(i, num_nodes)) { w[i] = 0; continue; }
+            atomicGet(g_runtime_state.pressure_weights[i], w[i]);
+            total_weight += w[i];
+        }
+    } else {
+        pthread_mutex_lock(&g_config_mutex);
+        for (int i = 0; i < n; i++) {
+            w[i] = (!node_enabled(i, num_nodes) || !g_runtime_state.config.node_weights) ? 0
+                   : g_runtime_state.config.node_weights[i];
+            total_weight += w[i];
+        }
+        pthread_mutex_unlock(&g_config_mutex);
+    }
+
+    if (total_weight > 0) {
+        static __thread unsigned int seed = 0;
+        if (seed == 0) seed = (unsigned int)(getpid() ^ (uintptr_t)pthread_self());
+        int r = rand_r(&seed) % total_weight;
+        int cum = 0;
+        for (int i = 0; i < n; i++) {
+            cum += w[i];
+            if (r < cum) { selected_node = i; break; }
+        }
+    }
+    return selected_node;
+}
+
 /* Select the best allocation node.
  * Optimization: most strategies no longer hold the g_config_mutex global lock.
  *   - LOCAL_FIRST / INTERLEAVE / ROUND_ROBIN / CXL_OPTIMIZED: fully lock-free
@@ -207,42 +250,23 @@ static int select_best_node(size_t size) {
             break;
         }
 
-        case NUMA_STRATEGY_CONFIG_WEIGHTED: {
-            /* Only this strategy reads the weight array; briefly lock to copy it. */
-            pthread_mutex_lock(&g_config_mutex);
-            int total_weight = 0;
-            for (int i = 0; i < num_nodes; i++) {
-                if (!node_enabled(i, num_nodes)) continue;
-                if (g_runtime_state.config.node_weights)
-                    total_weight += g_runtime_state.config.node_weights[i];
-            }
-
-            if (total_weight > 0) {
-                static __thread unsigned int seed = 0;
-                if (seed == 0) seed = getpid() ^ pthread_self();
-                int random_value = rand_r(&seed) % total_weight;
-                int cumulative_weight = 0;
-                for (int i = 0; i < num_nodes; i++) {
-                    if (!node_enabled(i, num_nodes)) continue;
-                    if (g_runtime_state.config.node_weights)
-                        cumulative_weight += g_runtime_state.config.node_weights[i];
-                    if (random_value < cumulative_weight) {
-                        selected_node = i;
-                        break;
-                    }
-                }
-            }
-            pthread_mutex_unlock(&g_config_mutex);
+        case NUMA_STRATEGY_CONFIG_WEIGHTED:
+            selected_node = select_weighted_node(num_nodes, 0 /* static node_weights[] */);
             break;
-        }
 
         case NUMA_STRATEGY_CONFIG_PRESSURE_AWARE: {
-            double min_utilization = 1.0;
+            /* Read the canonical 0.0-1.0 pressure signal (numa_bw_monitor.c),
+             * the same one evict_numa.c and the pressure-adjusted weights
+             * below use - previously this read numa_config_get_node_utilization(),
+             * a self-tracked GB-of-bytes-allocated counter with no upper
+             * bound, which silently broke node ranking once any node passed
+             * 1GB allocated (the min-utilization seed was 1.0). */
+            double min_pressure = 1.0;
             for (int i = 0; i < num_nodes; i++) {
                 if (!node_enabled(i, num_nodes)) continue;
-                double utilization = numa_config_get_node_utilization(i);
-                if (utilization < min_utilization) {
-                    min_utilization = utilization;
+                double pressure = numa_bw_get_node_pressure(i);
+                if (pressure < min_pressure) {
+                    min_pressure = pressure;
                     selected_node = i;
                 }
             }
@@ -259,30 +283,9 @@ static int select_best_node(size_t size) {
             break;
         }
 
-        case NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE: {
-            int total_weight = 0;
-            int w[16];
-            int n = (num_nodes <= 16) ? num_nodes : 16;
-            for (int i = 0; i < n; i++) {
-                if (!node_enabled(i, num_nodes)) {
-                    w[i] = 0;
-                    continue;
-                }
-                atomicGet(g_runtime_state.pressure_weights[i], w[i]);
-                total_weight += w[i];
-            }
-            if (total_weight > 0) {
-                static __thread unsigned int seed = 0;
-                if (seed == 0) seed = (unsigned int)(getpid() ^ (uintptr_t)pthread_self());
-                int r = rand_r(&seed) % total_weight;
-                int cum = 0;
-                for (int i = 0; i < n; i++) {
-                    cum += w[i];
-                    if (r < cum) { selected_node = i; break; }
-                }
-            }
+        case NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE:
+            selected_node = select_weighted_node(num_nodes, 1 /* pressure-adjusted weights */);
             break;
-        }
 
         case NUMA_STRATEGY_CONFIG_ADAPTIVE:
         case NUMA_STRATEGY_CONFIG_LATENCY_AWARE:
@@ -465,15 +468,26 @@ const numa_strategy_config_t* numa_config_get_current(void) {
 /* Set the NUMA allocation strategy. */
 int numa_config_set_strategy(numa_config_strategy_type_t strategy) {
     if (!g_initialized) return C_ERR;
-    
+
     pthread_mutex_lock(&g_config_mutex);
     g_runtime_state.config.strategy_type = strategy;
     g_runtime_state.current_strategy = strategy;
     pthread_mutex_unlock(&g_config_mutex);
-    
-    serverLog(LL_NOTICE, "[NUMA Config] Strategy changed to: %s", 
+
+    serverLog(LL_NOTICE, "[NUMA Config] Strategy changed to: %s",
              get_strategy_name(strategy));
-    
+
+    if (strategy == NUMA_STRATEGY_CONFIG_ADAPTIVE ||
+        strategy == NUMA_STRATEGY_CONFIG_LATENCY_AWARE) {
+        serverLog(LL_WARNING,
+            "[NUMA Config] '%s' is a placeholder in the kernel allocator "
+            "(falls back to LOCAL_FIRST); the full implementation lives in "
+            "NUMAflow as the 'alloc_%s' atomic op, reachable via "
+            "NUMA FLOW LOAD - it is not wired into the zmalloc hot path.",
+            get_strategy_name(strategy),
+            strategy == NUMA_STRATEGY_CONFIG_ADAPTIVE ? "adaptive" : "latency_aware");
+    }
+
     return C_OK;
 }
 

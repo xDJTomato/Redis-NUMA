@@ -33,11 +33,14 @@ int main(void) {
     CHECK(strcmp(nf_strategy_default(), "caat") == 0, "default strategy is caat");
     CHECK(nf_strategy_count() >= 10, "strategy count");
 
-    /* build caat and check structure */
+    /* build caat and check structure: demote chain (d1-d4) fans out into
+     * keep_dram (sink, items that stayed on DRAM) and off_dram -> promote
+     * chain (p1-p6, sink) - see nf_strategy.c's build_caat comment for why
+     * this isn't one linear chain. */
     nf_graph_t g; nf_graph_init(&g);
     CHECK(nf_strategy_build(&g, "caat") == NF_OK, "build caat");
-    CHECK(g.node_count == 10, "caat has 10 nodes");
-    CHECK(g.edge_count == 9, "caat has 9 edges");
+    CHECK(g.node_count == 12, "caat has 12 nodes");
+    CHECK(g.edge_count == 11, "caat has 11 edges");
     int order[64];
     CHECK(nf_graph_topo_sort(&g, order) == NF_OK, "caat topo sort");
 

@@ -61,6 +61,8 @@ SKIP_FILL=false
 NO_RESTART=false
 ENABLE_LOCALITY_STATS=true
 ENABLE_TINYLFU=false
+DISABLE_MIGRATION=false
+ENABLE_CAAT=false
 PROCESS_NUMA_NODES="0,2"
 
 # Phase 参数
@@ -110,7 +112,9 @@ usage() {
   --no-restart         不重启 Redis
   --process-nodes NODES Redis 进程可用 NUMA 节点 (默认: 0,2；传 all 禁用绑定)
   --locality-stats     开启访问本地/远端统计（默认开启）
-  --tinylfu            启用 TinyLFU 策略 (Slot 2) 并禁用 Composite LRU (Slot 1)
+  --tinylfu            切换到 TinyLFU 策略（NUMA FLOW DEFAULT tinylfu）
+  --no-migrate         禁用迁移 (NUMA FLOW DEFAULT noop，纯基线)
+  --caat                切换到 CAAT 策略 (NUMA FLOW DEFAULT caat，本仓库的默认成本感知分层策略)
   --help               显示此帮助
 
 阶段说明:
@@ -172,6 +176,14 @@ parse_args() {
                 ENABLE_TINYLFU=true
                 shift
                 ;;
+            --no-migrate)
+                DISABLE_MIGRATION=true
+                shift
+                ;;
+            --caat)
+                ENABLE_CAAT=true
+                shift
+                ;;
             --help|-h)
                 usage
                 ;;
@@ -219,6 +231,7 @@ check_prerequisites() {
         log_warn "python3 未安装，可视化将被跳过"
     fi
 }
+
 
 # ── 保存系统信息 ─────────────────────────────────────────────────────────────
 save_system_info() {
@@ -376,20 +389,15 @@ start_collector() {
             rss_mb=$((${rss_mem:-0} / 1048576))
         fi
 
-        # 采集迁移统计 + 访问分布（从 NUMA MIGRATE STATS 获取）
+        # 采集迁移统计（从 NUMA MIGRATE STATS 获取）。
+        # NOTE: 自 ADR-08（NUMA 迁移策略统一收敛到 NUMAflow）起，per-strategy 的
+        # local/remote 访问分布计数器（原 composite_lru/tinylfu 私有统计）已随
+        # 原生模块一起移除，NUMAflow 的桥接不追踪这个细分，故 acc_local/acc_remote
+        # 恒为 0，仅保留字段以兼容下游 CSV 列结构。
         local migrate_total=0 acc_local=0 acc_remote=0
         local migrate_stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" --raw NUMA MIGRATE STATS 2>/dev/null || echo "")
         if [[ -n "$migrate_stats" ]]; then
             migrate_total=$(awk '/^successful_migrations$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-            # 检查 TinyLFU 是否启用：启用时直接使用 TinyLFU 计数器
-            local tlfu_on=$(awk '/^tinylfu_enabled$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-            if [[ "${tlfu_on:-0}" -eq 1 ]]; then
-                acc_local=$(awk '/^tinylfu_accesses_local$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-                acc_remote=$(awk '/^tinylfu_accesses_remote$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-            else
-                acc_local=$(awk '/^accesses_local$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-                acc_remote=$(awk '/^accesses_remote$/ {found=1; next} found {print; exit}' <<< "$migrate_stats")
-            fi
         fi
         [[ -z "$migrate_total" ]] && migrate_total=0
         [[ -z "$acc_local" ]] && acc_local=0
@@ -508,7 +516,7 @@ run_phase1_fill() {
         log_warn "无法将 Phase 2/3 分配策略切回 local_first"
 
     if [[ "$ENABLE_TINYLFU" == true ]]; then
-        log "TinyLFU 策略已在填充前启用，保持 Slot 2 运行"
+        log "TinyLFU 策略已在填充前切换，保持运行"
     fi
 
     local throughput
@@ -648,6 +656,10 @@ print_summary() {
     # 迁移统计
     echo -e "${BOLD}NUMA 迁移统计:${NC}"
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA MIGRATE STATS 2>/dev/null || echo "  (无迁移数据)"
+    if [[ "$ENABLE_CAAT" == true ]]; then
+        echo -e "${BOLD}CAAT (NUMAflow) 状态:${NC}"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW STATUS default 2>/dev/null || echo "  (无 CAAT 数据)"
+    fi
     echo ""
     
     # 文件列表
@@ -743,37 +755,38 @@ main() {
         log_ok "Redis 连接正常 ($REDIS_HOST:$REDIS_PORT)"
     fi
     
-    # ── 初始化 NUMA 策略插槽 ──
-    log "初始化 NUMA 策略插槽..."
-    # 加载 composite_lru.json 配置（脚本启动 Redis 未使用 redis.conf，需显式加载）
-    local config_file="$PROJECT_ROOT/composite_lru.json"
-    if [[ -f "$config_file" ]]; then
-        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" \
-            NUMA CONFIG LOAD "$config_file" 2>/dev/null && \
-            log_ok "NUMA 配置已加载: $config_file" || \
-            log_warn "NUMA CONFIG LOAD 失败（可能命令不支持，跳过）"
-    else
-        log_warn "composite_lru.json 未找到，使用默认配置"
-    fi
-    # TinyLFU 变体必须在填充前启用，避免在已由 Composite LRU 运行过的实例上切换策略。
+    # ── 选择 NUMA FLOW 默认迁移策略 ──
+    # ADR-08 之后，三个迁移策略 (composite_lru/tinylfu/caat) 都只是 NUMAflow
+    # 的原子操作预设，服务器启动时已按 numa-flow-default-strategy 自动加载为
+    # "default" 工作流条目；这里按本次 benchmark 的模式显式切换，保证几组
+    # 对比测的是预期的策略，不依赖 redis.conf 里配置的默认值。
+    log "选择 NUMA FLOW 默认策略..."
+    # TinyLFU 变体必须在填充前切换，避免在已由其他策略运行过的实例上切换策略。
     if [[ "$ENABLE_TINYLFU" == true ]]; then
-        log "启用 TinyLFU 策略: 禁用 Slot 1 (Composite LRU), 启用 Slot 2 (TinyLFU)"
-        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT DISABLE 1 >/dev/null 2>&1 || true
-        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT ENABLE 2 >/dev/null 2>&1 || true
+        log "切换到 TinyLFU 策略"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW DEFAULT tinylfu >/dev/null 2>&1 || log_warn "NUMA FLOW DEFAULT tinylfu 失败"
+    elif [[ "$DISABLE_MIGRATION" == true ]]; then
+        log "禁用迁移: 切换到 noop 基线"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW DEFAULT noop >/dev/null 2>&1 || log_warn "NUMA FLOW DEFAULT noop 失败"
+    elif [[ "$ENABLE_CAAT" == true ]]; then
+        log "切换到 CAAT 策略"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW DEFAULT caat >/dev/null 2>&1 || log_warn "NUMA FLOW DEFAULT caat 失败"
+    else
+        log "切换到 Composite LRU 策略（本脚本的默认对比组）"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW DEFAULT composite_lru >/dev/null 2>&1 || log_warn "NUMA FLOW DEFAULT composite_lru 失败"
     fi
 
-    # 验证策略插槽状态
-    local slot_info
-    slot_info=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY LIST 2>/dev/null || echo "")
-    if [[ -n "$slot_info" ]]; then
-        log_ok "NUMA 策略插槽已激活"
-        echo "$slot_info" | while IFS= read -r line; do
+    # 验证 NUMA FLOW 状态
+    local flow_info
+    flow_info=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW STATUS default 2>/dev/null || echo "")
+    if [[ -n "$flow_info" ]]; then
+        log_ok "NUMA FLOW default 工作流已激活"
+        echo "$flow_info" | while IFS= read -r line; do
             [[ -n "$line" ]] && log "  $line"
         done
     else
-        log_warn "NUMA SLOT LIST 无返回（单节点环境下正常）"
+        log_warn "NUMA FLOW STATUS default 无返回"
     fi
-    # 自动迁移开关由 composite_lru.json 控制
 
     # 启动后台采集器
     touch "$COLLECTOR_FLAG"

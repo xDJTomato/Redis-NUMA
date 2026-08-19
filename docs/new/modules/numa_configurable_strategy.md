@@ -5,10 +5,13 @@
 ## 1. 职责（Responsibility）
 
 在 `zmalloc` 分配路径的最前端回答一个问题："这次分配应该放到哪个 NUMA 节点？"
-它不管理内存本身（那是 `numa_pool` 的事），只负责**选节点**：提供 9 种可运行时
-切换的分配策略，覆盖从"完全不看拓扑"（`LOCAL_FIRST`）到"按实时内存压力动态加
+它不管理内存本身（那是 `numa_pool` 的事），只负责**选节点**：提供 9 个可运行时
+切换的策略名，覆盖从"完全不看拓扑"（`LOCAL_FIRST`）到"按实时内存压力动态加
 权"（`WEIGHTED_INTERLEAVE`，当前默认）的整个谱系，并把节点选择这件高频操作做成
-无锁或近似无锁的热路径。
+无锁或近似无锁的热路径。9 个策略名背后是 **7 套独立实现**：`WEIGHTED`/
+`WEIGHTED_INTERLEAVE` 现在共享同一个 `select_weighted_node()` 加权随机辅助函数
+（原来是两份逐字重复的循环，见 3.2 节），`ADAPTIVE`/`LATENCY_AWARE` 本就共享同
+一段内核占位 fallback（见第 5 节）——两两合并之后，剩下 7 种彼此独立的行为。
 
 ## 2. 接口（Interface）
 
@@ -33,7 +36,7 @@ NUMA CONFIG HELP
 
 ## 3. 内部结构与关键路径（Internal Structure & Key Paths）
 
-### 3.1 九种策略
+### 3.1 九个策略名，七套实现
 
 ```c
 typedef enum {
@@ -55,12 +58,19 @@ typedef enum {
 | `local_first` | 完整 | 无锁 | 固定返回 node 0 |
 | `interleaved` | 完整 | 无锁 | `rand_r(&seed) % num_nodes` |
 | `round_robin` | 完整 | 无锁 | thread-local 计数器递增取模 |
-| `weighted` | 完整 | **短锁** | 持锁复制权重数组，锁外计算加权随机 |
-| `pressure_aware` | 完整 | 无锁 | 遍历节点，选择利用率最低的 |
+| `weighted` | 完整 | **短锁** | `select_weighted_node(n, 0)`：持锁复制静态权重数组，锁外计算加权随机 |
+| `pressure_aware` | 完整 | 无锁 | 遍历节点，选择 `numa_bw_get_node_pressure()` 最低的 |
 | `cxl_optimized` | 完整 | 无锁 | `size < threshold` → node 0，否则 node 1 |
-| `weighted_interleave` | 完整（**默认**） | 无锁 | `atomicGet` 读压力权重，加权随机 |
+| `weighted_interleave` | 完整（**默认**） | 无锁 | `select_weighted_node(n, 1)`：`atomicGet` 读压力权重，加权随机 |
 | `adaptive` | **内核侧占位** | — | fallback 返回 node 0 |
 | `latency_aware` | **内核侧占位** | — | fallback 返回 node 0 |
+
+`weighted`/`weighted_interleave` 现在共用同一个 `select_weighted_node(num_nodes,
+use_pressure_weights)` 辅助函数（`src/numa_configurable_strategy.c`）——两者过去
+是两份逐字重复的"加权随机选择"循环，唯一区别只是权重的来源（管理员静态设置的
+数组 vs. `serverCron` 按压力更新的数组），现在合并成一份实现，用一个 bool 参数
+切换权重来源；锁行为不变（`weighted` 走短锁复制、`weighted_interleave` 走
+`atomicGet`，见 3.2/3.3 节）。
 
 （源码 `src/numa_configurable_strategy.c` 中 `case NUMA_STRATEGY_CONFIG_ADAPTIVE` 与
 `case NUMA_STRATEGY_CONFIG_LATENCY_AWARE` 目前是同一段 fallback 逻辑，本文档对此
@@ -88,7 +98,10 @@ atomicSet(pressure_weights[i], w)
 ```c
 void numa_config_update_pressure_weights(void) {
     for (int i = 0; i < num_nodes; i++) {
-        double p = numaGetNodePressure(i);  /* 读取 /sys/devices/system/node/nodeX/meminfo */
+        double p = numaGetNodePressure(i);  /* 薄封装，转发到 numa_bw_monitor.c
+                                                的 numa_bw_get_node_pressure()：
+                                                evict_numa 与本模块共享的同一
+                                                个压力信号，见 numa_bw_monitor.md */
         int w = (int)((1.0 - p) * 100);
         if (w < 1) w = 1;  /* 最低权重 1，保证所有节点都有机会被选中 */
         atomicSet(g_runtime_state.pressure_weights[i], w);
@@ -208,26 +221,35 @@ numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE);
   ——这是本模块存在的最直接原因。
 - **`server.c`**：启动时调用 `numa_config_strategy_init()`，并将默认策略覆盖为
   `WEIGHTED_INTERLEAVE`；`serverCron` 每秒调用一次 `numa_config_update_pressure_weights()`。
-- **`numa_composite_lru.c`**：通过 `numaGetNodePressure()` 读取同一份节点压力数
-  据，用于影响迁移（而不是分配）决策——分配策略和迁移策略共享"压力"这一信号
-  源，但各自决定如何使用它。
+- **`numa_bw_monitor.c`**：`PRESSURE_AWARE` 和 `WEIGHTED_INTERLEAVE` 的权重更新都
+  通过 `numaGetNodePressure()`（`evict_numa.c` 里的一个薄封装）读取同一个
+  `numa_bw_get_node_pressure()`——这也是 `evict_numa` 降级评分用的压力信号，两个
+  模块共享同一份数据，不会对"这个节点有多忙"给出互相矛盾的答案（此前两者各自
+  维护一套独立公式，已在 ADR-08 一并合并，见 [`numa_bw_monitor.md`](numa_bw_monitor.md)）。
 - **NUMAflow 子系统**（`numaflow/`）：`ADAPTIVE` 与 `LATENCY_AWARE` 在**本模块
   内**只是 fallback 到 node 0 的占位实现，**真正可用的完整版本不在这里**，而是
   NUMAflow 的两个原子操作——`alloc_adaptive`（DRAM 优先，压力超过阈值后溢出到压
   力最小的节点）与 `alloc_latency_aware`（选择建模访问代价最低的节点），定义在
   `numaflow/src/nf_ops.c`（`op_alloc_adaptive`/`op_alloc_latency_aware`），通过
   `NUMA FLOW LOAD/RUN` 以工作流形式桥接进 Redis（`src/numa_flow.c`）。这是本项
-  目一个刻意的分层设计：内核里的策略保持简单可预测，复杂的自适应逻辑放在独立
-  子系统里迭代，不直接耦合进 `zmalloc` 的关键路径。详见
+  目一个刻意的分层设计（[ADR-05](../09-architecture-decisions.md)）：内核里的策
+  略保持简单可预测，复杂的自适应逻辑放在独立子系统里迭代，不直接耦合进
+  `zmalloc` 的关键路径。ADR-08 之后这一分层本身没有变化，但代码现在会**自己说
+  出来**：`numa_config_set_strategy()` 切到这两个策略时打一条 `LL_WARNING`
+  （见 `src/numa_configurable_strategy.c`），`NUMA CONFIG GET` 的回复也新增了
+  `strategy_note` 字段，同样的话在两处都写明"这是占位，完整实现在 NUMAflow"——
+  过去这个分层只写在 arc42 文档里，现在运行时也会主动告知。详见
   [NUMAflow 子系统文档](../../numaflow/README.md)。
 
 ## 6. 未解决问题与已知限制（Open Issues & Known Limitations）
 
 - **`ADAPTIVE`/`LATENCY_AWARE` 在内核中不是完整实现**——如果只看
   `numa_configurable_strategy.c`，这两种策略实际效果等同于 `LOCAL_FIRST`
-  （fallback 到 node 0）。任何只读内核代码、不知道 NUMAflow 桥接存在的人都可能误
-  以为这两种策略"坏了"或"未完成"；本模块本身不打算在内核里补完它们，这是设计
-  决策而非待办事项（见第 5 节、`docs/README.md` 的事实核对表）。
+  （fallback 到 node 0）。此前任何只读内核代码、不知道 NUMAflow 桥接存在的人都
+  可能误以为这两种策略"坏了"或"未完成"；ADR-08 之后这个风险已经部分缓解——切
+  到这两种策略会打一条 `LL_WARNING`，`NUMA CONFIG GET` 的 `strategy_note` 字段
+  也会说明"占位，完整实现见 NUMAflow"，但本模块本身仍不打算在内核里补完它们，
+  这是设计决策而非待办事项（见第 5 节、`docs/README.md` 的事实核对表）。
 - **压力权重最长 1 秒滞后**：`WEIGHTED_INTERLEAVE` 的权重更新在 `serverCron` 里
   按秒粒度进行，突发的压力变化在被下一次 `serverCron` 采样之前不会反映到分配决
   策上。

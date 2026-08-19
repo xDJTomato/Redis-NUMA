@@ -8,8 +8,8 @@
 | 项目 | 状态 |
 | --- | --- |
 | Redis 内核版本 | **7.2.6**（`feat/redis7-port` 分支，`src/version.h`；6.2.21 → 7.2.6 的真实三方合并 + 编译 + 全量测试验证过程见 `docs/redis7-migration.md`） |
-| Redis 内核 NUMA 模块 | 10 个模块（`numa_pool` / `numa_migrate` / `numa_key_migrate` / `numa_strategy_slots` / `numa_composite_lru` / `numa_tinylfu` / `numa_configurable_strategy` / `numa_command` / `numa_bw_monitor` / `evict_numa`），已全部适配 Redis 7 的 opaque `dictEntry` / listpack / quicklist `->entry` API |
-| 分配策略数量 | **9 种**（`local_first` / `interleaved` / `round_robin` / `weighted` / `pressure_aware` / `cxl_optimized` / `weighted_interleave` / `adaptive` / `latency_aware`） |
+| Redis 内核 NUMA 模块 | 8 个模块（`numa_pool` / `numa_migrate` / `numa_key_migrate` / `numa_configurable_strategy` / `numa_command` / `numa_bw_monitor` / `evict_numa` / `numa_flow`），已全部适配 Redis 7 的 opaque `dictEntry` / listpack / quicklist `->entry` API；旧的 `numa_strategy_slots` / `numa_composite_lru` / `numa_tinylfu` 已退役（见 [ADR-08](new/09-architecture-decisions.md)），三个迁移策略现在只作为 NUMAflow 的原子操作预设存在 |
+| 分配策略数量 | **7 种独立行为**（`local_first` / `interleaved` / `round_robin` / `weighted`+`weighted_interleave` 共用同一份加权随机实现 / `pressure_aware` / `cxl_optimized`；`adaptive`/`latency_aware` 仍是内核占位） |
 | 新增 NUMAflow 子系统 | `numaflow/`（纯 C11，无 Redis/libnuma 依赖），36 个原子操作、13 个内置策略 |
 | 新默认策略 | **CAAT**（Cost-Aware Adaptive Tiering，晋升 + 降级） |
 | Redis 7 迁移 | `docs/redis7-migration.md` 记录**实际执行**的合并步骤、6 个被 merge 静默引入的真实 bug 及修复、1 个被测试意外触发的历史 bug、1 个需要单独 cherry-pick 的 CVE（2025-32023）。原先的 `docs/redis8-migration.md` 与 `src/redis8_compat.h`（未被任何文件 include 的死代码）已删除 |

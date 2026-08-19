@@ -1,14 +1,17 @@
 {
     // ────────────────────────────────────────────────────────────────
-    // composite_lru.json - configuration file for the NUMA Composite-LRU strategy
+    // composite_lru.json - retired: reference only, no longer consumed by
+    // the kernel.
     //
-    // How to load (pick one):
-    //   1. Set it in redis.conf:
-    //        numa-migrate-config /path/to/composite_lru.json
-    //      Redis loads it automatically at startup.
-    //
-    //   2. Hot-reload at runtime (no restart needed):
-    //        NUMA CONFIG LOAD /path/to/composite_lru.json
+    // The native numa_composite_lru module and its numa-migrate-config /
+    // NUMA CONFIG LOAD entry points have been retired; Composite LRU now
+    // lives exclusively as a NUMAflow atomic-op preset
+    // (numaflow/src/nf_strategy.c's build_composite_lru), selectable via
+    // `numa-flow-default-strategy composite_lru` in redis.conf or at
+    // runtime via `NUMA FLOW DEFAULT composite_lru`. This file documents
+    // the field names/semantics the old native implementation used; it is
+    // kept as a reference for writing custom NUMAflow workflow JSON, not
+    // as something Redis reads directly.
     //
     // All fields are optional; unset fields keep the built-in defaults.
     // ────────────────────────────────────────────────────────────────

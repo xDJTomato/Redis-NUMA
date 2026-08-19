@@ -74,11 +74,16 @@ cms_estimate → filter_freq → rank_frequency → budget_limit → select_dest
 ### 2.2 新的默认策略：CAAT（Cost-Aware Adaptive Tiering）
 
 现有策略要么只看热度（Composite LRU），要么只看频率（TinyLFU），且都**只升不降**：
-一旦 DRAM 写满就停止晋升，无法回收。CAAT 是一个完整的**晋升 + 降级**流水线：
+一旦 DRAM 写满就停止晋升，无法回收。CAAT 是一个完整的**晋升 + 降级**流水线，在
+两个阶段各自发生任何变更**之前**先按原始驻留位置分叉（`filter_local`/
+`filter_remote`），避免旧版单链设计里"降级已执行但未通过晋升阶段过滤条件从而
+永远不到达终止节点、导致桥接层看不到这次迁移"的 bug（见
+[ADR-09](../new/09-architecture-decisions.md)）：
 
 ```text
-cms_estimate → score_cost_benefit → demote_cold → emit_migrate
-     → filter_freq → filter_benefit → rank_cost → budget_limit → select_dest_node → emit_migrate
+filter_local  → score_cost_benefit → demote_cold → emit_migrate      （DRAM 驻留项：只走降级子链）
+filter_remote → cms_estimate → filter_freq → filter_benefit → rank_cost
+              → budget_limit → select_dest_node → emit_migrate       （非 DRAM 驻留项：只走晋升子链）
 ```
 
 其核心是 `score_cost_benefit`：
@@ -117,6 +122,22 @@ cd numaflow && make && make report   # 生成 results/report.html
 
 CAAT 在净代价上比最好的基线（TinyLFU）降低约 **20%**，比 Composite LRU 降低约 **37%**。
 
+> **已复测：zipf 上的这组数字基本经得起验证，但"CAAT 全面更优"不是无条件结论**。
+> `nf_bench.c`（本表数字的来源）和 `build_caat` 一样，同样从 `nf_exec_run()` 只读
+> 终止节点输出并集的 `ex.result`，所以 [ADR-09](../new/09-architecture-decisions.md)
+> 描述的那个拓扑 bug 也会让 `nf_bench.c` 把已执行但没通过晋升过滤的降级丢出统计。
+> 这个 bug 对 CAAT 自身的绝对数字影响是真实且不小的——用仓库固定基准参数
+> （3000 key / 120000 访问 / seed 20240517）修复前后对比，zipf 命中率从 84.6% 涨到
+> 91.0%、净代价降低约 54%，其他三个标准工作负载（uniform/hotspot/temporal）同样
+> 有 50%+ 量级的净代价改善，不是噪声。修复后重新按 ADR-04 的 zipf 口径测，命中率
+> 91.03%、净代价比 composite_lru 低 36.9%、比 tinylfu 低 19.9%，和上表原始数字
+> 一致。但换成 uniform（无冷热分层的均匀访问）重跑同一组对比，CAAT 净代价反而比
+> composite_lru **高 31.1%**（`demote_cold` 在没有真正冷数据时纯粹是浪费的迁移
+> 开销）；temporal 上两者基本打平（CAAT 净代价高 3.3%）。结论：上表的具体数字在
+> zipf/hotspot 这类有明显冷热分层的负载下是可信的，但把"CAAT 全面更优"当作不区分
+> 工作负载的结论去引用是不对的——它在访问接近均匀分布时反而更差。详见 ADR-09
+> 的"遗留事项"小节。
+
 ## 4. TUI / GUI 与定时任务
 
 - **TUI**（`make` 后运行 `./build/nf_tui`）：列出原子操作/策略、以原子操作组合自定义
@@ -148,7 +169,9 @@ make report     # 生成评测 JSON + results/report.html
 ```
 
 在 Linux + 真实 libnuma 环境下，本子系统同样可编译运行（Makefile 自动选择后缀）；
-它也可以作为 Redis 7 的一个独立策略引擎被 `NUMA` 命令调用（见 `src/numa_flow.c` 与 `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`）。
+它也是 Redis 7 里三个迁移策略唯一的实现载体，通过 `NUMA` 命令调用（见
+`src/numa_flow.c` 与 `NUMA FLOW DEFAULT/LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`），
+默认策略在启动时自动加载，不需要显式 `NUMA FLOW LOAD`。
 ## 6.5 独立内存分配器（`nf_alloc`）
 
 针对原 `numa_pool`（libnuma 临时方案）的性能与碎片率优化，详见
@@ -165,9 +188,15 @@ special），每个带用途与适用场景，CLI `numaflow templates` 或 GUI �
 
 `numaflow/src/nf_bridge.c`（纯 C11，可独立测试）定义了引擎与任意键值存储之间的契约：
 宿主只需实现两个回调——`enumerate`（把 keyspace 逐条产出为 `nf_item_t`）和 `apply`
-（把某个 key 物理迁移到目标节点）。`src/numa_flow.c` 就是 Redis 侧的薄胶水：
+（把某个 key 物理迁移到目标节点）。`src/numa_flow.c` 就是 Redis 侧的薄胶水，且是
+三个迁移策略（`caat`/`composite_lru`/`tinylfu`，外加 `noop`）**唯一**的实现载体——
+内核不再有任何原生实现。启动时（`numa_flow_init()` 之后，且 `numa-enabled` 不为
+`no` 时）会自动用 `numa-flow-default-strategy`（默认 `caat`）构建并加载为
+`default` 工作流条目，随 `serverCron` 一起跑——不再需要手动 `NUMA FLOW LOAD` 才能
+获得迁移行为：
 
 ```text
+NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>         # 运行时切换默认策略
 NUMA FLOW LOAD <name> <path.json> [interval_sec] [ADAPT]   # 加载 GUI 导出的工作流
 NUMA FLOW RUN  [name]                                     # 立即执行（或全部）
 NUMA FLOW LIST / STATUS <name>                            # 查看运行状态/反馈
@@ -178,6 +207,12 @@ NUMA FLOW ADAPT <name> <ON|OFF>                           # 开关自适应
 桥接语义：`enumerate` 用 `numa_get_key_current_node` / `numa_get_key_metadata` 填充
 item，`apply` 调用 `numa_migrate_key_by_name`；`emit_migrate` 的决策（`current_node` 变化）
 被翻译成真实的 key 迁移。加载的工作流由 `serverCron` 按 `interval_sec` 周期执行。
+CMS 频率信号（`cms_estimate` 读取的部分，TinyLFU/CAAT 都依赖）需要有人调用
+`nf_tracker_observe()` 才不会永远是 0——`src/numa_flow.c` 新增的
+`numa_flow_observe_access()` 从 `src/db.c` 的真实访问路径（与
+`numa_key_migrate_touch()` 完全同一处）调用它，是 Redis 桥接里唯一喂这个信号的
+地方（见 [ADR-09](../new/09-architecture-decisions.md)：这个调用在此之前完全缺失，
+TinyLFU/CAAT 通过桥接实际跑起来时是不会迁移任何数据的）。
 
 ## 8. 自适应 DAG（`nf_adapt.c`）
 

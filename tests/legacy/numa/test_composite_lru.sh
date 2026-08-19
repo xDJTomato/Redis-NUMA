@@ -1,5 +1,11 @@
 #!/bin/bash
 #
+# ARCHIVED (ADR-08, docs/new/09-architecture-decisions.md): tests the native
+# numa_composite_lru module and NUMA STRATEGY/NUMA CONFIG LOAD commands,
+# all of which have been removed from src/. Composite LRU now lives only as
+# a NUMAflow preset (`NUMA FLOW DEFAULT composite_lru`). Kept for historical
+# reference only - do not expect this script to run against current builds.
+#
 # Composite LRU策略完整测试脚本
 # 适用于带CXL设备的虚拟机环境
 #

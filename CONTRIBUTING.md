@@ -21,13 +21,13 @@ list, security reports) see the upstream conventions linked from
    way to introduce a hard-to-diagnose startup crash in this fork.
 5. Use `extern void _serverLog(int level, const char *fmt, ...)`, not
    `serverLog()` directly — this is the established Redis-internal
-   convention. See existing modules (`numa_composite_lru.c`,
+   convention. See existing modules (`numa_configurable_strategy.c`,
    `numa_bw_monitor.c`, etc.) for the pattern.
 6. Respect the module dependency order documented in
    [`ARCHITECTURE.md`](ARCHITECTURE.md#module-dependency-order-bottom-to-top):
    `libnuma -> numa_pool -> numa_migrate -> numa_key_migrate ->
-   {numa_composite_lru, numa_tinylfu, numa_strategy_slots} -> numa_command
-   -> evict_numa -> server.c`.
+   numa_bw_monitor -> numa_configurable_strategy -> numa_flow (NUMAflow
+   bridge) -> numa_command -> evict_numa -> server.c`.
 
 ## Before opening a PR
 

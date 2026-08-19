@@ -13,18 +13,25 @@ typedef struct {
     builder_fn  build;
 } strategy_def_t;
 
-/* Build a linear chain: {op,paramkey,paramval} x n.  Uses fixed ids n1..nN. */
+/* Build a linear chain: {op,paramkey,paramval} x n.  Ids are "<prefix>1".."<prefix>N".
+ * If connect_from is non-NULL, an edge is added from that existing node id to
+ * the chain's first node (used to fan a chain off of another chain's output
+ * without id collisions - see build_caat). */
 typedef struct { const char *op; const char *key; const char *val; } step_t;
-static int build_chain(nf_graph_t *g, const step_t *steps, int n) {
-    char id[8], prev[8] = "";
+static int build_chain_from(nf_graph_t *g, const step_t *steps, int n, const char *prefix, const char *connect_from) {
+    char id[16], prev[16];
+    snprintf(prev, sizeof(prev), "%s", connect_from ? connect_from : "");
     for (int i = 0; i < n; i++) {
-        snprintf(id, sizeof(id), "n%d", i + 1);
+        snprintf(id, sizeof(id), "%s%d", prefix, i + 1);
         if (nf_graph_add_node(g, id, steps[i].op) != NF_OK) return NF_ERR;
         if (steps[i].key && steps[i].val) nf_graph_node_set_param(g, id, steps[i].key, steps[i].val);
-        if (i > 0) nf_graph_add_edge(g, prev, id);
+        if (prev[0]) nf_graph_add_edge(g, prev, id);
         snprintf(prev, sizeof(prev), "%s", id);
     }
     return NF_OK;
+}
+static int build_chain(nf_graph_t *g, const step_t *steps, int n) {
+    return build_chain_from(g, steps, n, "n", NULL);
 }
 
 /* ---- migration strategy builders ---------------------------------------- */
@@ -55,15 +62,51 @@ static int build_tinylfu(nf_graph_t *g) {
 }
 
 /* New default: Cost-Aware Adaptive Tiering (CAAT).  A full promote+demote
- * pipeline: first demote cold DRAM residents to CXL to free capacity, then
- * promote the highest-benefit CXL residents into DRAM within the remaining
- * capacity and the migration budget. */
+ * pipeline: demote cold DRAM residents to CXL to free capacity, and promote
+ * the highest-benefit CXL residents into DRAM within the remaining capacity
+ * and the migration budget.
+ *
+ * This used to be one linear chain (demote's emit_migrate feeding straight
+ * into the promote filters). That silently broke bridge integrations
+ * (src/numa_flow.c): nf_exec_run()'s result is the union of *sink* node
+ * outputs only, and any item mutated by one op then dropped by a later
+ * filter *in the same chain* never reaches a sink - so a demoted item that
+ * didn't also qualify for promotion (freq/benefit filters) vanished from
+ * the graph's result entirely. Its demotion had already happened
+ * (current_node mutated, ctx.stats.migrations_done incremented), but the
+ * bridge's enumerate-vs-result diff never saw it, so apply() (the thing
+ * that performs a *real* migration) was never called.
+ *
+ * Fix: fork BEFORE either phase mutates anything, splitting on each item's
+ * *original* residency (never on the same item twice): DRAM residents only
+ * ever go through the demote phase (decide, then a terminal emit_migrate -
+ * no filter runs after that mutation); off-DRAM residents only ever go
+ * through the promote phase (filters narrow the candidates *first*, then a
+ * terminal emit_migrate is the only mutation - nothing runs after it
+ * either). Every item ends up mutated at most once and always reaches
+ * exactly one sink. */
 static int build_caat(nf_graph_t *g) {
-    step_t s[] = {
+    step_t score[] = {
         { "cms_estimate",       NULL, NULL },
         { "score_cost_benefit", NULL, NULL },
-        { "demote_cold",        "threshold", "1" },
-        { "emit_migrate",       NULL, NULL },
+    };
+    if (build_chain_from(g, score, 2, "s", NULL) != NF_OK) return NF_ERR;
+
+    if (nf_graph_add_node(g, "on_dram", "filter_local") != NF_OK) return NF_ERR;
+    nf_graph_node_set_param(g, "on_dram", "node", "0");
+    if (nf_graph_add_edge(g, "s2", "on_dram") != NF_OK) return NF_ERR;
+
+    if (nf_graph_add_node(g, "off_dram", "filter_remote") != NF_OK) return NF_ERR;
+    nf_graph_node_set_param(g, "off_dram", "node", "0");
+    if (nf_graph_add_edge(g, "s2", "off_dram") != NF_OK) return NF_ERR;
+
+    step_t demote[] = {
+        { "demote_cold",  "threshold", "1" },
+        { "emit_migrate", NULL, NULL },
+    };
+    if (build_chain_from(g, demote, 2, "d", "on_dram") != NF_OK) return NF_ERR;
+
+    step_t promote[] = {
         { "filter_freq",        "threshold", "1" },
         { "filter_benefit",     "threshold", "0" },
         { "rank_cost",          NULL, NULL },
@@ -71,7 +114,7 @@ static int build_caat(nf_graph_t *g) {
         { "select_dest_node",   "require_benefit", "1" },
         { "emit_migrate",       NULL, NULL },
     };
-    return build_chain(g, s, (int)(sizeof(s) / sizeof(s[0])));
+    return build_chain_from(g, promote, (int)(sizeof(promote) / sizeof(promote[0])), "p", "off_dram");
 }
 
 /* ---- allocation strategy builders (single-op workflows) ----------------- */

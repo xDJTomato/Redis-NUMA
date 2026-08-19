@@ -53,5 +53,5 @@ socket 内存更慢、但容量可以做得更大的 NUMA 节点"——这正是
 ## 延伸阅读
 
 - 本章的约束条件（哪些技术/组织限制是不可协商的）见 [`02-constraints.md`](02-constraints.md)。
-- 十个模块的清单与依赖关系见 [`05-building-block-view.md`](05-building-block-view.md)。
+- 八个模块的清单与依赖关系见 [`05-building-block-view.md`](05-building-block-view.md)。
 - 面向学生的完整叙事版教程见 [`../GUIDE.zh-CN.md`](../GUIDE.zh-CN.md)。

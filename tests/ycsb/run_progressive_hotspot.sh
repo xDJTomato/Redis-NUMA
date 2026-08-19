@@ -92,8 +92,8 @@ usage() {
   --read-proportion P      读比例 (默认: 0.5)
   --update-proportion P    更新比例 (默认: 0.5)
   --numa-strategy NAME     NUMA 分配策略 (默认: cxl_optimized)
-  --ae-scheduler           将启用的 NUMA 策略 slot 切换到 AE time event 调度
-  --tinylfu                启用 TinyLFU 策略 (Slot 2) 并禁用 Composite LRU (Slot 1)
+  --ae-scheduler           已失效（ADR-08 移除了 AE/servercron 逐槎位调度），仅保留参数解析
+  --tinylfu                切换到 TinyLFU 策略 (NUMA FLOW DEFAULT tinylfu)
   --no-locality-stats      禁用 NUMA 本地/远端访问计数
   --no-access-tracking     禁用 Composite LRU 访问热路径统计
   --no-auto-migrate        禁用 Composite LRU 后台自动迁移
@@ -279,32 +279,31 @@ start_redis() {
 
 init_numa() {
     [[ "$REDIS_VARIANT" == "numa" ]] || return 0
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET locality_stats "$([[ "$ENABLE_LOCALITY_STATS" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET access_tracking "$([[ "$ENABLE_ACCESS_TRACKING" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET auto_migrate_enabled "$([[ "$ENABLE_AUTO_MIGRATE" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET enabled_nodes 0,2 >/dev/null 2>&1 || true
     "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET strategy "$NUMA_STRATEGY" >/dev/null 2>&1 || true
-    local config_file="$PROJECT_ROOT/composite_lru.json"
-    [[ -f "$config_file" ]] && "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG LOAD "$config_file" >/dev/null 2>&1 || true
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET locality_stats "$([[ "$ENABLE_LOCALITY_STATS" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET access_tracking "$([[ "$ENABLE_ACCESS_TRACKING" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET auto_migrate_enabled "$([[ "$ENABLE_AUTO_MIGRATE" == true ]] && echo 1 || echo 0)" >/dev/null 2>&1 || true
-    "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA CONFIG SET strategy "$NUMA_STRATEGY" >/dev/null 2>&1 || true
 
+    # ADR-08 之后迁移策略统一收敛到 NUMAflow：composite_lru.json/NUMA CONFIG
+    # LOAD 和 access_tracking/locality_stats/auto_migrate_enabled 这几个
+    # composite-lru 私有开关已随原生模块一起移除（NUMAflow 的
+    # build_composite_lru 预设参数固定，不支持这几个开关）。--no-locality-stats
+    # /--no-access-tracking/--no-auto-migrate 三个消融开关目前是 no-op，仅保留
+    # 参数解析以兼容旧调用方，不再实际影响 Redis 行为。
+    if [[ "$ENABLE_LOCALITY_STATS" == false || "$ENABLE_ACCESS_TRACKING" == false || "$ENABLE_AUTO_MIGRATE" == false ]]; then
+        log_warn "--no-locality-stats/--no-access-tracking/--no-auto-migrate 已失效（ADR-08），composite-lru 私有开关随原生模块一起移除"
+    fi
     if [[ "$ENABLE_TINYLFU" == true ]]; then
-        log "切换到 TinyLFU 策略: 禁用 Slot 1 (Composite LRU), 启用 Slot 2 (TinyLFU)"
-        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT DISABLE 1 >/dev/null 2>&1 || true
-        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT ENABLE 2 >/dev/null 2>&1 || true
+        log "切换到 TinyLFU 策略 (NUMA FLOW DEFAULT tinylfu)"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW DEFAULT tinylfu >/dev/null 2>&1 || true
+    else
+        log "切换到 Composite LRU 策略 (NUMA FLOW DEFAULT composite_lru)"
+        "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA FLOW DEFAULT composite_lru >/dev/null 2>&1 || true
     fi
 
     if [[ "$ENABLE_AE_SCHEDULER" == true ]]; then
-        if [[ "$ENABLE_TINYLFU" == true ]]; then
-            log "启用 AE time event 调度: Slot 2 (TinyLFU)"
-            "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT SCHEDULE 2 ae >/dev/null 2>&1 || true
-        else
-            log "启用 AE time event 调度: Slot 1 (Composite LRU)"
-            "$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" NUMA STRATEGY SLOT SCHEDULE 1 ae >/dev/null 2>&1 || true
-        fi
+        # ADR-08 之后 numa_strategy_slots（连同 ADR-07 的逐槎位 AE/servercron
+        # 调度切换）已整体退役，NUMAflow 只有 serverCron 一种调度路径。这个
+        # 开关现在是无效的 no-op，保留仅为了不破坏调用方的参数解析。
+        log_warn "--ae-scheduler 已失效：AE/servercron 调度切换随 numa_strategy_slots 一起被移除（ADR-08），本次运行仍走 serverCron"
     fi
 }
 
@@ -367,19 +366,12 @@ collect_numa_live_memory_metrics() {
 
 collect_remote_pct() {
     [[ "$REDIS_VARIANT" == "numa" ]] || { echo "0"; return; }
-    local stats acc_local acc_remote total
-    stats=$("$REDIS_CLI" -h "$REDIS_HOST" -p "$REDIS_PORT" --raw NUMA MIGRATE STATS 2>/dev/null || echo "")
-    # 检查 TinyLFU 是否启用：启用时直接使用 TinyLFU 计数器
-    local tlfu_on=$(awk '/^tinylfu_enabled$/ {getline; print; exit}' <<< "$stats")
-    if [[ "${tlfu_on:-0}" -eq 1 ]]; then
-        acc_local=$(awk '/^tinylfu_accesses_local$/ {getline; print; exit}' <<< "$stats")
-        acc_remote=$(awk '/^tinylfu_accesses_remote$/ {getline; print; exit}' <<< "$stats")
-    else
-        acc_local=$(awk '/^accesses_local$/ {getline; print; exit}' <<< "$stats")
-        acc_remote=$(awk '/^accesses_remote$/ {getline; print; exit}' <<< "$stats")
-    fi
-    [[ -z "$acc_local" ]] && acc_local=0
-    [[ -z "$acc_remote" ]] && acc_remote=0
+    local acc_local acc_remote total
+    # NOTE: ADR-08 之后 per-strategy 的 local/remote 访问分布计数器（原
+    # composite_lru/tinylfu 私有统计）已随原生模块一起移除，NUMAflow 的桥接
+    # 不追踪这个细分，这个指标恒为 0，仅保留字段以兼容下游 CSV 列结构。
+    acc_local=0
+    acc_remote=0
     total=$((acc_local + acc_remote))
     if [[ "$total" -gt 0 ]]; then
         awk -v r="$acc_remote" -v t="$total" 'BEGIN {printf "%.2f", r*100/t}'

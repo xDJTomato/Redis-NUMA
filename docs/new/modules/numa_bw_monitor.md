@@ -138,11 +138,9 @@ serverCron（每秒）
   没有任何外部接口可以在运行时把它设成别的观测值——也就是说 manual 后端目前
   只是"假装有 50% 压力"的占位符，而不是一个可以接入外部监控系统真实读数的
   通道。这在只有 1 个物理 NUMA 节点的开发环境下几乎不影响正确性（因为
-  `PRESSURE_AWARE`/`evict_numa` 在单节点下没有别的节点可选），但在多节点、
-  没有 resctrl 权限的生产环境下会让"带宽感知"名不副实。
-  （相关：本项目自身的开发主机就是单 NUMA 节点，这个限制在
-  [`11-risks-and-technical-debt.md`](../11-risks-and-technical-debt.md) 里
-  也有记录。）
+  `PRESSURE_AWARE`/`evict_numa` 在单节点下没有别的节点可选，本项目自身的开发
+  主机就是单 NUMA 节点），但在多节点、没有 resctrl 权限的生产环境下会让
+  "带宽感知"名不副实。
 - **不支持超过 `NUMA_BW_MAX_NODES`（16）个节点**：`numa_bw_monitor_init()` 里
   `max_node + 1 >= NUMA_BW_MAX_NODES` 时直接初始化失败——对当前的 CPU 拓扑
   规模够用，但这是一个需要留意的硬编码上限，不是动态数组。

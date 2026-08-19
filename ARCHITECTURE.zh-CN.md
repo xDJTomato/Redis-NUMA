@@ -6,7 +6,9 @@
 
 ## NUMA 模块层（叠加在 Redis 内核之上）
 
-`src/` 下共十个模块，全部由 `#ifdef HAVE_NUMA` 包裹：
+`src/` 下共八个模块，全部由 `#ifdef HAVE_NUMA` 包裹（16 槎位 vtable 策略框架及其
+原生的 Composite LRU / TinyLFU 实现已经退役——见
+`docs/new/09-architecture-decisions.md` 的 ADR-08）：
 
 1. **numa_pool**（`numa_pool.c/h`）——自定义内存分配器。33 个尺寸类（8B~64KB），
    基于原子位图管理的两级 Slab 分配（小/大 slab），配合 Thread-Local Cache 实现
@@ -15,38 +17,38 @@
    实现 NUMA 节点间的底层块迁移（注：实际的按 key 迁移由下面的 numa_key_migrate
    独立实现，并不调用这个模块的迁移函数）。
 3. **numa_key_migrate**（`numa_key_migrate.c/h`）——按 key 迁移（以一个 `robj` 为
-   单位）。集成 LRU 式热度追踪，带惰性阶梯衰减。为全部 5 种 Redis 类型提供完整的
-   类型适配器：STRING（RAW/EMBSTR）、HASH（listpack/ziplist/hashtable）、LIST
-   （quicklist，区分 LZF 压缩/原始，以及 `QUICKLIST_NODE_CONTAINER_PLAIN`/
-   `PACKED` 两种节点容器子路径）、SET（intset/hashtable）、ZSET（listpack/
-   ziplist/skiplist）。
-4. **numa_strategy_slots**（`numa_strategy_slots.c/h`）——基于 vtable 多态的
-   16 槎位可插拔策略框架。槎位 0 = 空操作，槎位 1 = Composite LRU（默认），
-   槎位 2 = TinyLFU（默认关闭）。通过 `serverCron` 每秒运行一次。
-5. **numa_composite_lru**（`numa_composite_lru.c/h`）——默认迁移策略（槎位 1）。
-   双通道：热候选环形缓冲区（快路径）+ 渐进式字典扫描（慢路径）。可通过
-   `composite_lru.json` 进行 JSON 配置。
-6. **numa_tinylfu**（`numa_tinylfu.c/h`）——频率驱动的迁移策略（槎位 2，默认
-   关闭）。Count-Min Sketch（4×16384，4-bit）+ Doorkeeper 布隆过滤器。固定约
-   40KB 内存占用，O(1) 热数据发现。需手动启用，以避免与 Composite LRU 冲突。
-7. **numa_configurable_strategy**（`numa_configurable_strategy.c/h`）——在
-   `zmalloc` 层提供 9 种分配策略（LOCAL_FIRST、INTERLEAVE、ROUND_ROBIN、
-   WEIGHTED、PRESSURE_AWARE、CXL_OPTIMIZED、WEIGHTED_INTERLEAVE、ADAPTIVE、
-   LATENCY_AWARE）。
-8. **numa_command**（`numa_command.c/h`）——统一的 `NUMA` 命令：`NUMA MIGRATE`、
-   `NUMA CONFIG`、`NUMA STRATEGY`，通过 `src/commands/numa.json`（Redis 7 的
+   单位）。`numa_key_migrate_touch()` 在每次真实访问时无条件更新中立的 zmalloc
+   前缀热度信号——这是 NUMAflow 的桥接（`numa_flow.c`）通过 `enumerate()` 读取的
+   唯一 ground truth。为全部 5 种 Redis 类型提供完整的类型适配器：STRING（RAW/
+   EMBSTR）、HASH（listpack/ziplist/hashtable）、LIST（quicklist，区分 LZF 压
+   缩/原始，以及 `QUICKLIST_NODE_CONTAINER_PLAIN`/`PACKED` 两种节点容器子路径）、
+   SET（intset/hashtable）、ZSET（listpack/ziplist/skiplist）。
+4. **numa_configurable_strategy**（`numa_configurable_strategy.c/h`）——在
+   `zmalloc` 层提供 7 种独立的分配节点选择行为（LOCAL_FIRST、INTERLEAVE、
+   ROUND_ROBIN，WEIGHTED/WEIGHTED_INTERLEAVE 共用同一份加权随机实现、只是权重
+   来源不同，PRESSURE_AWARE、CXL_OPTIMIZED）。ADAPTIVE/LATENCY_AWARE 是内核侧
+   的占位（行为等同 LOCAL_FIRST；通过启动日志和 `NUMA CONFIG GET` 的
+   `strategy_note` 字段自报告）——真正的实现是 NUMAflow 里对应的
+   `alloc_adaptive`/`alloc_latency_aware` 原子操作。
+5. **numa_command**（`numa_command.c/h`）——统一的 `NUMA` 命令：`NUMA MIGRATE`、
+   `NUMA CONFIG`、`NUMA FLOW`，通过 `src/commands/numa.json`（Redis 7 的
    声明式命令自省系统）注册。
-9. **numa_bw_monitor**（`numa_bw_monitor.c/h`）——实时的每节点带宽监控
-   （resctrl/numastat/manual 三种后端）。
-10. **evict_numa**（`evict_numa.c`，接口声明在 `evict.h` 里——并没有独立的
-    `evict_numa.h`）——NUMA 感知的淘汰：在真正淘汰 key 之前，
-    先把它降级到压力更小的节点。加权评分：距离（40%）+ 压力（30%）+ 带宽（30%）。
-
-此外还有 Redis↔NUMAflow 的桥接层：
-
-- **numa_flow.c**（仅 `HAVE_NUMA` 下编译）——实现 NUMAflow `nf_bridge.c` 所要求
-  的两个桥接回调，并暴露 `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`。
-  `serverCron` 会按配置的时间间隔运行已加载的工作流。
+6. **numa_bw_monitor**（`numa_bw_monitor.c/h`）——实时的每节点带宽监控
+   （resctrl/numastat/manual 三种后端），以及被 `evict_numa` 和
+   `numa_configurable_strategy` 共用的唯一权威节点压力取值函数
+   （`numa_bw_get_node_pressure()`），让两者对节点负载的判断不会互相矛盾。
+7. **evict_numa**（`evict_numa.c`，接口声明在 `evict.h` 里——并没有独立的
+   `evict_numa.h`）——NUMA 感知的淘汰：在真正淘汰 key 之前，
+   先把它降级到压力更小的节点。加权评分：距离（40%）+ 压力（30%）+ 带宽（30%）；
+   压力信号来自 `numa_bw_monitor`。
+8. **numa_flow.c**（仅 `HAVE_NUMA` 下编译）——Redis 侧接入 NUMAflow 原子操作引擎
+   的桥接层。迁移策略（`caat`/`composite_lru`/`tinylfu`/`noop`）*只*在这里以
+   NUMAflow 的 DAG 预设形式实现（`numaflow/src/nf_strategy.c`）——不再有任何内
+   核原生实现。实现了 `nf_bridge.c` 所要求的两个桥接回调，启动时按
+   `numa-flow-default-strategy`（默认 `caat`）自动加载为 `default` 工作流条目
+   （除非 `numa-enabled no`），并暴露 `NUMA FLOW
+   LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT/DEFAULT`。`serverCron` 会按配置的时间间
+   隔运行已加载的工作流。
 
 ## 与 Redis 内核的关键接触点
 
@@ -60,8 +62,8 @@
 - **`server.h`**——`redisServer` 结构体上的 NUMA 统计计数器与配置字段。NUMA 头
   文件在 `#ifdef HAVE_NUMA` 下被引入。
 - **`server.c`**——`numa_init()` 在 `main()` 中、`initServer()` **之前**运行。
-  策略/按键迁移/带宽监控的初始化在 `initServer()` **之后**运行。周期性的
-  策略执行发生在 `serverCron` 里。
+  按键迁移/带宽监控/NUMAflow 桥接的初始化在 `initServer()` **之后**运行，
+  NUMAflow 的默认策略也在这里自动加载。周期性的策略执行发生在 `serverCron` 里。
 - **`evict.h`/`evict.c`**——在真正淘汰一个 key 之前，淘汰循环里插入了一次无状态
   的降级尝试调用（`evictionTryNumaDemote`）；`evictionPoolEntry` 结构体本身未被
   修改。
@@ -73,10 +75,12 @@ libnuma
   -> numa_pool
     -> numa_migrate
       -> numa_key_migrate
-        -> numa_composite_lru / numa_tinylfu / numa_strategy_slots
-          -> numa_command
-            -> evict_numa
-              -> server.c
+        -> numa_bw_monitor
+          -> numa_configurable_strategy
+            -> numa_flow（NUMAflow 桥接）
+              -> numa_command
+                -> evict_numa
+                  -> server.c
 ```
 
 新增模块时请遵循这个顺序，详细的分步清单见

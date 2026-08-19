@@ -84,16 +84,20 @@ void nf_adapt_apply_params(const nf_adapt_t *a, nf_graph_t *g) {
 
 /* ---- structure templates ---- */
 typedef struct { const char *op; const char *k; const char *v; } step_t;
-static int chain(nf_graph_t *g, const step_t *s, int n) {
-    char id[8], prev[8] = "";
+static int chain_from(nf_graph_t *g, const step_t *s, int n, const char *prefix, const char *connect_from) {
+    char id[16], prev[16];
+    snprintf(prev, sizeof(prev), "%s", connect_from ? connect_from : "");
     for (int i = 0; i < n; i++) {
-        snprintf(id, sizeof(id), "n%d", i + 1);
+        snprintf(id, sizeof(id), "%s%d", prefix, i + 1);
         nf_graph_add_node(g, id, s[i].op);
         if (s[i].k && s[i].v) nf_graph_node_set_param(g, id, s[i].k, s[i].v);
-        if (i > 0) nf_graph_add_edge(g, prev, id);
+        if (prev[0]) nf_graph_add_edge(g, prev, id);
         snprintf(prev, sizeof(prev), "%s", id);
     }
     return NF_OK;
+}
+static int chain(nf_graph_t *g, const step_t *s, int n) {
+    return chain_from(g, s, n, "n", NULL);
 }
 
 int nf_adapt_build_graph(const nf_adapt_t *a, nf_graph_t *g) {
@@ -118,12 +122,29 @@ int nf_adapt_build_graph(const nf_adapt_t *a, nf_graph_t *g) {
             break;
         }
         case NF_ADAPT_AGGRESSIVE: {
-            /* full promote + demote + rebalance */
-            step_t s[] = {
+            /* full promote + demote + rebalance. Fork BEFORE either phase
+             * mutates anything (same fix as nf_strategy.c's build_caat, see
+             * its comment): DRAM residents only go through demote (decide,
+             * then a terminal emit_migrate), off-DRAM residents only go
+             * through promote (filters narrow first, mutate last) - each
+             * item is mutated at most once and always reaches a sink. */
+            step_t score[] = {
                 { "cms_estimate", NULL, NULL },
                 { "score_cost_benefit", NULL, NULL },
+            };
+            chain_from(g, score, (int)(sizeof(score) / sizeof(score[0])), "s", NULL);
+            nf_graph_add_node(g, "on_dram", "filter_local");
+            nf_graph_node_set_param(g, "on_dram", "node", "0");
+            nf_graph_add_edge(g, "s2", "on_dram");
+            nf_graph_add_node(g, "off_dram", "filter_remote");
+            nf_graph_node_set_param(g, "off_dram", "node", "0");
+            nf_graph_add_edge(g, "s2", "off_dram");
+            step_t demote[] = {
                 { "demote_cold", "threshold", "0" },
                 { "emit_migrate", NULL, NULL },
+            };
+            chain_from(g, demote, (int)(sizeof(demote) / sizeof(demote[0])), "d", "on_dram");
+            step_t promote[] = {
                 { "filter_freq", "threshold", "1" },
                 { "filter_benefit", "threshold", "0" },
                 { "rank_cost", NULL, NULL },
@@ -132,8 +153,8 @@ int nf_adapt_build_graph(const nf_adapt_t *a, nf_graph_t *g) {
                 { "emit_migrate", NULL, NULL },
                 { "balance_nodes", NULL, NULL },
             };
+            chain_from(g, promote, (int)(sizeof(promote) / sizeof(promote[0])), "p", "off_dram");
             strncpy(g->description, "adaptive: aggressive (promote + demote + rebalance)", NF_STR_MAX - 1);
-            chain(g, s, (int)(sizeof(s) / sizeof(s[0])));
             break;
         }
         default: {

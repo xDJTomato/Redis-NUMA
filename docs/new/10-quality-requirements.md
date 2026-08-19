@@ -32,12 +32,12 @@
 ### 质量目标 2：性能——迁移与分配开销可控
 
 **场景 Q2-1**
-- 刺激：Composite LRU（默认策略）在一次 `serverCron` 周期内触发迁移。
-- 响应：单周期迁移数量受 `numa-demote-max-migrate` 等参数约束，不允许无限制地把一个周期拖长；渐进式字典扫描每轮只扫一小段 `dict`，不会阻塞事件循环。
+- 刺激：NUMAflow 默认工作流（CAAT，`numa_flow_cron()` 按 `numa-flow-interval-sec` 触发）在一次执行里枚举整个 keyspace 并决定迁移。
+- 响应：单次执行的迁移数量受 NUMAflow 执行上下文的 `budget`（默认 256）约束，不允许无限制地把一次执行拖长；淘汰路径上的降级另受 `numa-demote-max-migrate` 约束。
 
 **场景 Q2-2**
 - 刺激：工作负载呈现明显的热点分布（如 Zipfian，多数访问集中在少量 key 上）。
-- 响应：CAAT 策略下的净代价（访问代价 + 迁移代价）必须低于既有基线。已实测数据（zipf / 3000 key / 12 万次访问 / DRAM 容量约束在工作集 50%）：CAAT 净代价比 TinyLFU 低约 20%，比 Composite LRU 低约 37%，本地命中率达到 91.1%（详见 [`docs/numaflow/README.md`](../numaflow/README.md)）。
+- 响应：CAAT 策略下的净代价（访问代价 + 迁移代价）必须低于既有基线。已实测数据（zipf / 3000 key / 12 万次访问 / DRAM 容量约束在工作集 50%）：CAAT 净代价比 TinyLFU 低约 20%，比 Composite LRU 低约 37%，本地命中率约 91%。但这个优势是**工作负载依赖**的，不是无条件成立——在 uniform（访问接近均匀分布）负载下 CAAT 净代价反而比 Composite LRU 高约 31%（详见 [ADR-09](09-architecture-decisions.md) 的复测记录、[`docs/numaflow/README.md`](../numaflow/README.md)）。
 
 **场景 Q2-3**
 - 刺激：DRAM 节点写满，且线上持续有新的热点数据需要晋升。
@@ -75,4 +75,4 @@
 
 **场景 Q5-1**
 - 刺激：运维人员需要在不重启服务的情况下判断当前 NUMA 子系统的健康状态。
-- 响应：`NUMA CONFIG STATS`（每节点分配统计）、`NUMA MIGRATE STATS`（迁移统计）、`NUMA STRATEGY LIST`（各策略槎位状态）均可在线查询，且 `NUMA CONFIG LOAD [path]` 支持不重启热加载 Composite LRU 的调优参数。
+- 响应：`NUMA CONFIG STATS`（每节点分配统计）、`NUMA MIGRATE STATS`（迁移统计）、`NUMA FLOW LIST/STATUS`（各已加载工作流的状态与反馈）均可在线查询，且 `NUMA FLOW DEFAULT <name>`/`NUMA FLOW LOAD` 支持不重启切换或热加载迁移策略。

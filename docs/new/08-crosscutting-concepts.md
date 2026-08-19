@@ -2,21 +2,21 @@
 
 > arc42 第 8 章。本章收集**不属于任何单一模块、但反复出现在多个模块里**的设计
 > 惯例——理解这些惯例比理解任何一个模块的内部实现更重要，因为它们是贯穿全部
-> 十个 NUMA 模块的「隐性契约」。违反其中任何一条，最常见的后果就是启动期崩溃、
+> 八个 NUMA 模块的「隐性契约」。违反其中任何一条，最常见的后果就是启动期崩溃、
 > 编译期隐藏错误，或者只在特定二进制/特定负载下才会触发的堆损坏。
 
 ## 8.1 初始化顺序约定
 
-**规则**：`numa_init()` 必须在 `initServer()` **之前**调用；策略框架 /
-按键迁移 / 带宽监控等模块的初始化必须在 `initServer()` **之后**调用。
+**规则**：`numa_init()` 必须在 `initServer()` **之前**调用；按键迁移 / 带宽
+监控 / NUMAflow 桥接等模块的初始化必须在 `initServer()` **之后**调用。
 
 ```
 main()
   ├─ numa_init()          // 必须在 initServer() 之前
   ├─ initServer()
   ├─ numa_key_migrate_init()      // 必须在 initServer() 之后
-  ├─ numa_strategy_slots_init()   // 同上
-  └─ numa_bw_monitor_init()       // 同上
+  ├─ numa_bw_monitor_init()       // 同上
+  └─ numa_flow_init()             // 同上，随后自动加载默认迁移策略
 ```
 
 原因：`numa_init()` 只负责建立最底层的分配器状态（slab/direct-cache），不依赖
@@ -35,7 +35,7 @@ checklist 第 4 条）。这也是为什么 [09-architecture-decisions.md](09-ar
 extern void _serverLog(int level, const char *fmt, ...);
 ```
 
-这是 Redis 内部既有的约定（`numa_composite_lru.c`、`numa_bw_monitor.c` 等模块
+这是 Redis 内部既有的约定（`numa_bw_monitor.c`、`numa_flow.c` 等模块
 都遵循）。对新增模块的作者来说，这是一条容易忽略、但会在编译期就报错的规则，
 不遵守的成本很低（编译失败），但因为它出现在**每一个**模块的代码里，值得单独
 列为贯穿性概念，而不是让读者在十份模块文档里各自发现一遍。
@@ -94,29 +94,34 @@ typedef struct {
 本身就是一段连续内存；对 hashtable/skiplist 这类多重指针结构则不行）。这条模式
 本身，比任何一个具体类型的迁移代码更值得在这里强调。
 
-## 8.5 JSON 热加载模式
+## 8.5 已退役：JSON 热加载模式（ADR-08）
 
 **问题**：调整迁移策略的参数（阈值、批量大小等）如果每次都要重启 Redis，对
 线上调优极不友好。
 
-**解法**：Composite LRU 的全部可调参数放在外部 `composite_lru.json` 文件里，
-启动时自动加载，运行期可以用 `NUMA CONFIG LOAD [/path]` 不重启地重新加载
-（`src/numa_command.c` 里 `NUMA CONFIG LOAD` 分支）。这是这个项目里**唯一**的
-热加载配置面——其它策略/分配相关的参数都是走标准 `CONFIG SET`（有 Redis
-自身的配置系统兜底），而 Composite LRU 选择自建一条 JSON 路径，是因为它的
-参数结构（阶梯衰减表、双通道权重等）不是标量，套用 Redis 单值配置项会很别扭。
-未来如果一个新策略需要类似的复合结构化参数，这个模式（外部 JSON + 显式
-`LOAD` 命令）是现成的参照，而不必发明第二套机制。
+**过去的解法**（`numa_composite_lru.{c,h}` 已随 ADR-08 删除，以下保留作为模式
+记录）：Composite LRU 的全部可调参数放在外部 `composite_lru.json` 文件里，启动
+时自动加载，运行期可以用 `NUMA CONFIG LOAD [/path]` 不重启地重新加载。这条
+"外部 JSON + 显式 `LOAD` 命令"路径现在不存在了：`composite_lru.json` 只作为字段
+名参考留在仓库根目录，内核不再读取它；`NUMA CONFIG LOAD` 命令本身也已移除。
+
+**现在的等价机制**：需要给一个迁移策略传结构化参数，走的是 NUMAflow 的 DAG
+工作流本身——`NUMA FLOW LOAD <name> <path.json> [interval_sec] [ADAPT]` 加载一份
+GUI 编排导出的原子操作 DAG（含每个节点的参数），替换或新增一个工作流条目；
+内置的三个预设（`caat`/`composite_lru`/`tinylfu`）则通过 `NUMA FLOW DEFAULT
+<name>` 在运行时切换，不需要写 JSON。数据模型从"一组标量参数"变成了"一张原子
+操作图"，但"运行时热加载、不重启进程"这条设计目标没有变。
 
 ## 8.6 渐进式扫描：不阻塞单线程事件循环
 
 **问题**：Redis 是单线程处理命令的；任何一次策略执行如果同步扫一遍整个
 keyspace，都会让所有客户端请求排队等待，等同于一次长时间的"stop-the-world"。
 
-**解法**：Composite LRU 的慢路径扫描每一轮只推进字典迭代器一小段
-（`composite_lru_execute_step()` 用 `budget`/`deadline_us` 控制这一轮最多处理
-多少 key、最多花多少时间），下一轮 `serverCron`/AE 调度再接着扫，而不是一次
-扫完。这个"渐进式、有预算、可续跑"的模式后来被进一步推广成
+**过去的解法**（已退役，保留作为模式记录）：Composite LRU 的慢路径扫描每一轮
+只推进字典迭代器一小段（`composite_lru_execute_step()` 用 `budget`/
+`deadline_us` 控制这一轮最多处理多少 key、最多花多少时间），下一轮
+`serverCron`/AE 调度再接着扫，而不是一次扫完。这个"渐进式、有预算、可续跑"的
+模式后来被进一步推广成
 [`modules/ae_strategy_scheduler.md`](modules/ae_strategy_scheduler.md) 里描述
 的、更通用的 `execute_step(strategy, deadline_us, budget)` 接口——也就是说，
 渐进式扫描不是 Composite LRU 一次性的技巧，而是整个策略框架现在的标准执行

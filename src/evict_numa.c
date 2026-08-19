@@ -25,87 +25,19 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Node pressure cache (avoids frequent sysfs reads). */
-static double g_node_pressure_cache[MAX_NUMA_NODES];
-static long long g_pressure_cache_time[MAX_NUMA_NODES];
-#define PRESSURE_CACHE_TTL_MS 1000  /* Cache TTL of 1 second. */
-
 /* ========== Node info queries ========== */
 
 /*
  * numaGetNodePressure - get the memory pressure of a node
  *
- * Reads from /sys/devices/system/node/nodeX/meminfo
- * Returns: 0.0 ~ 1.0, higher means more pressure
+ * Thin wrapper: the actual computation (maxmemory-quota-relative or sysfs
+ * meminfo, with a 1s cache) lives in numa_bw_monitor.c as
+ * numa_bw_get_node_pressure() - the single pressure source shared with
+ * numa_configurable_strategy.c so the two never disagree about how loaded
+ * a node is.
  */
 double numaGetNodePressure(int node_id) {
-    int max_node = numa_max_node();
-    if (node_id < 0 || node_id > max_node) {
-        return 1.0; /* Invalid nodes report full pressure. */
-    }
-
-    /* Check the cache. */
-    long long now = server.mstime;
-    if (g_pressure_cache_time[node_id] > 0 &&
-        (now - g_pressure_cache_time[node_id]) < PRESSURE_CACHE_TTL_MS) {
-        return g_node_pressure_cache[node_id];
-    }
-
-    double pressure;
-
-    /*
-     * When maxmemory > 0, use the per-node quota share as the denominator:
-     *   per_node_quota = server.maxmemory / num_nodes
-     *   pressure       = node_used_bytes / per_node_quota
-     *
-     * This way pressure reflects how much of Redis's own memory share on the
-     * node is used, instead of the whole physical node memory (which on a
-     * 441GB dual-socket server stays at ~9.7% and would never trigger migration).
-     */
-    if (server.maxmemory > 0) {
-        int num_nodes = max_node + 1;
-        size_t per_node_quota = server.maxmemory / (size_t)num_nodes;
-        size_t node_used = zmalloc_used_memory_node(node_id);
-
-        if (per_node_quota > 0) {
-            pressure = (double)node_used / (double)per_node_quota;
-            if (pressure > 1.0) pressure = 1.0;
-        } else {
-            pressure = 1.0;
-        }
-    } else {
-        /* maxmemory not set: fall back to the physical node memory pressure. */
-        char path[128];
-        snprintf(path, sizeof(path),
-                 "/sys/devices/system/node/node%d/meminfo", node_id);
-
-        FILE *fp = fopen(path, "r");
-        if (!fp) {
-            pressure = 1.0;
-        } else {
-            unsigned long mem_total = 0, mem_free = 0;
-            char line[256];
-            while (fgets(line, sizeof(line), fp)) {
-                if (strstr(line, "MemTotal")) {
-                    char *colon = strchr(line, ':');
-                    if (colon) mem_total = strtoul(colon + 1, NULL, 10);
-                } else if (strstr(line, "MemFree")) {
-                    char *colon = strchr(line, ':');
-                    if (colon) mem_free = strtoul(colon + 1, NULL, 10);
-                }
-            }
-            fclose(fp);
-
-            pressure = (mem_total > 0) ?
-                       (1.0 - ((double)mem_free / (double)mem_total)) : 1.0;
-        }
-    }
-
-    /* Update the cache. */
-    g_node_pressure_cache[node_id] = pressure;
-    g_pressure_cache_time[node_id] = now;
-
-    return pressure;
+    return numa_bw_get_node_pressure(node_id);
 }
 
 /*

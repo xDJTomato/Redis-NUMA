@@ -12,7 +12,7 @@
 
 1. [为什么需要一个「NUMA-aware」的 Redis](#第-1-章为什么需要一个numa-aware的-redis)
 2. [项目地图：五分钟跑起来](#第-2-章项目地图五分钟跑起来)
-3. [内核里改了什么：十个模块逐一讲解](#第-3-章内核里改了什么十个模块逐一讲解)
+3. [内核里改了什么：八个模块逐一讲解](#第-3-章内核里改了什么八个模块逐一讲解)
 4. [配置详解](#第-4-章配置详解)
 5. [NUMAflow 子系统：把策略拆成乐高积木](#第-5-章numaflow-子系统把策略拆成乐高积木)
 6. [一次真实的版本迁移：Redis 6.2.21 → 7.2.6](#第-6-章一次真实的版本迁移redis-6221--726)
@@ -72,9 +72,9 @@ NUMA 拓扑**——它们只关心把一块空闲内存尽快给你，不关心�
 在保留 Redis 全部 API 兼容性的前提下，本项目：
 
 1. 把 `zmalloc` 分配路径改造成 NUMA 感知的：可以按策略把新分配的内存放到指定节点
-   （见 [3.5](#35-numa_configurable_strategy9-种分配策略)）；
-2. 给每个 key 加上「热度」追踪，并用可插拔的策略在后台周期性地把热 key 迁到快速
-   节点、把冷 key 降级到慢速（CXL）节点（见 [3.3](#33-numa_migrate--numa_key_migrate块--key-两级迁移)、[3.4](#34-三种迁移调度策略框架--composite-lru--tinylfu)）；
+   （见 [3.5](#35-numa_configurable_strategy7-种分配策略)）；
+2. 给每个 key 加上「热度」追踪，并用 NUMAflow 的可插拔策略在后台周期性地把热 key
+   迁到快速节点、把冷 key 降级到慢速（CXL）节点（见 [3.3](#33-numa_migrate--numa_key_migrate块--key-两级迁移)、[3.4](#34-迁移策略去哪了现在统一收敛到-numaflow)）；
 3. 新增了一个完全独立、跟 Redis/libnuma 无关的纯 C11 子系统 **NUMAflow**
    （见 [第 5 章](#第-5-章numaflow-子系统把策略拆成乐高积木)），把「迁移策略」这
    件事拆成可组合的原子操作，并在此基础上设计了一个新的默认策略 **CAAT**。
@@ -89,13 +89,12 @@ NUMA 拓扑**——它们只关心把一块空闲内存尽快给你，不关心�
 
 ```text
 Redis-NUMA/
-├── src/                    # Redis 内核 + 10 个 NUMA 模块（本文第 3 章）
-│   ├── numa_*.c/h           # 十个模块
-│   ├── numa_flow.c          # NUMAflow 桥接适配器
+├── src/                    # Redis 内核 + 8 个 NUMA 模块（本文第 3 章）
+│   ├── numa_*.c/h           # 八个模块（含 numa_flow.c，NUMAflow 桥接适配器）
 │   └── commands/numa.json   # NUMA 命令的声明式注册（COMMAND INFO/DOCS 用）
 ├── numaflow/                # 独立子系统：策略引擎（本文第 5 章）
 ├── redis.conf               # 配置文件，NUMA 相关参数见第 4 章
-├── composite_lru.json       # Composite LRU 策略的 JSON 参数文件
+├── composite_lru.json       # 已退役：仅作 NUMAflow composite_lru 预设的字段参考，内核不再读取
 ├── tests/                   # 测试（第 7 章）
 │   ├── unit/*.tcl            # 标准 Redis 单测
 │   ├── ycsb/                 # YCSB 基准测试
@@ -127,12 +126,13 @@ jemalloc，两个分配器会互相踩踏内存元数据。**如果你要改 Mak
 ./src/redis-server ./redis.conf --daemonize yes --logfile /tmp/r.log
 ./src/redis-cli set foo bar
 ./src/redis-cli numa config get
-./src/redis-cli numa strategy list
+./src/redis-cli numa flow list
 ```
 
 如果一切正常，`numa config get` 会打印当前的分配策略、节点权重等信息；
-`numa strategy list` 会打印 16 个策略槽位（slot）的状态——slot 1（Composite LRU）
-默认开启，slot 2（TinyLFU）默认关闭。
+`numa flow list` 会打印当前已加载的 NUMAflow 工作流及其状态——默认情况下会有一条
+名为 `default` 的条目，跑的是 `numa-flow-default-strategy` 指定的策略（默认
+`caat`），Redis 启动时自动加载，不需要手动 `NUMA FLOW LOAD`。
 
 ### 2.3 一体化验证
 
@@ -161,11 +161,11 @@ CXLMemSim）都会被标记为 `skipped` 并写明原因——**这个脚本的�
 
 ---
 
-## 第 3 章：内核里改了什么：十个模块逐一讲解
+## 第 3 章：内核里改了什么：八个模块逐一讲解
 
 ### 3.0 全局依赖顺序
 
-十个模块不是互相独立的，它们有严格的依赖顺序（既是加载顺序，也是 `src/Makefile`
+八个模块不是互相独立的，它们有严格的依赖顺序（既是加载顺序，也是 `src/Makefile`
 里链接顺序的要求——NUMA 的 `.o` 文件必须排在 `server.o` **之后**）：
 
 ```text
@@ -173,11 +173,17 @@ libnuma
   └─> numa_pool                （分配器）
        └─> numa_migrate         （底层块迁移）
             └─> numa_key_migrate（按 key 迁移）
-                 └─> numa_composite_lru / numa_tinylfu / numa_strategy_slots
-                      └─> numa_command （统一命令入口）
-                           └─> evict_numa
-                                └─> server.c （main 函数把它们串起来）
+                 └─> numa_bw_monitor        （带宽/压力监控）
+                      └─> numa_configurable_strategy（分配层选节点）
+                           └─> numa_flow    （NUMAflow 桥接，迁移策略）
+                                └─> numa_command （统一命令入口）
+                                     └─> evict_numa
+                                          └─> server.c （main 函数把它们串起来）
 ```
+
+（三个迁移策略——`caat`/`composite_lru`/`tinylfu`——曾经各有一份内核原生实现，
+经 [ADR-08](../new/09-architecture-decisions.md) 收敛后统一由 `numa_flow` 桥接到
+NUMAflow 的原子操作引擎，见 3.4 节与[第 5 章](#第-5-章numaflow-子系统把策略拆成乐高积木)。）
 
 这个顺序背后的直觉很简单：**先有分配器，才能有迁移；先有迁移的底层能力，才能有
 「按什么策略触发迁移」；先有策略，才能有把策略暴露给用户的命令；最后才是把这套
@@ -240,72 +246,64 @@ libnuma
 要为每个 key 单独跑定时器去衰减，而是在下次访问时才补算衰减量，省掉大量无意义的
 后台开销）。
 
-### 3.4 三种迁移调度：策略框架 / Composite LRU / TinyLFU
+### 3.4 迁移策略去哪了：现在统一收敛到 NUMAflow
 
-#### numa_strategy_slots：16 槎位可插拔策略框架
+**文件**：`src/numa_flow.c` / `.h`（`HAVE_NUMA` 下才编译）
 
-**文件**：`src/numa_strategy_slots.c` / `.h`
+这个项目早期的设计是内核原生的 **16 槎位可插拔策略框架**（`numa_strategy_slots`）
+分别装载两个手写策略实现：Composite LRU（槎位 1，默认开启，双通道热候选环形缓冲
+区 + 渐进式字典扫描）和 TinyLFU（槎位 2，默认关闭，Count-Min Sketch + Doorkeeper
+布隆过滤器，固定约 40KB 内存）。这套框架已经**整体退役**——`src/numa_strategy_
+slots.{c,h}`、`src/numa_composite_lru.{c,h}`、`src/numa_tinylfu.{c,h}` 都已从代码
+库删除，原因和过程记在 [ADR-08](../new/09-architecture-decisions.md)：简单说是因
+为 NUMAflow（见[第 5 章](#第-5-章numaflow-子系统把策略拆成乐高积木)）早就把这两
+个算法拆成了等价的原子操作 DAG，两份实现要同步维护，而且内核默认用的是较差的
+Composite LRU，更好的 CAAT 却要手动加载才能跑。
 
-这是一个**基于虚函数表（vtable）的多态框架**：提供 16 个"策略槎位"，每个槎位可以
-装载一个实现了统一接口（初始化/执行一轮/销毁等回调）的策略实现。槎位 0 固定是空
-操作（no-op），槎位 1、2 分别是下面两个具体策略。`serverCron` 每秒扫一遍所有启用
-的槎位，逐一执行。这个框架本身不包含任何"到底该迁移哪个 key"的判断逻辑——那是
-具体策略的事，框架只负责"按顺序执行、可以热插拔"。
+现在，三个迁移策略——`caat`（新默认）、`composite_lru`、`tinylfu`，外加什么都不
+做的 `noop`——**只**作为 NUMAflow 的原子操作 DAG 预设存在（`numaflow/src/
+nf_strategy.c`），`numa_flow.c` 是接入 Redis 的唯一桥接层：
 
-#### numa_composite_lru：默认策略（槎位 1）
+- 启动时按 `numa-flow-default-strategy`（默认 `caat`）自动把对应预设注册成
+  NUMAflow 的 `default` 工作流条目，跟着 `numa-flow-interval-sec`（默认 1 秒）
+  周期执行——不再需要手动 `NUMA FLOW LOAD` 才能得到迁移行为；
+- 运行时用 `NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>` 在三个预设间切
+  换，或者用 `NUMA FLOW LOAD` 加载自定义工作流 JSON；
+- `numa_key_migrate_touch()`（3.3 节）不再受"槎位 1/2 是否启用"的条件限制，改为
+  在 `db.c` 的真实访问路径上无条件调用，为 NUMAflow 的 `enumerate()` 提供中立的热
+  度 ground truth。
 
-**文件**：`src/numa_composite_lru.c` / `.h`
+想理解 Composite LRU/TinyLFU/CAAT 具体怎么用原子操作拼出来、以及退役前这套框架
+长什么样，见[第 5 章](#第-5-章numaflow-子系统把策略拆成乐高积木)和已标注"已退
+役"的模块文档（`docs/new/modules/numa_strategy_slots.md` 等），这里不重复教一遍
+已经删除的 vtable 机制。
 
-双通道设计：
-
-- **快路径**：一个"热候选环形缓冲区（ring buffer）"，每次一个 key 被判定为足够热
-  时立即入队，下一轮策略执行时优先处理这个队列——延迟低，但只覆盖"最近被访问"的
-  key；
-- **慢路径**：一个"渐进式字典扫描"，每轮只扫一小段 `dict`（避免一次性全表扫描阻
-  塞事件循环），慢慢把整张 keyspace 都过一遍，弥补快路径覆盖不到的冷门 key。
-
-参数（阈值、每轮迁移预算等）由 `composite_lru.json` 提供，支持运行时热加载（见
-`NUMA CONFIG LOAD`）。
-
-#### numa_tinylfu：频率驱动策略（槎位 2，默认关闭）
-
-**文件**：`src/numa_tinylfu.c` / `.h`
-
-不追踪"最近有没有访问"（LRU 的思路），而是追踪"历史上访问了多少次"（LFU 的思
-路），用两个经典的概率数据结构实现，内存占用固定在约 **40KB**，不随 keyspace 增长：
-
-- **Count-Min Sketch**（4 行 × 16384 列，每格 4 bit）：近似统计一个 key 被访问的
-  频率，牺牲一点精度换取 O(1) 空间和 O(1) 更新/查询；
-- **Doorkeeper 布隆过滤器**：先过一遍布隆过滤器，只有"至少出现过一次"的 key 才被
-  计入 Count-Min Sketch，避免第一次访问就把某个偏门 key 的槎位污染成"看似频繁"。
-
-默认关闭是因为它和 Composite LRU 都想控制同一批 key 的迁移决策权，同时开两个会互
-相打架；需要手动通过 `NUMA STRATEGY SLOT ENABLE 2` 打开，并搭配关闭槎位 1。
-
-### 3.5 numa_configurable_strategy：9 种分配策略
+### 3.5 numa_configurable_strategy：7 种分配策略
 
 **文件**：`src/numa_configurable_strategy.c` / `.h`
 
 前面几节讲的是"数据已经在某个节点上了，要不要把它迁走"；这一节是更早一步的决
-策：**一次新的 `zmalloc` 请求，第一次应该分配到哪个节点**。9 种策略：
+策：**一次新的 `zmalloc` 请求，第一次应该分配到哪个节点**。7 种独立行为（原来的
+`WEIGHTED_INTERLEAVE` 只是 `WEIGHTED` 权重来源不同的一份重复实现，现在合并成同一
+个 `select_weighted_node()` 辅助函数，不再算独立的第 9 种）：
 
 | 策略 | 思路 |
 | --- | --- |
 | `LOCAL_FIRST` | 优先分配在当前 CPU 所在的节点，本地节点满了才考虑其它节点 |
 | `INTERLEAVE` | 简单轮流分配到各节点（类似 `numactl --interleave`） |
 | `ROUND_ROBIN` | 与 INTERLEAVE 类似，按固定顺序循环 |
-| `WEIGHTED` | 按人工配置的权重比例分配（见 `NUMA CONFIG SET weight`） |
-| `PRESSURE_AWARE` | 优先分配到当前内存压力（使用率）更低的节点 |
+| `WEIGHTED` | 按人工配置的权重比例分配，`WEIGHTED_INTERLEAVE` 的轮流变体共用同一份加权随机逻辑，只是权重来源不同（见 `NUMA CONFIG SET weight`） |
+| `PRESSURE_AWARE` | 优先分配到当前内存压力（使用率）更低的节点——现在读取的是 `numa_bw_monitor` 提供的 `numa_bw_get_node_pressure()`，和 `evict_numa` 共用同一个压力信号 |
 | `CXL_OPTIMIZED` | 区分"快速本地节点"与"慢速 CXL 节点"，把新分配优先放本地，为 CXL 节点保留给迁移降级用 |
-| `WEIGHTED_INTERLEAVE` | 加权版的轮流分配，权重高的节点分到的份额更多 |
-| `ADAPTIVE` | 根据运行时反馈动态调整（内核中为占位实现，完整版本在 NUMAflow 的 `alloc_adaptive` 原子操作里） |
-| `LATENCY_AWARE` | 按节点间实测延迟决策（同样，完整版本在 NUMAflow 的 `alloc_latency_aware`） |
+| `ADAPTIVE` / `LATENCY_AWARE` | 根据运行时反馈/节点间实测延迟动态调整（内核中为占位实现，完整版本在 NUMAflow 的 `alloc_adaptive`/`alloc_latency_aware` 原子操作里） |
 
 > 注意最后两种：内核里的实现是占位（placeholder），真正可用的完整实现是在
 > [第 5 章](#第-5-章numaflow-子系统把策略拆成乐高积木)要讲的 NUMAflow 子系统里，
-> 通过 `NUMA FLOW` 命令桥接进 Redis。这是这个项目一个刻意的设计取舍：内核里的策
-> 略保持简单、可预测；复杂的自适应逻辑放到独立子系统里迭代，不直接耦合进内核的
-> 关键路径。
+> 通过 `NUMA FLOW` 命令桥接进 Redis。这是这个项目一个刻意的设计取舍（见
+> [ADR-05](../new/09-architecture-decisions.md)）：内核里的策略保持简单、可预测；
+> 复杂的自适应逻辑放到独立子系统里迭代，不直接耦合进内核的关键路径。这一层现在
+> 不止在文档里说明这件事——设置时会打一条启动日志，`NUMA CONFIG GET` 的回复里也
+> 多了一个 `strategy_note` 字段说明"这是占位，完整实现见 NUMAflow"。
 
 ### 3.6 numa_command：统一命令入口
 
@@ -318,33 +316,34 @@ libnuma
 ```text
 NUMA MIGRATE KEY <key> <node>      迁移单个 key 到目标 NUMA 节点
 NUMA MIGRATE DB <node>             把整个数据库迁移到目标节点
-NUMA MIGRATE SCAN [COUNT n]        手动触发一轮渐进式 key 扫描
+NUMA MIGRATE SCAN [COUNT n]        手动触发一次 NUMAflow default 工作流（COUNT 仅为兼容旧 CLI 保留，已不生效）
 NUMA MIGRATE STATS                 查看迁移统计
 NUMA MIGRATE RESET                 重置迁移统计
 NUMA MIGRATE INFO <key>            查看某个 key 的 NUMA 元数据（当前节点/热度等）
 
-NUMA CONFIG GET                    查看当前分配器配置
-NUMA CONFIG SET strategy <name>    设置分配策略（见 3.5 的 9 种策略名）
+NUMA CONFIG GET                    查看当前分配器配置（含 strategy_note 占位说明字段）
+NUMA CONFIG SET strategy <name>    设置分配策略（见 3.5 的 7 种策略名）
 NUMA CONFIG SET weight <node> <w>  设置某节点权重
 NUMA CONFIG SET cxl_optimization <on|off>
 NUMA CONFIG SET balance_threshold <percent>
-NUMA CONFIG SET access_tracking <0|1>
-NUMA CONFIG SET locality_stats <0|1>
-NUMA CONFIG SET debug_logging <0|1>
 NUMA CONFIG SET enabled_nodes <all|n[,m]>
-NUMA CONFIG LOAD [/path]           热加载 composite_lru.json
 NUMA CONFIG REBALANCE              手动触发一次再平衡
 NUMA CONFIG STATS                  查看每节点的分配统计
 
-NUMA STRATEGY SLOT <id> <name>            把某策略装进指定槎位
-NUMA STRATEGY SLOT ENABLE <id>            启用某槎位
-NUMA STRATEGY SLOT DISABLE <id>           停用某槎位
-NUMA STRATEGY SLOT SCHEDULE <id> ae|servercron   切换该槎位的调度方式
-NUMA STRATEGY SLOT STATUS <id>            查看单个槎位状态
-NUMA STRATEGY LIST                        列出全部已注册槎位
+NUMA FLOW LOAD <name> <path.json> [interval_sec] [ADAPT]   加载自定义 NUMAflow 工作流
+NUMA FLOW RUN [name]                                        立即执行（省略 name 则全部执行）
+NUMA FLOW LIST / STATUS <name>                              列出/查看工作流运行状态与反馈分
+NUMA FLOW UNLOAD <name>                                     卸载
+NUMA FLOW ADAPT <name> <ON|OFF>                             开关自适应
+NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>         运行时切换默认迁移策略
 
 NUMA HELP                          打印本帮助
 ```
+
+`NUMA STRATEGY`（槎位插拔/启停/调度/查询）和 `NUMA CONFIG LOAD`（composite-lru
+JSON 热加载）随 ADR-08 的收敛一起被整体移除；`NUMA CONFIG SET`/`GET` 里
+`access_tracking`/`locality_stats`/`debug_logging` 这几个 composite-lru 私有参数
+也一并消失了，因为它们的数据源不再存在。
 
 上面这份表本身就是从 `numa_command.c` 里的帮助文本原样摘出的——`redis-cli numa
 help` 随时可以查到最新版本，不需要记忆。
@@ -399,7 +398,7 @@ score = 距离(40%) + 压力(30%) + 带宽(30%)
 
 ### 3.9 与 Redis 核心的三个关键接触点
 
-除了上面十个独立模块，本项目还在 Redis 核心的三处"缝进"了钩子：
+除了上面八个独立模块，本项目还在 Redis 核心的三处"缝进"了钩子：
 
 - **`zmalloc.c` / `.h`**——所有 `zmalloc`/`zfree`/`zrealloc` 都被改造成先检查 NUMA
   是否可用，可用则走 NUMA 分配器，否则原样退化成普通 `malloc`。这个"退化"很重要：
@@ -458,13 +457,22 @@ score = 距离(40%) + 压力(30%) + 带宽(30%)
 # 自动迁移"的场景。
 # numa-enabled yes
 
-# Composite-LRU 策略的 JSON 参数文件路径，启动时自动加载，运行时
-# 可通过 NUMA CONFIG LOAD [path] 热重载。
-# numa-migrate-config /path/to/composite_lru.json
+# 启动时自动加载为默认迁移策略的 NUMAflow 原子操作预设名字。三个曾经
+# 内核原生实现的策略现在都只作为 NUMAflow 预设存在：
+#   caat          - 成本感知自适应分层（晋升+降级），当前默认
+#   composite_lru - 阶梯热度双通道迁移
+#   tinylfu       - Count-Min Sketch + Doorkeeper 频率驱动迁移
+#   noop          - 不做任何自动迁移
+# 运行时可用 NUMA FLOW DEFAULT <name> 切换，不需要重启。
+# numa-flow-default-strategy caat
+
+# 默认 NUMAflow 工作流通过 serverCron 运行的间隔（秒）。
+# numa-flow-interval-sec 1
 ```
 
-`composite_lru.json` 本身的字段（每节点带宽基线、迁移调优参数）见文件内注释，此处
-不重复摘录——它的字段会随策略调优频繁变化，最新版本请直接看文件。
+`composite_lru.json` 已经退役为"字段名参考"——内核不再读取它；如果要手写一份
+NUMAflow 的 `composite_lru` 工作流 JSON，可以参考它里面的字段命名（每节点带宽基
+线、迁移调优参数），最新版本请直接看文件内注释。
 
 ---
 
@@ -489,7 +497,7 @@ n8n/Node-RED 那种可视化工作流工具的思路，只是这里的"节点"�
 
 | 类别 | 操作 | 对应的语义 |
 | --- | --- | --- |
-| **alloc**（分配） | `alloc_local_first` `alloc_interleave` `alloc_round_robin` `alloc_weighted` `alloc_pressure_aware` `alloc_cxl_optimized` `alloc_weighted_interleave` `alloc_adaptive` `alloc_latency_aware` | 对应第 3.5 节的 9 种分配策略——这里才是 `ADAPTIVE`/`LATENCY_AWARE` 的完整实现 |
+| **alloc**（分配） | `alloc_local_first` `alloc_interleave` `alloc_round_robin` `alloc_weighted` `alloc_pressure_aware` `alloc_cxl_optimized` `alloc_weighted_interleave` `alloc_adaptive` `alloc_latency_aware` | 对应第 3.5 节的 7 种分配策略——这里才是 `ADAPTIVE`/`LATENCY_AWARE` 的完整实现（`alloc_weighted_interleave` 是 `alloc_weighted` 权重来源不同的变体，内核侧对应同一个 `WEIGHTED` 行为） |
 | **score**（打分） | `score_hotness` `decay_hotness` `cms_observe` `cms_estimate` `global_decay` `score_ewma` `score_cost_benefit` | Composite LRU 的阶梯热度 / TinyLFU 的 CMS+Doorkeeper |
 | **filter**（过滤） | `filter_hot` `filter_freq` `filter_cold` `filter_remote` `filter_local` `filter_size_min` `filter_size_max` `filter_benefit` | 从候选集合里筛出满足条件的 key |
 | **rank**（排序） | `rank_lru` `rank_frequency` `rank_hotness` `rank_cost` `rank_ewma` `rank_size` | 决定"先迁移谁" |
@@ -499,20 +507,21 @@ n8n/Node-RED 那种可视化工作流工具的思路，只是这里的"节点"�
 
 ### 5.3 已有策略如何用原子操作拼出来
 
-**Composite LRU（对应内核槎位 1）**：
+**Composite LRU**（历史上曾经是内核槎位 1，现在只以 NUMAflow 预设的形式存在，
+`build_composite_lru`）：
 
 ```text
 score_hotness → filter_hot → rank_hotness → budget_limit → select_dest_node → emit_migrate
 ```
 
-**TinyLFU（对应内核槎位 2）**（`cms_observe` 在每次访问的热路径完成，其余在批处
-理里只做只读的频率估计）：
+**TinyLFU**（历史上曾经是内核槎位 2，现在是 `build_tinylfu` 预设；`cms_observe`
+在每次访问的热路径完成，其余在批处理里只做只读的频率估计）：
 
 ```text
 cms_estimate → filter_freq → rank_frequency → budget_limit → select_dest_node → emit_migrate
 ```
 
-把这两串图和第 3.3/3.4 节的文字描述对照读一遍，会发现每一步都能一一对应上——这
+把这两串图和第 3.4 节的文字描述对照读一遍，会发现每一步都能一一对应上——这
 正是 NUMAflow 存在的意义：**同一个算法，用图和用 C 代码看到的是同一件事，只是抽
 象层次不同。**
 
@@ -526,12 +535,25 @@ Composite LRU 和 TinyLFU 有一个共同的局限：**它们都只会"升"（�
 降级"流水线：
 
 ```text
-# 降级半路
-cms_estimate → score_cost_benefit → demote_cold → emit_migrate
+# 降级子链：原本就在 DRAM（本地）上的 item
+filter_local → cms_estimate → score_cost_benefit → demote_cold → emit_migrate
 
-# 晋升半路
-     → filter_freq → filter_benefit → rank_cost → budget_limit → select_dest_node → emit_migrate
+# 晋升子链：原本在 CXL（远端）上的 item
+filter_remote → filter_freq → filter_benefit → rank_cost → budget_limit → select_dest_node → emit_migrate
 ```
+
+两条子链在 `filter_local`/`filter_remote` 这一步就按 item **原始驻留位置**分叉，
+之后各自独立跑到底、只在自己的终止 `emit_migrate` 处变更一次状态。这不是随便选
+的写法——[ADR-09](../new/09-architecture-decisions.md) 记录了一个真实发现的 bug：
+最早的 `build_caat` 是一条单链（降级阶段的 `emit_migrate` 直接喂给晋升阶段的过滤
+器），DAG 引擎的最终结果只取"没有出边的终止节点"输出的并集，所以任何被降级、但
+没通过晋升阶段过滤条件的 item，会在到达任何终止节点之前被丢弃——它的降级其实已
+经真实执行了，但桥接层的"入队原始节点 vs 结果最终节点"diff 逻辑完全看不到它，宿
+主的 `apply()` 回调永远不会被调用，等价于这次降级从未发生过。TinyLFU 还有另一个
+独立的 bug：`cms_estimate` 读取的频率信号从来没被 Redis 侧的桥接代码喂过数据（只
+有 NUMAflow 自己的评测 harness 会调用写入侧的 `nf_tracker_observe()`），修复方式
+是新增 `numa_flow_observe_access()`，从 `src/db.c` 的真实访问路径调用它——和
+3.4 节提到的 `numa_key_migrate_touch()` 走的是同一条路径。
 
 核心是 `score_cost_benefit` 这一步算的一个净收益公式：
 
@@ -556,9 +578,24 @@ DRAM 上不再热的 key 会被主动降级到 CXL 节点，从而保证 DRAM �
 | **CAAT（新）** | **91.1%** | **84.9M** | 2422 |
 
 CAAT 在净代价上比表现最好的既有基线（TinyLFU）低约 **20%**，比 Composite LRU 低
-约 **37%**——代价是迁移次数略高于两者（换回来的是命中率的明显提升），这是一个典
-型的"多花一点迁移成本，换更大的访问延迟收益"的权衡，具体数值会随工作负载分布变
-化，`numaflow eval` 可以在不同负载下重新跑出这张表。
+约 **37%**——代价是迁移次数略高于两者（换回来的是命中率的明显提升）。
+
+> **这张表后来被重新核实过，结论比最初看起来更细致**（见 ADR-09"遗留事项"，
+> `docs/new/09-architecture-decisions.md`）：上面这条单链丢结果的 bug，
+> `numaflow/src/nf_bench.c`（这张表数字的来源）自己也会中，用修复后的二进制重新
+> 生成四个基准工作负载后发现，bug 对结果的影响是真实且不小的——例如 zipf 场景下
+> CAAT 修复前/后的命中率是 84.6% → 91.0%，净代价下降约 54%（其它三个工作负载的
+> 净代价下降幅度在 50%-57% 之间）。同时，把修复后的 CAAT 拿去和 Composite
+> LRU/TinyLFU 做四种工作负载的横向对比后，"CAAT 全面更优"这个结论需要加条件：
+> CAAT 在冷热分层明显的负载（zipf、hotspot）上确实更优（净代价比 Composite LRU
+> 低 36.9%/39.5%，比 TinyLFU 低 19.9%/16.4%），但在访问接近均匀分布、没有真正的
+> "冷"数据的 uniform 负载上反而比 Composite LRU 差（净代价高 31.1%）——`demote_
+> cold` 主动搬走"冷"数据这个动作，在没有真实冷热差异时变成纯粹的浪费开销；
+> temporal 负载上两者基本打平（CAAT 净代价高 3.3%）。结论是：ADR-08 把 CAAT 设为
+> 默认这个决策本身不需要重新考虑（真实的 Redis 访问分布大多是偏态的，接近
+> zipf/hotspot），但引用这张表时应理解为"CAAT 在冷热分层明显时更优，在访问接近
+> 均匀分布时反而可能更差"，而不是一个无条件成立的单一百分比。具体数值会随工作负
+> 载分布变化，`numaflow eval`/`make bench` 可以在不同负载下重新跑出这张表。
 
 ### 5.5 公平评测框架：没有真实多节点硬件也能可信地比较策略
 
@@ -629,11 +666,26 @@ NUMA FLOW RUN  [name]                                       # 立即执行（省
 NUMA FLOW LIST / STATUS <name>                               # 查看运行状态 / 反馈分
 NUMA FLOW UNLOAD <name>                                      # 卸载
 NUMA FLOW ADAPT <name> <ON|OFF>                              # 开关自适应
+NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>          # 运行时切换默认策略
 ```
 
 加载的工作流会被 `serverCron` 按 `interval_sec` 周期自动执行——也就是说，你完全可
 以在 GUI 里拼一个 CAAT 之外的新策略，导出 JSON，`NUMA FLOW LOAD` 进一个正在运行
-的 Redis 实例，不需要重新编译内核。
+的 Redis 实例，不需要重新编译内核。Redis 启动时还会自动做一件事：按
+`numa-flow-default-strategy`（默认 `caat`）把对应的预设注册成一个名为 `default`
+的工作流条目并开始跑——所以一个刚启动、什么都没手动 `LOAD` 过的 Redis 实例，也已
+经在按 CAAT 迁移数据了，不是一个空转的桥接层。
+
+这次把三个策略收敛进 NUMAflow 之后，跑一遍针对真实桥接代码的全策略回归测试
+（不只是命令层的 smoke test）还揭出了两个从 ADR-08 之前就存在、但从未被真实触发过
+的 bug——完整技术叙述见
+[ADR-09](../new/09-architecture-decisions.md)，这里只留一句话摘要：`nf_ops.c` 的
+`cms_estimate` 读的 CMS 频率信号，此前在真实 Redis 桥接路径上从来没被写入过（写入
+口 `nf_tracker_observe()` 只有 `nf_bench.c` 自己的评测 harness 调用过），修复方式
+是新增 `numa_flow_observe_access()`，从 `db.c` 里和 `numa_key_migrate_touch()` 同
+一条真实访问路径调用；另外 `build_caat` 的旧单链设计会让"已经执行过降级、但没通
+过晋升过滤"的 item 在到达 DAG 终止节点之前被丢弃，导致降级明明发生了却从未被桥接
+层看到、从未被真正应用，修复方式是让图在两个阶段变更之前先按原始驻留位置分叉。
 
 ---
 
@@ -864,7 +916,7 @@ cd tests/ycsb && ./run_ycsb.sh            # baseline/stress 模式
 `-object memory-backend-ram` + `-numa node,memdev=...`），带一个诚实的超时等待
 SSH（默认 480 秒——本机没有 `/dev/kvm`，是纯 TCG 软件模拟，启动本来就慢），把本
 地编译好的 `redis-server`/`redis-cli`/`redis-benchmark` 拷进去，在客户机里跑
-`PING`/`SET`/`GET`、`NUMA CONFIG GET`、`NUMA STRATEGY LIST` 和一次
+`PING`/`SET`/`GET`、`NUMA CONFIG GET`、`NUMA FLOW LIST` 和一次
 `redis-benchmark`。检查 NUMA 节点数直接读 `/sys/devices/system/node/`，不依赖
 `numactl`（云镜像默认没装这个包，装它要走一次在 TCG 慢速 NAT 下可能耗时数分钟的
 `apt-get`，性价比不高）。如果客户机没能在超时内通过 SSH，脚本会记下串口最后输出，
@@ -1024,7 +1076,7 @@ Phase 2/3，是因为填充阶段是纯写入、此时迁移/热度追踪还没�
 ```bash
 ./src/redis-server ./redis.conf --daemonize yes --logfile /tmp/r.log
 ./src/redis-cli numa config get
-./src/redis-cli numa strategy list
+./src/redis-cli numa flow list
 ./src/redis-cli numa migrate stats
 ./src/redis-benchmark -q -n 20000 -c 20 -t set,get
 ./src/redis-cli --cluster create 127.0.0.1:7001 127.0.0.1:7002 127.0.0.1:7003 \
@@ -1038,7 +1090,7 @@ Phase 2/3，是因为填充阶段是纯写入、此时迁移/热度追踪还没�
 
 | 场景 | 数据来源 | 关键结论 |
 | --- | --- | --- |
-| NUMAflow 公平评测（zipf/3000 key/12万次访问） | `numaflow/eval/report.py` | CAAT 本地命中率 91.1%，净代价比 TinyLFU 低约 20%，比 Composite LRU 低约 37% |
+| NUMAflow 公平评测（zipf/3000 key/12万次访问） | `numaflow/eval/report.py` | CAAT 本地命中率 91.0%，净代价比 TinyLFU 低约 20%，比 Composite LRU 低约 37%——⚠️ 这是 zipf 单一工作负载的数字；ADR-09 用修复后的二进制在四种工作负载上复测后发现 CAAT 的优势是工作负载依赖的，在 uniform 负载上净代价反而比 Composite LRU 高约 31%（详见 5.4 节、[ADR-09](../new/09-architecture-decisions.md)） |
 | 独立内存分配器 `nf_alloc` | `docs/numaflow/allocator.md` | 单线程吞吐约为系统 `malloc` 的 1.85×，内部碎片 3.82%，省掉 16B 前缀开销 |
 | CXLMemSim 真实时序校准 | `run_full_validation.sh` 的 NUMAflow 步骤 | 用真实 CXLMemSim 测得的延迟/带宽（约 125ns / 25000MB/s）替换合成默认值后，CAAT 在全部 4 种工作负载上仍然领先 |
 | Redis 内核编译 + 单测 | `make -j$(nproc)` / `make test` | 零错误编译，91/91 测试通过 |
@@ -1063,7 +1115,7 @@ A：`numa_init()` 必须在 `initServer()` **之前**跑，而策略/按键迁�
 
 **Q：为什么 NUMA 模块里不能直接调用 `serverLog()`？**
 A：Redis 内部约定，这类模块要用 `extern void _serverLog(int level, const char
-*fmt, ...)`，这是仓库既有的惯例（参考 `numa_composite_lru.c`、
+*fmt, ...)`，这是仓库既有的惯例（参考 `numa_configurable_strategy.c`、
 `numa_bw_monitor.c` 的写法）。
 
 **Q："合并没有冲突标记"是不是就说明合并没问题？**
@@ -1074,7 +1126,7 @@ A：不是。见 [第 6 章](#第-6-章一次真实的版本迁移redis-6221--72
 **Q：为什么 `ADAPTIVE`/`LATENCY_AWARE` 两个分配策略在内核里"看起来没做什么"？**
 A：它们在内核里确实是占位实现——完整版本刻意放在了 NUMAflow 的
 `alloc_adaptive`/`alloc_latency_aware` 原子操作里，通过 `NUMA FLOW` 桥接进来，而
-不是直接写进内核关键路径（见 [3.5](#35-numa_configurable_strategy9-种分配策略)）。
+不是直接写进内核关键路径（见 [3.5](#35-numa_configurable_strategy7-种分配策略)）。
 
 **Q：本机只有 1 个物理 NUMA 节点，怎么测试多节点场景？**
 A：三条路径任选：① NUMAflow 的仿真拓扑（`numa_shim.c`，纯软件建模，见
@@ -1091,12 +1143,12 @@ A：三条路径任选：① NUMAflow 的仿真拓扑（`numa_shim.c`，纯软�
 1. **先跑起来**：按 [第 2 章](#第-2-章项目地图五分钟跑起来)编译、启动，敲几个
    `NUMA` 命令，对"这东西到底能做什么"建立直观感受。
 2. **再理解全局**：读一遍 [第 1 章](#第-1-章为什么需要一个numa-aware的-redis)和
-   [第 3 章](#第-3-章内核里改了什么十个模块逐一讲解)的开头（3.0 依赖顺序图），
-   在脑子里搭好十个模块之间的关系骨架，**不要**急着去读每个模块的实现细节。
+   [第 3 章](#第-3-章内核里改了什么八个模块逐一讲解)的开头（3.0 依赖顺序图），
+   在脑子里搭好八个模块之间的关系骨架，**不要**急着去读每个模块的实现细节。
 3. **顺着依赖顺序读源码**：`numa_pool.c` → `numa_migrate.c` →
-   `numa_key_migrate.c` → `numa_strategy_slots.c`/`numa_composite_lru.c` →
-   `numa_command.c` → `evict_numa.c`。每读完一个模块，回来对照本指南对应小节验
-   证理解是否一致。
+   `numa_key_migrate.c` → `numa_bw_monitor.c` → `numa_configurable_strategy.c` →
+   `numa_flow.c` → `numa_command.c` → `evict_numa.c`。每读完一个模块，回来对照
+   本指南对应小节验证理解是否一致。
 4. **读一遍第 6 章**，把它当成一次软件工程案例研究，而不是"和我要写的代码没关
    系的历史"——这一章教的合并审查方法论，几乎可以搬到任何跨版本升级、跨分支合
    并的场景。

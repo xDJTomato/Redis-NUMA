@@ -117,6 +117,12 @@ int numa_migrate_entire_database(redisDb *db, int target_node);
 /* Record a key access (called from lookupKey). */
 void numa_record_key_access(robj *key, robj *val);
 
+/* Unconditionally update the neutral zmalloc-prefix hotness signal
+ * (hotness/access_count/last_access) for a real "touching" access. This is
+ * the single ground-truth hotness source consumed by NUMA FLOW's enumerate()
+ * step; call it regardless of which migration strategy (if any) is active. */
+void numa_key_migrate_touch(void *data_ptr, uint16_t current_time);
+
 /* Apply hotness decay (called periodically). */
 void numa_perform_heat_decay(void);
 

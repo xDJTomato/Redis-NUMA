@@ -15,13 +15,13 @@
    本身则必须在 `initServer()` **之前**运行。这个先后顺序一旦搞反，是本分叉里最
    常见、也最难排查的启动期崩溃原因。
 5. 用 `extern void _serverLog(int level, const char *fmt, ...)`，不要直接调用
-   `serverLog()`——这是 Redis 内部既有的约定。参考现有模块（`numa_composite_lru.c`、
+   `serverLog()`——这是 Redis 内部既有的约定。参考现有模块（`numa_configurable_strategy.c`、
    `numa_bw_monitor.c` 等）里的写法。
 6. 遵守 [`ARCHITECTURE.md`](ARCHITECTURE.md#module-dependency-order-bottom-to-top)
    里记录的模块依赖顺序：
    `libnuma -> numa_pool -> numa_migrate -> numa_key_migrate ->
-   {numa_composite_lru, numa_tinylfu, numa_strategy_slots} -> numa_command
-   -> evict_numa -> server.c`。
+   numa_bw_monitor -> numa_configurable_strategy -> numa_flow（NUMAflow
+   桥接层） -> numa_command -> evict_numa -> server.c`。
 
 ## 提交 PR 之前
 

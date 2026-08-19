@@ -18,6 +18,7 @@
 #include "numa_shim.h"
 
 #define NUMA_FLOW_MAX_LOADED 16
+#define NUMA_FLOW_DEFAULT_NAME "default"
 
 /* ---- per-workflow runtime state ----------------------------------------- */
 typedef struct {
@@ -119,10 +120,55 @@ static numa_flow_entry_t *numa_flow_find(const char *name) {
     return NULL;
 }
 
+void numa_flow_observe_access(const char *key) {
+    if (!g_initialized || !key) return;
+    nf_tracker_observe(&g_tracker, key);
+}
+
+/* ---- default-strategy entry management ---------------------------------- */
+
+int numa_flow_load_default(const char *strategy_name, int interval_sec) {
+    if (numa_flow_find(NUMA_FLOW_DEFAULT_NAME)) return C_ERR;
+    if (g_entry_count >= NUMA_FLOW_MAX_LOADED) return C_ERR;
+
+    numa_flow_entry_t *e = &g_entries[g_entry_count];
+    memset(e, 0, sizeof(*e));
+    strncpy(e->name, NUMA_FLOW_DEFAULT_NAME, NF_STR_MAX - 1);
+    nf_graph_init(&e->graph);
+    if (nf_strategy_build(&e->graph, strategy_name) != NF_OK) {
+        _serverLog(LL_WARNING, "[NUMA Flow] unknown default strategy '%s'", strategy_name);
+        return C_ERR;
+    }
+    e->enabled = 1;
+    e->interval_sec = interval_sec > 0 ? interval_sec : 1;
+    e->mode = NF_ADAPT_BALANCED;
+    g_entry_count++;
+    _serverLog(LL_NOTICE, "[NUMA Flow] default strategy '%s' auto-loaded (interval=%ds)",
+               strategy_name, e->interval_sec);
+    return C_OK;
+}
+
+int numa_flow_set_default(const char *strategy_name) {
+    numa_flow_entry_t *e = numa_flow_find(NUMA_FLOW_DEFAULT_NAME);
+    if (!e) return numa_flow_load_default(strategy_name, 1);
+    if (nf_strategy_build(&e->graph, strategy_name) != NF_OK) return C_ERR;
+    _serverLog(LL_NOTICE, "[NUMA Flow] default strategy switched to '%s'", strategy_name);
+    return C_OK;
+}
+
+int numa_flow_run_default(uint64_t *scanned, uint64_t *migrated) {
+    numa_flow_entry_t *e = numa_flow_find(NUMA_FLOW_DEFAULT_NAME);
+    if (!e) return C_ERR;
+    numa_flow_run_entry(e);
+    if (scanned) *scanned = e->last.enumerated;
+    if (migrated) *migrated = e->last.migrations;
+    return C_OK;
+}
+
 /* ---- NUMA FLOW command -------------------------------------------------- */
 void numa_flow_command(client *c) {
     if (c->argc < 3) {
-        addReplyError(c, "Usage: NUMA FLOW <LOAD|RUN|LIST|STATUS|UNLOAD|ADAPT> ...");
+        addReplyError(c, "Usage: NUMA FLOW <LOAD|RUN|LIST|STATUS|UNLOAD|ADAPT|DEFAULT> ...");
         return;
     }
     const char *sub = (const char *)c->argv[2]->ptr;
@@ -228,6 +274,16 @@ void numa_flow_command(client *c) {
         numa_flow_entry_t *e = numa_flow_find((const char *)c->argv[3]->ptr);
         if (!e) { addReplyError(c, "workflow not found"); return; }
         e->adapt_enabled = !strcasecmp((const char *)c->argv[4]->ptr, "ON");
+        addReplyStatus(c, "OK");
+        return;
+    }
+
+    if (!strcasecmp(sub, "DEFAULT")) {
+        if (c->argc < 4) { addReplyError(c, "Usage: NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>"); return; }
+        if (numa_flow_set_default((const char *)c->argv[3]->ptr) != C_OK) {
+            addReplyErrorFormat(c, "Unknown strategy preset: %s", (const char *)c->argv[3]->ptr);
+            return;
+        }
         addReplyStatus(c, "OK");
         return;
     }

@@ -80,10 +80,6 @@ typedef long long ustime_t; /* microsecond time type. */
 #include "rax.h"     /* Radix tree */
 #include "connection.h" /* Connection abstraction */
 
-#ifdef HAVE_NUMA
-#include "numa_strategy_slots.h" /* NUMA strategy slot framework */
-#endif
-
 #define REDISMODULE_CORE 1
 typedef struct redisObject robj;
 #include "redismodule.h"    /* Redis modules API defines. */
@@ -2065,8 +2061,13 @@ struct redisServer {
 #ifdef HAVE_NUMA
     /* Master switch: 0 disables hotness tracking/auto migration/demotion (the NUMA allocator still works). */
     int numa_enabled;
-    /* NUMA composite-LRU config file path (optional, matches the numa-migrate-config item in redis.conf). */
-    char *numa_migrate_config_file;
+    /* Name of the NUMAflow preset auto-loaded as the default migration
+     * strategy at startup (caat|composite_lru|tinylfu|noop). Matches
+     * numa-flow-default-strategy in redis.conf. */
+    char *numa_flow_default_strategy;
+    /* How often (seconds) the default NUMAflow workflow runs via serverCron.
+     * Matches numa-flow-interval-sec in redis.conf. */
+    int numa_flow_interval_sec;
 #endif
     int cluster_allow_pubsubshard_when_down; /* Is pubsubshard allowed when the cluster
                                                 is down, doesn't affect pubsub global. */
@@ -3770,10 +3771,7 @@ int iAmMaster(void);
 
 /* NUMA modules */
 #ifdef HAVE_NUMA
-#include "numa_strategy_slots.h"
 #include "numa_key_migrate.h"
-#include "numa_composite_lru.h"
-#include "numa_tinylfu.h"
 #include "numa_bw_monitor.h"
 #include "numa_configurable_strategy.h"
 #include "numa_flow.h"

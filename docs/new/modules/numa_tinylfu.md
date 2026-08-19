@@ -1,7 +1,15 @@
 # Building Block: numa_tinylfu
 
-`src/numa_tinylfu.c` / `src/numa_tinylfu.h` — 频率驱动的热点数据迁移策略，注册在
-策略插槽 **Slot 2**，默认禁用。
+> **已退役（[ADR-08](../09-architecture-decisions.md)）**：`src/numa_tinylfu.{c,h}`
+> 已从代码库删除——它在实践中从未被真正启用过（没有 config/redis.conf 入口，
+> 唯一路径是运维手敲已被移除的 `NUMA STRATEGY ENABLE 2`）。TinyLFU 的算法
+> （Count-Min Sketch + Doorkeeper）现在只作为 NUMAflow 的原子操作预设存在
+> （`numaflow/src/nf_strategy.c` 的 `build_tinylfu`），通过
+> `NUMA FLOW DEFAULT tinylfu` 或 `NUMA FLOW LOAD` 使用。以下内容保留作为该
+> 模块曾经存在过的设计记录。
+
+`src/numa_tinylfu.c` / `src/numa_tinylfu.h`（已删除） — 频率驱动的热点数据迁移策略，
+曾注册在策略插槽 **Slot 2**，默认禁用。
 
 ## 1. 职责 (Responsibility)
 

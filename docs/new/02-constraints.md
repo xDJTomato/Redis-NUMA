@@ -26,9 +26,9 @@
 
 | 约束 | 内容 | 理由 |
 | --- | --- | --- |
-| **模块依赖顺序必须遵守** | `libnuma → numa_pool → numa_migrate → numa_key_migrate → {numa_composite_lru, numa_tinylfu, numa_strategy_slots} → numa_command → evict_numa → server.c`；对应 `src/Makefile` 里 `REDIS_SERVER_OBJ` 的链接顺序要求——NUMA 的 `.o` 文件必须排在 `server.o` 之后 | 上层模块的初始化依赖下层模块建立好的状态；打乱顺序（例如在 `numa_pool` 初始化之前调用迁移函数）大概率导致启动阶段崩溃。详见 [`05-building-block-view.md`](05-building-block-view.md) |
-| **`numa_init()` 必须在 `initServer()` 之前调用，其余 NUMA 模块的初始化必须在 `initServer()` 之后** | `server.c` 的 `main()` 里，`numa_init()` 先于 `initServer()`；策略/按键迁移/带宽监控的初始化在 `initServer()` 之后 | 后面这些模块的初始化依赖 `initServer()` 建好的 `redisServer` 状态；顺序颠倒是本项目里最常见的一类启动期崩溃原因 |
-| **禁止直接调用 `serverLog()`** | NUMA 模块内部必须使用 `extern void _serverLog(int level, const char *fmt, ...)`，这是既有的 Redis 内部惯例（可在 `numa_composite_lru.c`、`numa_bw_monitor.c` 等文件中看到这个模式） | 保持与仓库既有惯例一致，避免符号可见性或链接期问题 |
+| **模块依赖顺序必须遵守** | `libnuma → numa_pool → numa_migrate → numa_key_migrate → numa_bw_monitor → numa_configurable_strategy → numa_flow（NUMAflow 桥接） → numa_command → evict_numa → server.c`；对应 `src/Makefile` 里 `REDIS_SERVER_OBJ` 的链接顺序要求——NUMA 的 `.o` 文件必须排在 `server.o` 之后 | 上层模块的初始化依赖下层模块建立好的状态；打乱顺序（例如在 `numa_pool` 初始化之前调用迁移函数）大概率导致启动阶段崩溃。详见 [`05-building-block-view.md`](05-building-block-view.md) |
+| **`numa_init()` 必须在 `initServer()` 之前调用，其余 NUMA 模块的初始化必须在 `initServer()` 之后** | `server.c` 的 `main()` 里，`numa_init()` 先于 `initServer()`；按键迁移/带宽监控/NUMAflow 桥接的初始化在 `initServer()` 之后 | 后面这些模块的初始化依赖 `initServer()` 建好的 `redisServer` 状态；顺序颠倒是本项目里最常见的一类启动期崩溃原因 |
+| **禁止直接调用 `serverLog()`** | NUMA 模块内部必须使用 `extern void _serverLog(int level, const char *fmt, ...)`，这是既有的 Redis 内部惯例（可在 `numa_bw_monitor.c`、`numa_flow.c` 等文件中看到这个模式） | 保持与仓库既有惯例一致，避免符号可见性或链接期问题 |
 | **新增模块遵循固定的落地步骤** | 先写 `.h`（接口/结构体）再写 `.c`（实现）；把 `numa_xxx.o` 加进 `src/Makefile` 的 `REDIS_SERVER_OBJ`；在 `server.h` 的 `#ifdef HAVE_NUMA` 下 include 头文件；在 `server.c` 的 `initServer()` 之后调用初始化函数 | 是对上面几条约束的操作化整理，完整清单见 [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) |
 
 ## 延伸阅读

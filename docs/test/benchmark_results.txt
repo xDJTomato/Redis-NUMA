@@ -99,13 +99,39 @@ zipf / 3000 keys / 120000 访问 / budget=256 / 2 节点（dram0 + cxl1）:
   Baseline (noop) | 0.0%      | 305.0M    | 0
   Composite LRU   | 81.2%     | 134.5M    | 2187
   TinyLFU         | 79.3%     | 105.9M    | 832
-  CAAT（新默认）  | 91.1%     | 84.9M     | 2422
+  CAAT（新默认）  | 91.0%     | 84.8M     | 2310
 
 结论: CAAT 净代价比最佳基线（TinyLFU）低约 20%，比 Composite LRU 低约 37%；
       它通过「晋升 + 降级」在容量约束下维持 DRAM 最优驻留，是新的默认策略。
 
-复现:  cd numaflow && make && make report   # 生成 results/report.html（SVG/HTML 报告）
-       cd numaflow && make test             # 40 项单元检查 + 集成冒烟测试
+订正（本次新增，测试时间: 2026-08-19，见 docs/new/09-architecture-decisions.md
+ADR-09）: 上表数字已用修复过两个 bug 之后的二进制重新生成（此前一版数字
+——命中率 91.1%、迁移次数 2422——出自还带有其中一个 bug 的中间状态，另有一版
+更早提交到 results/bench_zipf.json 的数字命中率只有 84.6%，出自两个 bug 都还
+在的状态）。这两个 bug 是：① NUMAflow 桥接（src/numa_flow.c）从未真正调用过
+`nf_tracker_observe()`，导致 TinyLFU/CAAT 依赖的频率估计在真实 Redis 路径下恒
+为 0；② CAAT 旧版是单条线性 DAG 链，降级阶段的变更会被紧跟着的晋升阶段过滤器
+丢弃出图的终止节点，导致该次降级从未真正传给宿主执行。两者均已修复并有独立
+harness 验证（细节见 ADR-09）。
+
+**重要补充**：CAAT 相对 Composite LRU/TinyLFU 的优势是**工作负载依赖**的，不是
+全面成立的。用仓库自带的四个基准工作负载全量复测：
+
+  工作负载  | CAAT vs Composite LRU | CAAT vs TinyLFU | CAAT 本地命中率
+  ---------|------------------------|-------------------|------------------
+  zipf     | 净代价低 36.9%（更优） | 净代价低 19.9%（更优） | 91.0%
+  hotspot  | 净代价低 39.5%（更优） | 净代价低 16.4%（更优） | 89.6%
+  uniform  | 净代价高 31.1%（更差） | 净代价低 12.2%（更优） | 49.0%
+  temporal | 净代价高 3.3%（更差）  | 净代价低 16.4%（更优） | 57.3%
+
+CAAT 在有明显冷热分层的负载（zipf/hotspot）上明显更优，但在访问接近均匀分布、
+没有真正"冷"数据的 uniform 负载上反而更差——`demote_cold` 主动搬走"冷"数据这个
+动作，在没有真正冷热差异时变成纯粹的迁移开销浪费。ADR-08 把 CAAT 设为内核默认
+这个决策本身不需要撤销（真实 Redis 场景的访问分布多数偏态，接近 zipf/hotspot），
+但引用"CAAT 更优"时应注明是在哪类工作负载下更优，不是无条件成立。
+
+复现:  cd numaflow && make && make bench && make report   # 生成 results/report.html
+       cd numaflow && make test             # 全部单元/冒烟/桥接测试
 
 ## 9. YCSB 带宽/负载基准（本次新增，测试时间: 2026-08-19）
 ----------------------------------
@@ -163,3 +189,41 @@ zipf / 3000 keys / 120000 访问 / budget=256 / 2 节点（dram0 + cxl1）:
 复现:  cd tests/ycsb && ./run_bw_benchmark.sh --process-nodes all
        cd tests/ycsb && ./run_ycsb.sh --mode baseline
        cd tests/ycsb && ./run_ycsb.sh --mode stress
+
+## 10. 迁移策略全量对比：Vanilla / Noop / Composite LRU / TinyLFU（本次新增，测试时间: 2026-08-19）
+----------------------------------
+
+新增 `tests/ycsb/run_algorithm_comparison.sh`，把 run_bw_benchmark.sh 里已有的
+`--tinylfu` 开关补齐了一个对称的 `--no-migrate`（只关 Slot 1，不开 Slot 2，得到
+纯 noop 基线），再串联已存在的 `run_bw_benchmark_vanilla.sh`，四组跑同一份
+bw_saturate 三阶段负载（Fill→Hotspot→Sustain），maxmem 统一为 8gb（此前
+vanilla 脚本默认 8gb、NUMA 脚本默认 3500mb，四组必须一致才是单一变量对比）。
+
+顺带修了一个真实 bug：`run_bw_benchmark_vanilla.sh` 头部注释写着"Phase 参数与
+CXL 版完全一致"，但 PHASE2_OPS/PHASE3_OPS 实际是 2M/6M，主脚本是 4M/4M——两边
+早就不一致了，这次统一改成 4M/4M。另外 `visualize_bw_benchmark.py` 的
+NAMED_PALETTE 缺 "Redis-NUMA (Noop)" 这个新标签，索引取模后刚好撞上了
+"Vanilla Redis" 的同一个绿色，两条曲线在图上完全重叠分不清——补充了独立的橙色。
+
+  组                          | Fill (ops/sec) | Hotspot (ops/sec) | Sustain (ops/sec)
+  ----------------------------|----------------|--------------------|-------------------
+  Vanilla Redis 7.2.6         | 22,733         | 131,419            | 131,713
+  Redis-NUMA (Composite LRU)  | 41,549         | 123,977            | 126,478
+  Redis-NUMA (Noop)           | 44,086         | 134,821            | 134,431
+  Redis-NUMA (TinyLFU)        | 40,378         | 121,655            | 122,952
+
+结论: 这是单节点沙箱环境（`numactl --hardware` 只有 1 个 NUMA 节点），没有真实的
+跨节点带宽/延迟差异可利用，所以四组的量级基本相当，差异主要来自 NUMA 内存池分配器
+本身的开销（Fill 阶段 NUMA 版比 vanilla 快 1.8-2x，是内存池 O(1) 分配 vs
+jemalloc 的差异，不是迁移策略的效果）与迁移策略的运行时开销（Composite LRU /
+TinyLFU 在 Hotspot/Sustain 阶段比 Noop 基线慢 6-10%，这是迁移扫描本身占用的
+CPU/锁开销）。要看到迁移策略在真实多 NUMA 节点/CXL 环境下的收益（跨节点访问延迟
+差异足够大时，迁移换来的本地化命中率提升才能覆盖迁移开销），需要在有 ≥2 个物理
+NUMA 节点或 CXL 设备的机器上重跑本对比。
+
+结果目录: Results/algorithms_20260819_162940/
+（comparison_report.png、comparison_report_latency.png、summary.txt，以及
+vanilla/ noop/ composite_lru/ tinylfu/ 四个子目录下的完整 metrics.csv 和
+YCSB 原始输出）
+
+复现:  cd tests/ycsb && ./run_algorithm_comparison.sh

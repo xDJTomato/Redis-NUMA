@@ -63,30 +63,38 @@ make clean && make -j$(nproc)
 
 ## 这个分支（fork）里有什么
 
-在 Redis 内核之上叠加了十个模块，全部由 `#ifdef HAVE_NUMA` 保护（完整拆解见
+在 Redis 内核之上叠加了八个模块，全部由 `#ifdef HAVE_NUMA` 保护，外加 NUMAflow
+原子操作引擎（`numaflow/`，现在独家承载全部迁移策略逻辑）（完整拆解见
 [`ARCHITECTURE.md`](ARCHITECTURE.md)）：
 
 - **numa_pool** — 自定义分配器：33 个尺寸类，基于原子位图管理的两级 Slab 分配
   （小/大 slab），配合 Thread-Local Cache 实现无锁快速路径。
 - **numa_migrate** / **numa_key_migrate** — 块级和 key 级的跨节点迁移，对
   STRING/HASH/LIST/SET/ZSET 全部类型都有完整的适配器。
-- **numa_strategy_slots** + **numa_composite_lru** + **numa_tinylfu** — 一套
-  16 槎位的可插拔迁移策略框架；Composite LRU 是默认策略（槎位 1），TinyLFU 可用
-  但默认关闭（槎位 2）。
-- **numa_configurable_strategy** — `zmalloc` 层的 9 种分配策略（LOCAL_FIRST、
-  INTERLEAVE、ROUND_ROBIN、WEIGHTED、PRESSURE_AWARE、CXL_OPTIMIZED、
-  WEIGHTED_INTERLEAVE、ADAPTIVE、LATENCY_AWARE）。
-- **numa_command** — 统一的 `NUMA` 命令（`MIGRATE`/`CONFIG`/`STRATEGY`）。
-- **numa_bw_monitor** — 实时的按节点带宽监控。
+- **numa_configurable_strategy** — `zmalloc` 层的 7 种独立分配策略
+  （LOCAL_FIRST、INTERLEAVE、ROUND_ROBIN、WEIGHTED/WEIGHTED_INTERLEAVE 共用同一套
+  加权随机实现、PRESSURE_AWARE、CXL_OPTIMIZED）。ADAPTIVE/LATENCY_AWARE 仍是内核
+  侧占位，真正实现放在 NUMAflow。
+- **numa_command** — 统一的 `NUMA` 命令（`MIGRATE`/`CONFIG`/`FLOW`）。
+- **numa_bw_monitor** — 实时的按节点带宽监控，并提供与 `evict_numa` 共用的
+  节点压力取值函数。
 - **evict_numa** — NUMA 感知的淘汰逻辑：淘汰一个 key 之前先尝试把它降级。
-- **numa_flow.c** — 把 Redis 和 NUMAflow 子系统的策略目录连接起来，通过
-  `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT` 暴露出来。
+- **numa_flow.c** — Redis 侧连接 NUMAflow 原子操作引擎的桥接层。迁移策略
+  （`caat`/`composite_lru`/`tinylfu`/`noop`）*只*在这里以 NUMAflow DAG 预设的形式
+  实现——内核不再有任何原生实现。启动时自动加载 `numa-flow-default-strategy`
+  （默认 `caat`）；运行期可用 `NUMA FLOW DEFAULT <name>` 切换，或用
+  `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT` 加载自定义工作流。
+
+旧的 16 槎位 vtable 策略框架（`numa_strategy_slots`）及其原生 Composite LRU /
+TinyLFU 实现已退役——详见 `docs/new/09-architecture-decisions.md` 的 ADR-08。
 
 ## 配置
 
 - `redis.conf` 第 1184–1208 行：`numa-demote-*` 系列配置。
-- `redis.conf` 第 2342–2354 行：`numa-enabled` 和 `numa-migrate-config`
-  （指向 `composite_lru.json`）。
+- `redis.conf` NUMA 迁移配置区：`numa-enabled`、`numa-flow-default-strategy`
+  （默认 `caat`，也接受 `composite_lru`/`tinylfu`/`noop`）、
+  `numa-flow-interval-sec`。`composite_lru.json` 现在只作为字段参考保留，供
+  手写自定义 NUMAflow 工作流 JSON 使用，内核不再读取它。
 
 ## 文档地图
 

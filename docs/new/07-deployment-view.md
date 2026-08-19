@@ -73,7 +73,7 @@
 12 云镜像客户机（本机没有 `/dev/kvm`，纯 TCG 软件模拟，启动慢但可用），等待 SSH
 就绪（默认超时 480 秒，超时视为环境不可用而非代码 bug），把本机编译好的
 `redis-server`/`redis-cli`/`redis-benchmark` 拷进去，在客户机**内部**跑
-`PING`/`SET`/`GET`、`NUMA CONFIG GET`、`NUMA STRATEGY LIST` 和一次
+`PING`/`SET`/`GET`、`NUMA CONFIG GET`、`NUMA FLOW LIST` 和一次
 `redis-benchmark`。这是本仓库唯一一个能验证「`redis-server` 真的在一个多 NUMA
 节点拓扑里跑」的环境。
 

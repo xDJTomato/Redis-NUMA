@@ -142,14 +142,20 @@ if (server.numa_demote_enabled && val != NULL &&
 （不进入评分）：
 
 1. **压力过滤**：`numaGetNodePressure(i) >= numa-demote-pressure-threshold/100`
-   则跳过。压力的计算本身是自适应的——当 `server.maxmemory > 0` 时，压力定义
-   为"该节点上 Redis 自己用掉的内存 / (`maxmemory` 平均分摊到各节点的份额)"，
-   而不是整台物理机该节点的内存占用比。源码注释里明确解释了原因：在一台
-   441GB 双路服务器上，如果按物理节点总内存计算压力，Redis 自身占用永远只有
-   9.7% 左右，压力阈值永远触发不了，因此必须以 Redis 自己的配额为分母才有意
-   义。未设置 `maxmemory` 时才回退到读取 `/sys/devices/system/node/nodeX/meminfo`
-   算物理层面的压力。压力值本身有 1 秒 TTL 的缓存（`PRESSURE_CACHE_TTL_MS`），
-   避免高频淘汰时反复读 sysfs。
+   则跳过。`numaGetNodePressure()`（`evict_numa.c`）现在是一个薄封装，转发到
+   `numa_bw_monitor.c` 的 `numa_bw_get_node_pressure()`——[ADR-08](../09-architecture-decisions.md)
+   把这份压力计算从 `evict_numa` 自己的私有实现里搬出来，与
+   `numa_configurable_strategy` 的 `PRESSURE_AWARE`/`WEIGHTED_INTERLEAVE` 共享
+   同一个函数，两者从此不会对"这个节点有多忙"给出互相矛盾的答案（此前两处各
+   自维护一套公式）。压力的计算本身是自适应的——当 `server.maxmemory > 0` 时，
+   压力定义为"该节点上 Redis 自己用掉的内存 / (`maxmemory` 平均分摊到各节点的
+   份额)"，而不是整台物理机该节点的内存占用比。源码注释里明确解释了原因：在
+   一台 441GB 双路服务器上，如果按物理节点总内存计算压力，Redis 自身占用永远
+   只有 9.7% 左右，压力阈值永远触发不了，因此必须以 Redis 自己的配额为分母才
+   有意义。未设置 `maxmemory` 时才回退到读取
+   `/sys/devices/system/node/nodeX/meminfo` 算物理层面的压力。压力值本身有 1 秒
+   TTL 的缓存（`numa_bw_monitor.c` 的 `NODE_PRESSURE_CACHE_TTL_MS`），避免高频
+   淘汰时反复读 sysfs。
 2. **带宽过滤**：`numaGetNodeBandwidthUsage(i) >= numa-bw-saturation-threshold/100`
    则跳过（实际转调 `numa_bw_monitor` 模块的 `numa_bw_get_usage()`）。
 3. **容量过滤**：目标节点的空闲内存必须至少是待迁移对象大小的 2 倍
@@ -177,9 +183,10 @@ score = 归一化距离 × distance_weight/100
 
 - **无额外常驻内存**：不修改任何 Redis 原生的候选池数据结构，只在函数栈上分配
   一个大小为 `MAX_NUMA_NODES`（16）的候选节点数组，随调用结束即释放。
-- **压力查询有缓存**：`numaGetNodePressure()` 的 1 秒 TTL 缓存把"每次淘汰候选
+- **压力查询有缓存**：`numaGetNodePressure()`（转发到 `numa_bw_get_node_pressure()`）
+  的 1 秒 TTL 缓存把"每次淘汰候选
   都要读一遍 sysfs"降到"每个节点每秒最多读一次"，在高频淘汰场景下避免成为
-  瓶颈。
+  瓶颈；这份缓存现在也惠及共享同一个函数的 `numa_configurable_strategy`。
 - **可预算、可降级为纯淘汰**：`numa-demote-max-migrate` 保证降级带来的额外
   跨节点流量在任何一次淘汰批次里都有硬上限；`numa-demote-enabled=no` 时整个
   模块直接短路为 `NUMA_DEMOTE_SKIP`，退化为原生 Redis 淘汰行为，不需要重新
@@ -191,7 +198,9 @@ score = 归一化距离 × distance_weight/100
 
 - **`numa_bw_monitor`**：`numaGetNodeBandwidthUsage()` 是对
   `numa_bw_get_usage()` 的直接透传，`evict_numa` 自己不采集带宽数据，完全依赖
-  该模块已经在后台维护好的每节点带宽占用状态。
+  该模块已经在后台维护好的每节点带宽占用状态；`numaGetNodePressure()` 同样是
+  对该模块 `numa_bw_get_node_pressure()` 的透传（见第 3 节），是与
+  `numa_configurable_strategy` 共享的同一个压力信号源。
 - **`numa_key_migrate`**：真正的跨节点搬运动作（`numa_migrate_single_key()`）
   由该模块完成；`evict_numa` 只负责"要不要迁"和"迁到哪"的决策，不涉及任何
   一种数据类型编码的迁移细节。
@@ -199,9 +208,10 @@ score = 归一化距离 × distance_weight/100
   当前的节点归属，这两个查询接口由 `numa_pool` 提供。
 - 在 `ARCHITECTURE.md` 描述的模块依赖顺序中，`evict_numa` 处于**最上层**——
   它依赖 `numa_key_migrate`/`numa_pool`/`numa_bw_monitor` 已经初始化完毕，但
-  没有任何模块反过来依赖它，也不出现在 `numa_strategy_slots` 的槎位调度体系
-  里（它不是一个"策略"，是淘汰路径上的一次性拦截，不参与 `serverCron` 的周期
-  调度）。
+  没有任何模块反过来依赖它，也不出现在 NUMAflow 的 DAG 调度体系里（它不是一个
+  "迁移策略"，是淘汰路径上的一次性拦截，不参与 `numa_flow_cron()` 的周期调度，
+  且与已随 [ADR-08](../09-architecture-decisions.md) 删除的 `numa_strategy_slots`
+  从未有过关系）。
 
 ## 6. 未解决问题与已知限制（Open Issues & Known Limitations）
 
