@@ -25,10 +25,23 @@
 # (QEMU <-> cxlmemsim_server), which is CXLMemSim's own stated
 # scope -- a software timing model, not cycle-accurate hardware
 # (see CXLMemSim's README). It does NOT run redis-server inside a
-# fully-booted CXLMemSim guest -- wiring a guest OS through this
-# same patched QEMU on top of an already-slow TCG host (see
-# tests/vm/boot_numa_vm.sh) was judged out of scope for a single
-# validation pass. For an actual Redis-level DRAM-vs-far-memory
+# fully-booted CXLMemSim guest with redis actually touching the
+# emulated CXL memory. A real attempt was made (booting the same
+# Debian 12 cloud image tests/vm/boot_numa_vm.sh uses, but under
+# CXLMemSim's patched QEMU with a cxl-type2 endpoint attached
+# instead of a second -numa node): the guest's stock kernel sees
+# the device on the PCI bus fine (lspci shows the CXL [0502]
+# 8086:0d92 endpoint) and already ships cxl_pci/cxl_acpi/cxl_mem
+# modules, but cxl_pci's bind fails (I/O error, no dmesg) because
+# CXLMemSim's own qemu_integration/launch_qemu_vcs_dcd_gfam.sh
+# expects a *custom-patched* Linux kernel
+# (/root/linux-cxl-type2/arch/x86/boot/bzImage) to actually expose
+# this device's memory as guest RAM/NUMA capacity -- a stock distro
+# kernel's driver isn't enough. Building that patched kernel was
+# judged out of scope for this pass, so redis-server was never able
+# to touch CXL-emulated memory through this device. See
+# ARCHITECTURE.md's "External validation layers" section for the
+# full account. For an actual Redis-level DRAM-vs-far-memory
 # comparison, see tests/ycsb/scripts/eval_cxl_memory.sh, which
 # uses numactl --membind across 2 NUMA nodes (works inside the
 # 2-node VM booted by tests/vm/boot_numa_vm.sh; this bare host

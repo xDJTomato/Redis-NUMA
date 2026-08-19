@@ -3,7 +3,14 @@
 # NUMA 带宽饱和基准测试脚本（原版 Redis 对比版）
 #
 # 功能与 run_bw_benchmark.sh 完全一致，仅修改 redis-server/redis-cli 路径
-# 指向 ../redis-6.2.21/src（原版 Redis，jemalloc，无 NUMA 模块）
+# 指向 ../redis-7.2.6-vanilla/src（与本 fork 同版本的原版 Redis 7.2.6，
+# jemalloc，无任何 NUMA 模块——这样才是单一变量对比：同一份 Redis 核心，
+# 唯一的差异是有没有本项目的 NUMA/CXL 分层。该目录可以直接用本仓库自带的
+# upstream 7.2.6 tag 生成：
+#   git worktree add ../redis-7.2.6-vanilla 7.2.6 && \
+#   cd ../redis-7.2.6-vanilla/src && make -j$(nproc)
+# （早期版本曾对比 ../redis-6.2.21，但那是迁移前的旧内核版本，不是公平的
+# 同版本对比，已改用 7.2.6。）
 #
 # 用法: ./run_bw_benchmark_vanilla.sh [选项]
 # 选项:
@@ -31,7 +38,7 @@ trap '_on_err' ERR
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # 支持环境变量覆盖，方便远程部署到非标准路径
-VANILLA_ROOT="${VANILLA_REDIS_ROOT:-$PROJECT_ROOT/../redis-6.2.21}"
+VANILLA_ROOT="${VANILLA_REDIS_ROOT:-$PROJECT_ROOT/../redis-7.2.6-vanilla}"
 REDIS_SERVER="$VANILLA_ROOT/src/redis-server"
 REDIS_CLI="$VANILLA_ROOT/src/redis-cli"
 YCSB_DIR="$SCRIPT_DIR/ycsb-0.17.0"
@@ -155,7 +162,9 @@ check_prerequisites() {
 
     if [[ ! -x "$REDIS_SERVER" ]]; then
         log_err "redis-server 未找到: $REDIS_SERVER"
-        log "请先编译原版 Redis: cd $PROJECT_ROOT/../redis-6.2.21/src && make distclean && make -j\$(nproc) MALLOC=libc"
+        log "请先生成同版本的原版 Redis 7.2.6 对比基线:"
+        log "  git -C $PROJECT_ROOT worktree add ../redis-7.2.6-vanilla 7.2.6"
+        log "  cd $PROJECT_ROOT/../redis-7.2.6-vanilla/src && make -j\$(nproc)"
         exit 1
     fi
     log_ok "redis-server: $REDIS_SERVER"
