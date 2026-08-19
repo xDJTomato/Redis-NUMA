@@ -834,6 +834,20 @@ static void *numa_alloc_dram(size_t size)
 {
     ASSERT_NO_SIZE_OVERFLOW(size);
 
+    if (!numa_ctx.numa_available) {
+        /* numa_init() was never called in this process (e.g. redis-cli,
+         * redis-benchmark, redis-check-rdb/aof -- only server.c's main()
+         * calls it). The slab/direct-cache infrastructure below is
+         * uninitialized in that case, so fall back to the same bare
+         * malloc()+size-header scheme zfree() uses on its own
+         * !numa_available path, keeping alloc/free consistent. */
+        void *ptr = malloc(MALLOC_MIN_SIZE(size) + PREFIX_SIZE);
+        if (!ptr) return NULL;
+        *((size_t *)ptr) = size;
+        update_zmalloc_stat_alloc(size + PREFIX_SIZE);
+        return (char *)ptr + PREFIX_SIZE;
+    }
+
     size_t total_size = size + PREFIX_SIZE;
     size_t alloc_size;
     int target_node = 0;
