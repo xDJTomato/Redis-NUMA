@@ -47,6 +47,9 @@ src/temp-*.rdb
 tests/legacy/results/dump.rdb
 tests/legacy/results/*.rdb
 
+# Tcl test-suite scratch directories (regenerated on every make test run)
+tests/tmp/
+
 # YCSB binary distribution (jar files, do not track)
 tests/ycsb/ycsb-*/
 tests/ycsb/results/
@@ -73,3 +76,14 @@ perf.data
 monitor/
 tests/legacy/scripts/benchmark_results.txt
 tests/ycsb/legacy/results/
+
+# QEMU VM test cache (downloaded cloud images, ephemeral ssh keys, disk overlays)
+tests/vm/.cache/
+tests/vm/results/
+
+# CXLMemSim + its patched QEMU build (external, not vendored)
+external/
+CXLMemSim/
+
+# Full validation report output
+results/
