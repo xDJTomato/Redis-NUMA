@@ -1,5 +1,7 @@
 # Testing
 
+[中文版](TESTING.zh-CN.md)
+
 ## Quick reference
 
 ```bash
@@ -69,6 +71,17 @@ cd tests/ycsb && ./run_ycsb.sh            # baseline/stress modes
 Requires a JDK and the YCSB distribution (`run_full_validation.sh` skips
 this step automatically if `java` isn't on `PATH` — it does not attempt to
 install a JDK for you).
+
+For a same-version A/B comparison against unmodified Redis (no NUMA
+modules, jemalloc instead of the NUMA allocator), generate a vanilla 7.2.6
+checkout from this repo's own upstream tag and run
+`run_bw_benchmark_vanilla.sh` against it:
+
+```bash
+git worktree add ../redis-7.2.6-vanilla 7.2.6
+cd ../redis-7.2.6-vanilla/src && make -j$(nproc)
+cd - && ./run_bw_benchmark_vanilla.sh   # binds to port 6380 by default
+```
 
 ### 5. QEMU multi-NUMA-node smoke test
 

@@ -1,5 +1,7 @@
 # Redis-NUMA
 
+[中文版](README.zh-CN.md)
+
 Redis 7.2.6 extended with NUMA-aware memory allocation and CXL (Compute
 Express Link) memory tiering: transparent NUMA node-granular allocation,
 per-key heat tracking, and cross-node cold/hot data migration, while
@@ -57,7 +59,7 @@ make clean && make -j$(nproc)
 ```
 
 The build **forces `MALLOC=libc`** and links `-lnuma` on Linux
-(`src/Makefile` lines 103-110) — jemalloc is incompatible with the NUMA
+(`src/Makefile` lines 133-140) — jemalloc is incompatible with the NUMA
 allocator. You need `libnuma-dev` (Debian/Ubuntu) or `numactl-devel`
 (CentOS/RHEL).
 
@@ -69,8 +71,9 @@ allocator. You need `libnuma-dev` (Debian/Ubuntu) or `numactl-devel`
 Ten modules layered on top of Redis core, all guarded by `#ifdef HAVE_NUMA`
 (see [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full breakdown):
 
-- **numa_pool** — custom allocator: 33 size classes, bump-pointer O(1)
-  allocation, slab allocation for small objects, chunk compaction.
+- **numa_pool** — custom allocator: 33 size classes, bitmap-managed
+  two-tier slab allocation (small/large) with a thread-local cache
+  (tcache) for a lock-free fast path.
 - **numa_migrate** / **numa_key_migrate** — block- and key-granular
   cross-node migration, with full type adapters for STRING/HASH/LIST/SET/ZSET.
 - **numa_strategy_slots** + **numa_composite_lru** + **numa_tinylfu** — a
@@ -95,11 +98,12 @@ Ten modules layered on top of Redis core, all guarded by `#ifdef HAVE_NUMA`
 
 | Doc | Covers |
 |---|---|
+| [`docs/GUIDE.zh-CN.md`](docs/GUIDE.zh-CN.md) | Chinese-language student study guide — NUMA/CXL background, module-by-module walkthrough, the 6.2.21→7.2.6 migration as a case study, full test tiers, suggested reading order |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Module layout, dependency order, integration points in Redis core |
 | [`docs/redis7-migration.md`](docs/redis7-migration.md) | What the 6.2.21 → 7.2.6 merge actually did, bug-for-bug |
 | [`TESTING.md`](TESTING.md) | How to run every test tier, including QEMU/CXLMemSim |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Conventions for adding a new NUMA module |
 | [`CHANGELOG.md`](CHANGELOG.md) | Version history |
-| `docs/new/` | Original per-module design docs (00 through 19) |
+| `docs/new/` | arc42-pattern architecture documentation: 12 top-level chapters + a `modules/` detail sheet per component + an `appendix/` |
 | `docs/numaflow/` | NUMAflow subsystem design and usage |
 | `docs/README.md` | Full documentation index with a fact-checked status table |

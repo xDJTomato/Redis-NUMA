@@ -1,5 +1,7 @@
 # Redis 6.2.21 &rarr; 7.2.6 migration
 
+[中文版](redis7-migration.zh-CN.md)
+
 This document records what actually happened when the NUMA/CXL fork's Redis
 core was migrated from 6.2.21 to 7.2.6, on branch `feat/redis7-port`. It
 replaces the earlier `docs/redis8-migration.md`, which was a *paper design*

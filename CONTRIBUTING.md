@@ -1,5 +1,7 @@
 # Contributing
 
+[中文版](CONTRIBUTING.zh-CN.md)
+
 This fork follows standard GitHub PR workflow. This document covers the
 project-specific conventions for working on the NUMA modules and NUMAflow
 subsystem; for generic Redis contribution etiquette (issue triage, mailing

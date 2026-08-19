@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+[中文版（人工阅读参考，本文件仍为唯一权威版本）](CLAUDE.zh-CN.md)
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -15,7 +17,7 @@ cd src
 make clean && make -j$(nproc)
 ```
 
-The build **forces `MALLOC=libc`** and links `-lnuma` on Linux (lines 103-110 of `src/Makefile`). jemalloc is incompatible with the NUMA allocator. `libnuma-dev` (Debian/Ubuntu) or `numactl-devel` (CentOS/RHEL) is required.
+The build **forces `MALLOC=libc`** and links `-lnuma` on Linux (lines 133-140 of `src/Makefile`). jemalloc is incompatible with the NUMA allocator. `libnuma-dev` (Debian/Ubuntu) or `numactl-devel` (CentOS/RHEL) is required.
 
 Build all targets: `make` in `src/` produces redis-server, redis-cli, redis-benchmark, redis-sentinel, redis-check-rdb, redis-check-aof.
 
@@ -110,7 +112,7 @@ The Redis adapter `src/numa_flow.c` (compiled only under `HAVE_NUMA`) implements
 
 - `README.md` — project overview, quick start, `run_full_validation.sh` usage
 - `ARCHITECTURE.md` — module layout, dependency order, Redis-core integration points
-- `docs/new/` — Original per-module design docs (00-design-proposal through 19-ae-strategy-scheduler-technical-design)
+- `docs/new/` — arc42-pattern architecture documentation: 12 top-level chapters (`01-introduction-and-goals.md` through `12-glossary.md`), a `modules/` detail sheet per component (including `numa_bw_monitor` and `evict_numa`, which previously had no dedicated doc), and an `appendix/` for supporting material (call-chain reference, related-work comparison)
 - `docs/numaflow/` — NUMAflow subsystem design and usage
 - `docs/redis7-migration.md` — Redis 6.2.21 → 7.2.6 real merge record: tooling, every bug found and fixed, verification performed
 - `docs/test/` — Test organization, benchmark results, and usage guides (benchmark_results.txt, EXECUTIVE_SUMMARY.txt, DIAGNOSIS_USAGE.txt)

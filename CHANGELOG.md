@@ -1,5 +1,7 @@
 # Changelog
 
+[中文版](CHANGELOG.zh-CN.md)
+
 All notable changes to this fork are documented here, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 

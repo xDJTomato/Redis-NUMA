@@ -106,3 +106,60 @@ zipf / 3000 keys / 120000 访问 / budget=256 / 2 节点（dram0 + cxl1）:
 
 复现:  cd numaflow && make && make report   # 生成 results/report.html（SVG/HTML 报告）
        cd numaflow && make test             # 40 项单元检查 + 集成冒烟测试
+
+## 9. YCSB 带宽/负载基准（本次新增，测试时间: 2026-08-19）
+----------------------------------
+
+此前的验证会话因沙箱环境没有 JDK 而跳过了这一层（见 TESTING.md 第 4 项）。本次
+补装了一份便携式 JDK 17（Temurin，解压到 ~/.local/opt/jdk-17，无需 root）和便携
+式 Maven 3.9.9，跑通了 tests/ycsb/run_bw_benchmark.sh 和 tests/ycsb/run_ycsb.sh。
+
+跑的过程中遇到、并修复了两个和"沙箱只有 1 个 NUMA 节点"相关的环境问题：
+
+1. `run_bw_benchmark.sh` 默认 `--process-nodes 0,2`（把 Redis 进程绑定到 NUMA
+   节点 0 和 2），但本机 `numactl --hardware` 只有 `available: 1 nodes (0)`，
+   `numactl --cpunodebind=0,2` 直接报错退出。改用脚本自带的
+   `--process-nodes all`（取消节点绑定）后正常运行——这是一个真实存在、值得记住
+   的坑：任何只有 1 个物理 NUMA 节点的机器上跑这个脚本，都需要这个参数。
+2. 官方 YCSB 0.17.0 发行包里 `bin/ycsb`（Python 版命令行入口）是 Python 2 语法
+   （`except Foo, err:`），本机只有 python3，运行会直接 SyntaxError。`bin/ycsb.sh`
+   （Java 版入口，CLI 参数完全一致）不受影响——这也是 run_bw_benchmark.sh 自己的
+   注释里已经提到、并主动绕开的同一个问题。把解压出来的 `bin/ycsb`（第三方发行包
+   的一部分，不在本仓库版本控制中）换成一个转发到 `ycsb.sh` 的 shim 后解决。
+
+### run_bw_benchmark.sh --process-nodes all（3 阶段）
+
+  阶段                        | 吞吐 (ops/sec)
+  ----------------------------|---------------
+  Phase 1 Fill（填充）        | 9,688
+  Phase 2 Hotspot Migration   | 120,602
+  Phase 3 Sustained Pressure  | 130,370
+
+结果目录: tests/ycsb/results/bw_bench_20260819_144153/
+（含 metrics.csv、各阶段原始 YCSB 输出、benchmark_report.png / _latency.png）
+
+### run_ycsb.sh --mode baseline（recordcount=100000, operationcount=100000, 4 线程）
+
+  阶段  | 吞吐 (ops/sec) | READ 平均延迟 (us) | UPDATE 平均延迟 (us)
+  ------|---------------|--------------------|--------------------
+  Load  | 34,282        | —                  | —
+  Run   | 73,314        | 50.0               | 52.6
+
+结果目录: tests/ycsb/results/baseline_20260819_151756/
+
+### run_ycsb.sh --mode stress（recordcount=1000000, operationcount=1000000, 32 线程）
+
+  阶段  | 吞吐 (ops/sec) | READ 平均延迟 (us) | UPDATE 平均延迟 (us)
+  ------|---------------|--------------------|--------------------
+  Load  | 53,743        | —                  | —
+  Run   | 142,005       | 212.0              | 225.3
+
+结果目录: tests/ycsb/results/stress_20260819_151847/
+
+结论: 三组基准全部跑通、全部为真实测得数据（非仿真/非估算）。高并发（32 线程）
+      下吞吐更高、但尾延迟也相应变大，符合预期；`Phase 1 Fill` 吞吐明显低于
+      Phase 2/3，是因为填充阶段是纯写入且此时迁移/热度追踪尚未建立起有效候选集。
+
+复现:  cd tests/ycsb && ./run_bw_benchmark.sh --process-nodes all
+       cd tests/ycsb && ./run_ycsb.sh --mode baseline
+       cd tests/ycsb && ./run_ycsb.sh --mode stress

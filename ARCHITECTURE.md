@@ -1,15 +1,18 @@
 # Architecture
 
+[中文版](ARCHITECTURE.zh-CN.md)
+
 ## NUMA module layer (added on top of Redis core)
 
 Ten modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
 
 1. **numa_pool** (`numa_pool.c/h`) — custom memory allocator. 33 size
-   classes (8B-64KB), bump-pointer O(1) allocation, a 64KB slab allocator
-   for objects &le;4KB, and chunk compaction for chunks under 30%
-   utilization.
+   classes (8B-64KB), bitmap-managed two-tier slab allocation (small/large)
+   with a thread-local cache (tcache) for a lock-free fast path.
 2. **numa_migrate** (`numa_migrate.c/h`) — low-level block migration between
-   NUMA nodes via `numa_alloc_onnode` + `memcpy`.
+   NUMA nodes via `numa_zmalloc_onnode` + `memcpy` (note: actual per-key
+   migration is implemented independently in numa_key_migrate below, which
+   does not call this module's migration function).
 3. **numa_key_migrate** (`numa_key_migrate.c/h`) — per-key migration (a
    `robj` as the unit). LRU-integrated heat tracking with lazy step decay.
    Full type adapters for all 5 Redis types: STRING (RAW/EMBSTR), HASH
@@ -38,7 +41,8 @@ Ten modules in `src/`, all guarded by `#ifdef HAVE_NUMA`:
    system).
 9. **numa_bw_monitor** (`numa_bw_monitor.c/h`) — real-time per-node
    bandwidth monitoring (resctrl/numastat/manual backends).
-10. **evict_numa** (`evict_numa.c/h`) — NUMA-aware eviction: demotes keys
+10. **evict_numa** (`evict_numa.c`, interface declared in `evict.h` — there
+    is no separate `evict_numa.h`) — NUMA-aware eviction: demotes keys
     to less-pressured nodes before evicting them. Weighted scoring:
     distance (40%) + pressure (30%) + bandwidth (30%).
 
@@ -64,9 +68,10 @@ Plus the Redis&harr;NUMAflow bridge:
   NUMA headers included under `#ifdef HAVE_NUMA`.
 - **`server.c`** — `numa_init()` runs in `main()` before `initServer()`.
   Strategy/key-migration/bandwidth-monitor init runs after `initServer()`.
-  Periodic compaction and strategy execution happen in `serverCron`.
-- **`evict.h`/`evict.c`** — `evictionPoolEntry` extended with
-  `current_node`, `object_size`, `numa_migrated`.
+  Periodic strategy execution happens in `serverCron`.
+- **`evict.h`/`evict.c`** — a stateless demotion attempt
+  (`evictionTryNumaDemote`) is inserted into the eviction loop before a key
+  is actually evicted; `evictionPoolEntry` itself is unmodified.
 
 ## Module dependency order (bottom to top)
 
@@ -125,13 +130,24 @@ environment doesn't support them:
   repo's history) — a device-level CXL memory-timing simulator with its own
   patched QEMU. `tests/cxl/run_cxlmemsim.sh` validates the QEMU&harr;
   `cxlmemsim_server` link (a CXL Type2 endpoint connecting to the server
-  over TCP and exchanging a simulated topology); it does not run
-  `redis-server` inside a CXLMemSim-attached guest, since stacking that on
-  top of an already-slow TCG host was judged out of scope for a single
-  validation pass. For a real Redis-level DRAM-vs-far-memory comparison,
-  see `tests/ycsb/scripts/eval_cxl_memory.sh`, which uses `numactl
-  --membind` across 2 real NUMA nodes (works inside the VM above; this
-  fork's own development host has only 1 physical NUMA node).
+  over TCP and exchanging a simulated topology). A guest-boot attempt was
+  made (booting the stock Debian 12 cloud image, which already ships
+  `cxl_pci`/`cxl_acpi`/`cxl_mem` kernel modules, under CXLMemSim's patched
+  QEMU with a `cxl-type2` endpoint attached): the guest correctly enumerates
+  the device on the PCI bus (`0d:00.0 CXL [0502]: Intel Corporation Device
+  [8086:0d92]`), but the stock kernel's `cxl_pci` driver fails to bind to it
+  (`echo ... > bind` returns `I/O error`, no dmesg output) — CXLMemSim's own
+  `qemu_integration/launch_qemu_vcs_dcd_gfam.sh` confirms this is expected:
+  its default `KERNEL_IMAGE` is a custom-patched
+  `/root/linux-cxl-type2/arch/x86/boot/bzImage`, i.e. exposing this Type2
+  device's memory as guest-visible RAM/NUMA capacity needs a kernel built
+  from CXLMemSim's own patched Linux tree (not present in this environment),
+  not just a stock distro kernel. So `redis-server` was never able to
+  actually touch CXL-emulated memory here; building that kernel was judged
+  out of scope for this pass. For a real Redis-level DRAM-vs-far-memory
+  comparison, see `tests/ycsb/scripts/eval_cxl_memory.sh`, which uses
+  `numactl --membind` across 2 real NUMA nodes (works inside the VM above;
+  this fork's own development host has only 1 physical NUMA node).
 
 The same script also runs `tests/cxl/cxlmemsim_workload_bench.cpp`, which
 replays NUMAflow's four workload shapes (zipf/uniform/hotspot/temporal)

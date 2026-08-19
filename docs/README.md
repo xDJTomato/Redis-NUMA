@@ -21,11 +21,30 @@
 | 独立内存分配器 | `numaflow/src/nf_alloc.c`：无 header + metamap + tcache，吞吐 ≈ malloc 1.85×，见 `docs/numaflow/allocator.md` |
 | 新手模板库 | 23 个开箱即用模板（tiering/allocation/cost/adaptive/special），见 `docs/numaflow/templates.md` |
 
+## 中英双语文档
+
+以下英文文档现在都配有中文版（文件名同名加 `.zh-CN.md` 后缀，内容并排存在，英文版
+始终是权威原文，没有被替换）：`README.md` / `ARCHITECTURE.md` / `TESTING.md` /
+`CONTRIBUTING.md` / `CHANGELOG.md` / `docs/redis7-migration.md` / `CLAUDE.md`
+（`CLAUDE.zh-CN.md` 仅供人工阅读，Claude Code 实际读取的仍是英文 `CLAUDE.md`）。
+
+`SECURITY.md`、`CODE_OF_CONDUCT.md` 以及 `docs/devlog/original/` 下的两份归档原始
+Redis 文档（`REDIS_ORIGINAL_README.md`、`TLS.md`）也各自配有 `.zh-CN.md` 翻译版，
+但这四份英文原文是上游未经修改的官方文本/归档记录，故意保持完全不动——中文版仅
+供阅读参考，安全漏洞报告等正式流程请以英文原文为准。
+
 ## 文档目录
 
-- **`new/`** — Redis 内核 NUMA 模块的设计文档（`00` 方案设计 → `19` AE 策略调度器技术设计）。
-  其中 `08-numa-configurable.md` 的 `adaptive`/`latency_aware` 在内核中为占位实现，
-  完整实现在 NUMAflow 的 `alloc_adaptive`/`alloc_latency_aware` 原子操作。
+- **`GUIDE.zh-CN.md`** — 面向学生的中文学习指南：从 NUMA/CXL 背景知识开始，逐模块
+  讲解内核代码、NUMAflow 子系统、Redis 6.2.21→7.2.6 真实合并案例、完整测试体系，
+  并给出推荐阅读顺序。想系统学习这个项目、而不是只查某一条命令时，从这里开始。
+- **`new/`** — arc42 风格的架构文档：`01`~`12` 十二个顶层章节（需求目标/约束/
+  上下文/解决策略/building block 总览/运行时场景/部署/贯穿概念/架构决策/质量
+  需求/风险与技术债/术语表），`modules/` 下每个组件一份详情表（含此前没有专门
+  文档的 `numa_bw_monitor`、`evict_numa`），`appendix/` 收纳调用链完整参考和
+  TieredMemDB 相关工作对比。`modules/numa_configurable_strategy.md` 里的
+  `adaptive`/`latency_aware` 在内核中为占位实现，完整实现在 NUMAflow 的
+  `alloc_adaptive`/`alloc_latency_aware` 原子操作。
 - **`numaflow/README.md`** — NUMAflow 子系统（本次新增）的架构、原子操作拆解、CAAT 策略、
   公平评测、TUI/GUI、追踪框架与构建说明。
 - **`redis7-migration.md`** — Redis 6.2.21 → 7.2.6 真实合并记录：工具链、6 个静默合并 bug、
