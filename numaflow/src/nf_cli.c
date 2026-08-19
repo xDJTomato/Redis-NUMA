@@ -31,6 +31,8 @@ static void usage(void) {
     printf("    --budget <n>     migration budget\n");
     printf("    --nodes <n>      NUMA node count\n");
     printf("    --seed <n>       PRNG seed\n");
+    printf("    --cxl-latency-ns <n>      override tier-1 latency (e.g. from a real CXLMemSim run)\n");
+    printf("    --cxl-bandwidth-mbps <n>  override tier-1 bandwidth (e.g. from a real CXLMemSim run)\n");
     printf("    --out <file>     write JSON to file\n");
 }
 
@@ -186,6 +188,8 @@ static int cmd_eval(int argc, char **argv) {
         else if (strcmp(argv[i], "--budget") == 0) cfg.budget = atoi(argval(argc, argv, &i, argv[i]));
         else if (strcmp(argv[i], "--nodes") == 0) cfg.nodes = atoi(argval(argc, argv, &i, argv[i]));
         else if (strcmp(argv[i], "--seed") == 0) cfg.seed = strtoull(argval(argc, argv, &i, argv[i]), NULL, 10);
+        else if (strcmp(argv[i], "--cxl-latency-ns") == 0) cfg.cxl_latency_ns = atof(argval(argc, argv, &i, argv[i]));
+        else if (strcmp(argv[i], "--cxl-bandwidth-mbps") == 0) cfg.cxl_bandwidth_mbps = atof(argval(argc, argv, &i, argv[i]));
         else if (strcmp(argv[i], "--out") == 0) out = argval(argc, argv, &i, argv[i]);
         else if (strcmp(argv[i], "--help") == 0) { usage(); return 0; }
     }

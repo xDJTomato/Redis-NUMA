@@ -80,6 +80,7 @@ tests/ycsb/legacy/results/
 # QEMU VM test cache (downloaded cloud images, ephemeral ssh keys, disk overlays)
 tests/vm/.cache/
 tests/vm/results/
+tests/report/__pycache__/
 
 # CXLMemSim + its patched QEMU build (external, not vendored)
 external/

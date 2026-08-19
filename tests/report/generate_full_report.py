@@ -53,12 +53,74 @@ def bar_chart(title, ylabel, data, higher_better):
     return "".join(s)
 
 
+def native_bench_chart(native_bench):
+    """native_bench: list of {"name","avg_latency_ns","bandwidth_penalty_ns","dram_baseline_ns"}."""
+    if not native_bench:
+        return ""
+    w = 760; h = 340; ml = 70; mr = 20; mt = 44; mb = 66
+    names = [r["name"] for r in native_bench]
+    lat = [r["avg_latency_ns"] for r in native_bench]
+    dram = native_bench[0].get("dram_baseline_ns", 0)
+    n_w = len(names)
+    plot_w = w - ml - mr; plot_h = h - mt - mb
+    group_w = plot_w / n_w; bar_w = group_w * 0.5
+    vmax = max(lat + [dram]) or 1
+    def y(v): return mt + plot_h - v / vmax * plot_h
+    s = [f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">',
+         f'<rect width="{w}" height="{h}" fill="var(--card-bg)"/>',
+         f'<text x="{w/2}" y="24" text-anchor="middle" font-family="Inter,Segoe UI,Arial" '
+         f'font-size="15" font-weight="600" fill="var(--fg)">CXLMemSim native model: avg latency per access (ns)</text>']
+    for i in range(5):
+        v = vmax * i / 4
+        yy = y(v)
+        s.append(f'<line x1="{ml}" y1="{yy:.1f}" x2="{w-mr}" y2="{yy:.1f}" stroke="var(--grid)"/>')
+        s.append(f'<text x="{ml-8}" y="{yy+4:.1f}" text-anchor="end" font-family="Inter,Segoe UI,Arial" font-size="10" fill="var(--muted)">{v:,.0f}</text>')
+    dy = y(dram)
+    s.append(f'<line x1="{ml}" y1="{dy:.1f}" x2="{w-mr}" y2="{dy:.1f}" stroke="#e63946" stroke-dasharray="4,3"/>')
+    s.append(f'<text x="{w-mr}" y="{dy-4:.1f}" text-anchor="end" font-family="Inter,Segoe UI,Arial" font-size="10" fill="#e63946">DRAM baseline ({dram:.0f}ns)</text>')
+    for wi, name in enumerate(names):
+        gx = ml + wi * group_w
+        v = lat[wi]
+        x = gx + group_w * 0.25
+        yy = y(v); bh = mt + plot_h - yy
+        s.append(f'<rect x="{x:.1f}" y="{yy:.1f}" width="{bar_w:.1f}" height="{bh:.1f}" fill="#2a9d8f" rx="2"/>')
+        s.append(f'<text x="{x+bar_w/2:.1f}" y="{yy-6:.1f}" text-anchor="middle" font-family="Inter,Segoe UI,Arial" font-size="10.5" fill="var(--fg)">{v:.1f}</text>')
+        s.append(f'<text x="{gx+group_w/2:.1f}" y="{h-mb+20:.1f}" text-anchor="middle" font-family="Inter,Segoe UI,Arial" font-size="11" fill="var(--fg)">{html.escape(name)}</text>')
+    s.append('</svg>')
+    return "".join(s)
+
+
 def load_json(path):
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
+
+
+def bench_dict(results_dir, suffix=""):
+    """Load results/bench_<workload><suffix>.json into {workload: [net_cost_by_strategy]} + hit ratios."""
+    pattern = os.path.join(results_dir, f"bench_*{suffix}.json") if suffix else os.path.join(results_dir, "bench_*.json")
+    hit_data, net_data = {}, {}
+    for f in sorted(glob.glob(pattern)):
+        base = os.path.basename(f)[6:-5]  # strip "bench_" and ".json"
+        if suffix:
+            if not base.endswith(suffix):
+                continue
+            wl = base[: -len(suffix)]
+        else:
+            if base.endswith("_cxlcal"):
+                continue
+            wl = base
+        b = load_json(f)
+        if not b or "migration" not in b:
+            continue
+        mig = {m["strategy"]: m for m in b["migration"]}
+        if not all(s in mig for s in STRATEGIES):
+            continue
+        hit_data[wl] = [mig[s]["local_hit_ratio"] * 100 for s in STRATEGIES]
+        net_data[wl] = [mig[s]["net_cost"] / 1e6 for s in STRATEGIES]
+    return hit_data, net_data
 
 
 def main():
@@ -69,21 +131,21 @@ def main():
 
     summary = load_json(summary_path) or {}
 
-    bench_files = sorted(glob.glob(os.path.join(results_dir, "bench_*.json")))
-    hit_data, net_data = {}, {}
-    for f in bench_files:
-        wl = os.path.basename(f)[6:-5]
-        b = load_json(f)
-        if not b or "migration" not in b:
-            continue
-        mig = {m["strategy"]: m for m in b["migration"]}
-        if not all(s in mig for s in STRATEGIES):
-            continue
-        hit_data[wl] = [mig[s]["local_hit_ratio"] * 100 for s in STRATEGIES]
-        net_data[wl] = [mig[s]["net_cost"] / 1e6 for s in STRATEGIES]
+    hit_data, net_data = bench_dict(results_dir)
+    hit_cal, net_cal = bench_dict(results_dir, suffix="_cxlcal")
 
     charts = bar_chart("Local Hit Ratio (%)", "hit ratio %", hit_data, True) + \
              bar_chart("Net Cost (millions of ns, lower is better)", "net cost", net_data, False)
+    cal_charts = bar_chart("Net Cost, CXLMemSim-calibrated tier (125ns / 25000 MB/s)", "net cost", net_cal, False)
+
+    cxl_root = os.path.join(results_dir, "..", "tests", "cxl", "results")
+    native_files = sorted(glob.glob(os.path.join(cxl_root, "cxlmemsim_native_bench_*.json")))
+    native_bench = None
+    if native_files:
+        d = load_json(native_files[-1])
+        if d and "workloads" in d:
+            native_bench = d["workloads"]
+    native_chart = native_bench_chart(native_bench) if native_bench else ""
 
     step_order = ["build", "unit_tests", "numaflow_bench", "ycsb", "qemu_vm", "cxlmemsim"]
     step_labels = {"build": "Build (make)", "unit_tests": "Unit tests (make test)",
@@ -146,6 +208,18 @@ are marked <b>skipped</b> with the reason, never fabricated.</p>
 <tbody>{"".join(rows)}</tbody></table></div>
 <h2>NUMAflow scheduling-strategy benchmark</h2>
 <div class="card">{charts if charts else '<p class="muted">no bench_*.json found under results/</p>'}</div>
+<h2>NUMAflow model calibrated against a real CXLMemSim device-link run</h2>
+<p class="muted">Same 4 workloads x 4 strategies, but the non-DRAM tier's latency/bandwidth are overridden
+with values captured from an actual CXLMemSim device-link check (~125ns blended latency, 25000 MB/s)
+instead of numa_shim.c's synthetic tier-1 defaults (300ns / 8000 MB/s).</p>
+<div class="card">{cal_charts if cal_charts else '<p class="muted">no bench_*_cxlcal.json found -- run run_full_validation.sh (not --quick) to generate them</p>'}</div>
+<h2>CXLMemSim's own device-timing model on the same workloads</h2>
+<p class="muted">Instead of NUMAflow's simplified flat latency/bandwidth cost model, this drives
+the same four workload traces directly through CXLMemSim's C++ CXLMemExpander
+(calculate_latency/calculate_bandwidth), so it reflects CXLMemSim's own congestion-aware
+bandwidth model and load/store-ratio-driven latency, not a hand-copied constant.
+See tests/cxl/cxlmemsim_workload_bench.cpp.</p>
+<div class="card">{native_chart if native_chart else '<p class="muted">no cxlmemsim_native_bench_*.json found -- run tests/cxl/run_cxlmemsim.sh</p>'}</div>
 </div></body></html>"""
 
     out_path = os.path.join(report_dir, "index.html")

@@ -36,9 +36,24 @@ All notable changes to this fork are documented here, in the style of
   (`SlugLab/CXLMemSim`, `external/CXLMemSim`) device-emulation link: its own
   CTest suite, plus a QEMU CXL Type2 endpoint confirmed connected to
   `cxlmemsim_server` over TCP.
+- `tests/cxl/cxlmemsim_workload_bench.cpp` — replays the same
+  zipf/uniform/hotspot/temporal workload shapes NUMAflow's harness uses
+  directly through CXLMemSim's own `CXLMemExpander` C++ model, giving a
+  real-device-model comparison point alongside NUMAflow's simplified cost
+  model. See `ARCHITECTURE.md` for two real bugs found in CXLMemSim's own
+  cache-invalidation ordering while wiring this up (worked around, not
+  patched, since `external/CXLMemSim` isn't vendored into this repo).
+- `numaflow eval --cxl-latency-ns`/`--cxl-bandwidth-mbps` — calibrate
+  NUMAflow's own cost model against real numbers captured from a
+  CXLMemSim device-link run instead of `numa_shim.c`'s synthetic tier-1
+  defaults; `run_full_validation.sh` now runs every workload both ways
+  (`results/bench_<workload>.json` and
+  `results/bench_<workload>_cxlcal.json`).
 - `tests/report/generate_full_report.py` — aggregates step results and
   NUMAflow `bench_*.json` data into a self-contained HTML report with
-  inline SVG charts (extends the approach in `numaflow/eval/report.py`).
+  inline SVG charts (extends the approach in `numaflow/eval/report.py`);
+  now also charts the CXLMemSim-calibrated NUMAflow runs and the native
+  CXLMemSim model results alongside the synthetic-default comparison.
 
 ### Fixed
 

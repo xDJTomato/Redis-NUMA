@@ -24,6 +24,13 @@ typedef struct {
     int         budget;     /* migration budget per decision */
     int         nodes;      /* emulated NUMA node count */
     uint64_t    seed;
+    /* Optional overrides for the non-DRAM tier's cost-model parameters
+     * (node index 1). Zero means "keep numa_shim.c's built-in synthetic
+     * default". Set both to calibrate the model against a real measured
+     * or simulated device -- e.g. values captured from a CXLMemSim
+     * device-link run -- instead of the synthetic tier table. */
+    double      cxl_latency_ns;
+    double      cxl_bandwidth_mbps;
 } nf_bench_config_t;
 
 /* Run the full comparison and return an owned JSON result object. */

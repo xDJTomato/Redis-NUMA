@@ -52,6 +52,13 @@ report` runs the fair-evaluation harness across the `zipf`/`uniform`/
 `results/report.html` (bar charts comparing noop/composite_lru/tinylfu/CAAT
 net cost and local-hit-ratio, pure stdlib SVG, no matplotlib dependency).
 
+`numaflow eval` also accepts `--cxl-latency-ns <n>` and
+`--cxl-bandwidth-mbps <n>` to override the non-DRAM tier's cost-model
+parameters with values captured from a real CXLMemSim device-link run,
+instead of `numa_shim.c`'s synthetic tier-1 defaults (300ns / 8000 MB/s).
+`run_full_validation.sh` runs every workload both ways, writing the
+calibrated results to `results/bench_<workload>_cxlcal.json`.
+
 ### 4. YCSB bandwidth benchmark
 
 ```bash
@@ -95,12 +102,25 @@ QEMU environment is not treated as a NUMA-code bug).
 
 Requires `external/CXLMemSim` (clone from `SlugLab/CXLMemSim`) with its own
 patched QEMU and `cxlmemsim_server` already built (`script/build_qemu.sh` +
-`cmake --build build`). Runs CXLMemSim's own CTest suite, then boots the
-patched QEMU with a CXL Type2 endpoint pointed at `cxlmemsim_server` over
-TCP and confirms the device actually links up (checked via `"Device
-realized"` and `"Connected to CXLMemSim"` in the QEMU log) — no guest OS
-boot is needed, QEMU is paused with `-S` immediately after device
-realization. See [`ARCHITECTURE.md`](ARCHITECTURE.md#external-validation-layers)
+`cmake --build build`). The workload bench (below) additionally needs a
+C++20 compiler and `libfmt-dev`; it's skipped with a logged reason if
+either is missing. Three independent checks, each degrading gracefully
+if its prerequisite is missing:
+
+1. CXLMemSim's own CTest suite.
+2. `tests/cxl/cxlmemsim_workload_bench.cpp` — builds against
+   `libcxlmemsim.a` and replays the same zipf/uniform/hotspot/temporal
+   traces NUMAflow's harness uses directly through CXLMemSim's own
+   `CXLMemExpander` C++ model, writing
+   `tests/cxl/results/cxlmemsim_native_bench_<ts>.json`. Only needs the
+   static lib + headers, not the patched QEMU.
+3. Boots the patched QEMU with a CXL Type2 endpoint pointed at
+   `cxlmemsim_server` over TCP and confirms the device actually links up
+   (checked via `"Device realized"` and `"Connected to CXLMemSim"` in the
+   QEMU log) — no guest OS boot is needed, QEMU is paused with `-S`
+   immediately after device realization.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md#external-validation-layers)
 for why this validates the device-emulation link rather than a full
 Redis-inside-CXLMemSim-guest run, and where to find the Redis-level
 DRAM-vs-far-memory comparison instead

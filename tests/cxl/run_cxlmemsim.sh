@@ -14,6 +14,12 @@
 #      needed -- QEMU is paused with -S immediately after device
 #      realization, matching the project's own qemu_integration/
 #      smoke_type2_endpoint.sh pattern).
+#   3. Replays the same four workload shapes NUMAflow's fair
+#      evaluation harness uses (zipf/uniform/hotspot/temporal)
+#      directly through CXLMemSim's own C++ CXLMemExpander model
+#      (cxlmemsim_workload_bench.cpp), so there's a real-model
+#      comparison point alongside NUMAflow's simplified single
+#      latency/bandwidth cost model.
 #
 # Honest scope note: this validates the *device-emulation link*
 # (QEMU <-> cxlmemsim_server), which is CXLMemSim's own stated
@@ -63,6 +69,8 @@ write_result() {
   "reason": "$2",
   "ctest_status": "${CTEST_STATUS:-not_run}",
   "device_link_status": "${DEVICE_LINK_STATUS:-not_run}",
+  "native_bench_status": "${NATIVE_BENCH_STATUS:-not_run}",
+  "native_bench_result": "${NATIVE_BENCH_JSON_PATH:-}",
   "note": "device link validates QEMU<->cxlmemsim_server timing-forwarding path only; redis-level DRAM-vs-far-memory numbers come from tests/ycsb/scripts/eval_cxl_memory.sh run inside a real 2-NUMA-node environment (see tests/vm/boot_numa_vm.sh), not from a guest booted through this device"
 }
 EOF
@@ -101,11 +109,41 @@ else
     log_warn "CXLMemSim CTest suite reported failures, see $CTEST_LOG"
 fi
 
-# ---- 2. QEMU <-> cxlmemsim_server device link ----
+# ---- 2. Native workload bench through CXLMemSim's own C++ model ----
+# Independent of QEMU/the patched-QEMU build below -- only needs
+# libcxlmemsim.a + headers, so it still runs when the heavier patched
+# QEMU device-link step (step 3) is unavailable.
+NATIVE_BENCH_SRC="$SCRIPT_DIR/cxlmemsim_workload_bench.cpp"
+NATIVE_BENCH_BIN="$RESULTS_DIR/.cxlmemsim_workload_bench"
+NATIVE_BENCH_BUILD_LOG="$RESULTS_DIR/cxlmemsim_workload_bench_build.log"
+if g++ -std=c++20 -O2 -pthread \
+        -I"$CXL_ROOT/include" -I"$CXL_ROOT/src" \
+        "$NATIVE_BENCH_SRC" "$BUILD_DIR/libcxlmemsim.a" \
+        -lfmt -lrt -latomic \
+        -o "$NATIVE_BENCH_BIN" > "$NATIVE_BENCH_BUILD_LOG" 2>&1; then
+    NATIVE_BENCH_JSON_PATH="$RESULTS_DIR/cxlmemsim_native_bench_$(date +%Y%m%d_%H%M%S).json"
+    if "$NATIVE_BENCH_BIN" --keys 20000 --accesses 200000 \
+            --read-bw-gbps 25 --write-bw-gbps 25 --read-lat-ns 100 --write-lat-ns 150 \
+            --capacity-mb 256000 --dram-latency-ns 60 \
+            --out "$NATIVE_BENCH_JSON_PATH" > /dev/null 2>&1; then
+        NATIVE_BENCH_STATUS="passed"
+        log_ok "native workload bench complete: $NATIVE_BENCH_JSON_PATH"
+    else
+        NATIVE_BENCH_STATUS="failed"
+        NATIVE_BENCH_JSON_PATH=""
+        log_warn "native workload bench binary exited non-zero"
+    fi
+else
+    NATIVE_BENCH_STATUS="skipped"
+    NATIVE_BENCH_JSON_PATH=""
+    log_warn "could not build cxlmemsim_workload_bench (g++/libfmt/libcxlmemsim.a missing?), see $NATIVE_BENCH_BUILD_LOG"
+fi
+
+# ---- 3. QEMU <-> cxlmemsim_server device link ----
 if [[ ! -x "$QEMU_BIN" ]]; then
     log_warn "patched QEMU not built at $QEMU_BIN -- run external/CXLMemSim/script/build_qemu.sh"
     DEVICE_LINK_STATUS="skipped"
-    write_result "partial" "ctest=$CTEST_STATUS, device link skipped (patched qemu not built)"
+    write_result "partial" "ctest=$CTEST_STATUS, native bench=$NATIVE_BENCH_STATUS, device link skipped (patched qemu not built)"
     exit 0
 fi
 
@@ -128,7 +166,7 @@ done
 if [[ "$up" != "1" ]]; then
     log_err "cxlmemsim_server did not open its TCP port"
     DEVICE_LINK_STATUS="failed"
-    write_result "partial" "ctest=$CTEST_STATUS, device link failed (server did not start)"
+    write_result "partial" "ctest=$CTEST_STATUS, native bench=$NATIVE_BENCH_STATUS, device link failed (server did not start)"
     exit 0
 fi
 
@@ -155,9 +193,9 @@ fi
 kill "$SERVER_PID" >/dev/null 2>&1
 trap - EXIT
 
-if [[ "$CTEST_STATUS" == "passed" && "$DEVICE_LINK_STATUS" == "passed" ]]; then
-    write_result "passed" "ctest=$CTEST_STATUS, device link=$DEVICE_LINK_STATUS"
+if [[ "$CTEST_STATUS" == "passed" && "$DEVICE_LINK_STATUS" == "passed" && "$NATIVE_BENCH_STATUS" == "passed" ]]; then
+    write_result "passed" "ctest=$CTEST_STATUS, device link=$DEVICE_LINK_STATUS, native bench=$NATIVE_BENCH_STATUS"
 else
-    write_result "partial" "ctest=$CTEST_STATUS, device link=$DEVICE_LINK_STATUS"
+    write_result "partial" "ctest=$CTEST_STATUS, device link=$DEVICE_LINK_STATUS, native bench=$NATIVE_BENCH_STATUS"
 fi
 exit 0

@@ -133,4 +133,37 @@ environment doesn't support them:
   --membind` across 2 real NUMA nodes (works inside the VM above; this
   fork's own development host has only 1 physical NUMA node).
 
+The same script also runs `tests/cxl/cxlmemsim_workload_bench.cpp`, which
+replays NUMAflow's four workload shapes (zipf/uniform/hotspot/temporal)
+directly through CXLMemSim's own `CXLMemExpander::calculate_latency`/
+`calculate_bandwidth` C++ model (built against `libcxlmemsim.a`), instead
+of through NUMAflow's simplified single-latency/single-bandwidth cost
+model. Two things worth knowing if you touch this file:
+
+- Driving `calculate_latency`/`calculate_bandwidth` on a raw trace without
+  first calling `CXLMemExpander::insert()` for each access makes the model
+  workload-shape-*insensitive* (verified empirically -- all four workloads
+  returned bit-identical output on the first draft): `insert()` is what
+  classifies a first-ever touch of an address as a store and a repeat
+  touch as a load, and that load/store ratio is what
+  `calculate_bandwidth()`'s congestion model actually reads. The bench
+  drives `insert()` over the whole trace before calling either
+  calculation, which is what makes skewed workloads (zipf/hotspot: many
+  repeat touches of a small hot set) produce meaningfully different
+  numbers from uniform.
+- `calculate_latency()` calls `update_address_cache()` first, which sets
+  the same `cache_valid` flag `is_address_local()` checks without ever
+  populating the `address_ranges` vector that method actually reads --
+  calling `calculate_latency()` before `calculate_bandwidth()` on a fresh
+  endpoint silently zeroes both. The bench calls `calculate_bandwidth()`
+  first as a workaround. This is a real bug in CXLMemSim's own cache
+  invalidation, not a misuse on our side; it's worked around rather than
+  patched since `external/CXLMemSim` isn't vendored into this repo.
+- NUMAflow's own model can also be calibrated with real captured
+  CXLMemSim numbers instead of `numa_shim.c`'s synthetic tier-1 defaults,
+  via `numaflow eval --cxl-latency-ns <n> --cxl-bandwidth-mbps <n>` (see
+  `run_full_validation.sh`'s NUMAflow step, which runs every workload both
+  ways and writes `results/bench_<workload>_cxlcal.json` alongside the
+  synthetic-default `results/bench_<workload>.json`).
+
 See [`TESTING.md`](TESTING.md) for how these fit into `run_full_validation.sh`.

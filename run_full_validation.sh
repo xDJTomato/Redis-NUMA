@@ -102,9 +102,15 @@ if (cd "$NF_DIR" && make -j"$(nproc)" test) > "$REPORT_DIR/numaflow_test.log" 2>
     for w in zipf uniform hotspot temporal; do
         "$NF_BIN" eval --workload "$w" --keys 20000 --accesses 200000 --epoch 5000 --budget 64 --nodes 2 \
             > "$PROJECT_ROOT/results/bench_$w.json" 2>"$REPORT_DIR/numaflow_eval_$w.err" || true
+        # Same run, calibrated against real numbers captured from a
+        # CXLMemSim device-link check (~100-150ns latency, 25GB/s) instead
+        # of numa_shim.c's synthetic tier-1 defaults (300ns/8000MB/s).
+        "$NF_BIN" eval --workload "$w" --keys 20000 --accesses 200000 --epoch 5000 --budget 64 --nodes 2 \
+            --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000 \
+            > "$PROJECT_ROOT/results/bench_${w}_cxlcal.json" 2>"$REPORT_DIR/numaflow_eval_${w}_cxlcal.err" || true
     done
     (cd "$NF_DIR" && python3 eval/report.py) > "$REPORT_DIR/numaflow_report.log" 2>&1 || true
-    record numaflow_bench passed "4 workloads (zipf/uniform/hotspot/temporal) x 4 strategies (noop/composite_lru/tinylfu/caat)"
+    record numaflow_bench passed "4 workloads (zipf/uniform/hotspot/temporal) x 4 strategies (noop/composite_lru/tinylfu/caat), each run twice: synthetic tier defaults + CXLMemSim-calibrated tier"
     log_ok "NUMAflow benchmark complete"
 else
     record numaflow_bench failed "numaflow self-test failed, see $REPORT_DIR/numaflow_test.log"

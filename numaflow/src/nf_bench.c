@@ -249,6 +249,12 @@ nf_json_t *nf_bench_run(const nf_bench_config_t *cfg_in) {
 
     numaflow_env_t env; nf_numa_env_init(&env);
     nf_numa_configure_default(&env, cfg.nodes);
+    if (cfg.cxl_latency_ns > 0.0 && env.node_count > 1) {
+        env.nodes[1].latency_ns = cfg.cxl_latency_ns;
+    }
+    if (cfg.cxl_bandwidth_mbps > 0.0 && env.node_count > 1) {
+        env.nodes[1].bandwidth_mbps = cfg.cxl_bandwidth_mbps;
+    }
 
     keydef_t *defs = (keydef_t *)calloc(cfg.keys, sizeof(keydef_t));
     nf_rng_t rng = nf_rng_seed(cfg.seed);
