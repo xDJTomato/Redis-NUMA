@@ -45,6 +45,13 @@ cd numaflow && make test
 # Optional: QEMU multi-NUMA-node smoke test and CXLMemSim device-link check
 ./tests/vm/boot_numa_vm.sh
 ./tests/cxl/run_cxlmemsim.sh
+
+# Real dual-NUMA-node validation (needs a guest booted with --keep, see below):
+#   placement quality (hot-stays-local/cold-moves-off ratios) and a modeled
+#   relative-performance benchmark (real placement trace x calibrated cost model)
+./tests/vm/boot_numa_vm.sh --keep --timeout 600
+./tests/vm/placement_quality.sh caat         # run inside the guest, per strategy
+./tests/vm/relative_perf_bench.sh            # run on the host; orchestrates all 4 strategies
 ```
 
 Test structure:
@@ -53,7 +60,7 @@ Test structure:
 - `tests/ycsb/workloads/` — workload definitions (baseline, stress, bw_saturate, numa_migration)
 - `tests/legacy/numa/` — archived NUMA functional tests (C/bash)
 - `tests/ycsb/scripts/` — helper scripts (install, eval, report generation)
-- `tests/vm/` — QEMU multi-NUMA-node smoke test (TCG, gracefully skips without `/dev/kvm`)
+- `tests/vm/` — QEMU multi-NUMA-node smoke test (TCG, gracefully skips without `/dev/kvm`); also hosts `placement_quality.sh`/`collect_relative_trace.sh`/`relative_perf_bench.sh` (ADR-11/ADR-12), which need a guest booted with `--keep` to run against a real ≥2-node topology
 - `tests/cxl/` — CXLMemSim device-emulation link validation (`external/CXLMemSim`)
 - `tests/report/` — HTML report generator used by `run_full_validation.sh`
 
@@ -65,8 +72,8 @@ See `TESTING.md` for the full breakdown of every tier.
 
 Eight modules in `src/`, all guarded by `#ifdef HAVE_NUMA`, plus the NUMAflow atomic-op engine (`numaflow/`) which now owns all migration-strategy logic (see ADR-08 in `docs/new/09-architecture-decisions.md`):
 
-1. **numa_pool** — Custom memory allocator. 33 size classes (8B–64KB), bump-pointer O(1) allocation, 64KB slab allocator for ≤4KB objects, chunk compaction for <30% utilization chunks.
-2. **numa_migrate** — Low-level block migration between NUMA nodes via `numa_alloc_onnode` + memcpy.
+1. **numa_pool** — Custom memory allocator. 33 size classes (8B–64KB), bitmap-managed two-tier slab allocation (small/large) with a thread-local cache (tcache, `src/zmalloc.c`) for a lock-free fast path.
+2. **numa_migrate** — Low-level block migration between NUMA nodes via `numa_zmalloc_onnode` + memcpy (actual per-key migration is implemented independently in `numa_key_migrate` below, which does not call this module's migration function).
 3. **numa_key_migrate** — Per-key migration (robj as unit). `numa_key_migrate_touch()` unconditionally updates the neutral zmalloc-prefix hotness signal on every real access; this is the single ground truth NUMAflow's `enumerate()` reads. Full type adapters for all 5 Redis types: STRING (RAW/EMBSTR), HASH (listpack/ziplist/hashtable), LIST (quicklist with LZF/raw and PLAIN/PACKED container sub-paths), SET (intset/hashtable), ZSET (listpack/ziplist/skiplist).
 4. **numa_configurable_strategy** — 7 independent allocation-node-selection behaviors at the zmalloc layer (LOCAL_FIRST, INTERLEAVE, ROUND_ROBIN, WEIGHTED/WEIGHTED_INTERLEAVE share one weighted-random implementation with different weight sources, PRESSURE_AWARE, CXL_OPTIMIZED). ADAPTIVE/LATENCY_AWARE are kernel-side placeholders (behave as LOCAL_FIRST, self-report via a startup log and `NUMA CONFIG GET`'s `strategy_note` field) — their real implementation is the matching `alloc_adaptive`/`alloc_latency_aware` atomic op in NUMAflow.
 5. **numa_command** — Unified `NUMA` Redis command: `NUMA MIGRATE`, `NUMA CONFIG`, `NUMA FLOW`.
@@ -81,7 +88,7 @@ The 16-slot vtable strategy framework (`numa_strategy_slots`) and its native Com
 - **zmalloc.c/h** — All `zmalloc/zfree/zrealloc` routed through NUMA allocator when available. 16-byte `numa_alloc_prefix_t` prefix on every allocation tracks size, node, hotness, access metadata. `NO_MALLOC_USABLE_SIZE` is forced.
 - **server.h** — NUMA stats counters and config fields in `redisServer` struct. NUMA headers included under `#ifdef HAVE_NUMA`.
 - **server.c** — `numa_init()` in `main()` before `initServer()`. Key-migration/bw-monitor/NUMAflow-bridge init after `initServer()`; NUMAflow's default strategy auto-loads there too. Periodic compaction and `numa_flow_cron()` run in `serverCron`.
-- **evict.h** — Extended `evictionPoolEntry` with `current_node`, `object_size`, `numa_migrated` fields.
+- **evict.h** — A stateless demotion attempt (`evictionTryNumaDemote`) is inserted into the eviction loop before a key is actually evicted; `evictionPoolEntry` itself is unmodified.
 
 ### Module Dependency Order (bottom to top)
 
@@ -95,10 +102,12 @@ Builds and tests on any platform with a C11 compiler (`make` or `mingw32-make`):
 cd numaflow && make && make test && make report
 ./build/numaflow ops          # list 36 atomic operations
 ./build/numaflow strategies   # list 13 built-in strategies (CAAT is default)
+./build/numaflow eval --workload zipf --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
+./build/numaflow replay --trace caat=trace_caat.json --trace noop=trace_noop.json
 python gui/server.py          # N8N-style DAG editor at http://127.0.0.1:8090
 ```
 
-Components: `include/` + `src/` (engine), `tui/nf_tui.c` (interactive TUI), `gui/` (web editor + Python bridge), `eval/report.py` (SVG/HTML visualization), `tests/` (unit + bridge/adapt + smoke). Key files: `nf_ops.c` (36 atomic ops), `nf_strategy.c` (strategy catalog incl. CAAT), `nf_bench.c` (fair evaluator), `nf_track.c` (CMS + Doorkeeper + EWMA feedback), `nf_bridge.c` (store-agnostic bridge contract + migration application), `nf_adapt.c` (self-adapting DAG: parameter hill-climb + structure selection), `numa_shim.c` (portable libnuma emulation).
+Components: `include/` + `src/` (engine), `tui/nf_tui.c` (interactive TUI), `gui/` (web editor + Python bridge), `eval/report.py` (SVG/HTML visualization), `tests/` (unit + bridge/adapt + smoke). Key files: `nf_ops.c` (36 atomic ops), `nf_strategy.c` (strategy catalog incl. CAAT), `nf_bench.c` (fair evaluator over a synthetic access trace), `nf_cli.c` (CLI dispatch: `ops/strategies/templates/template/workflow/run/dump-ops/dump-templates/eval/replay`), `nf_track.c` (CMS + Doorkeeper + EWMA feedback), `nf_bridge.c` (store-agnostic bridge contract + migration application), `nf_adapt.c` (self-adapting DAG: parameter hill-climb + structure selection), `numa_shim.c` (portable libnuma emulation; also owns the pure-function cost model `nf_numa_access_cost`/`nf_numa_migrate_cost` that both `eval` and `replay` feed into). `replay` (added for ADR-12) feeds a *real* placement trace — not a synthetic one — through the same calibratable cost model `eval` uses, producing output shape-compatible with `eval`'s `bench_<workload>.json`.
 
 The Redis adapter `src/numa_flow.c` (compiled only under `HAVE_NUMA`) implements the two bridge callbacks and exposes `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`; `serverCron` runs loaded workflows on their interval. `nf_adapt_tune()` folds each run's DRAM-residency feedback and can switch the DAG between conservative/balanced/aggressive templates and hill-climb its parameters.
 

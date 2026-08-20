@@ -138,6 +138,35 @@ CAAT 在净代价上比最好的基线（TinyLFU）降低约 **20%**，比 Compo
 > 工作负载的结论去引用是不对的——它在访问接近均匀分布时反而更差。详见 ADR-09
 > 的"遗留事项"小节。
 
+### 3.1 相对性能基准：真实放置轨迹 + 标定代价模型（ADR-12）
+
+`nf_bench.c` 的公平评测复现的是**合成**访问轨迹（zipf/uniform/hotspot/temporal
+四种，内部生成）。用户如果手上没有真实的多路 NUMA/CXL 硬件（近期常见情况），
+想知道"某个策略在真实工作负载下的相对表现"，`nf_bench.c` 这条路给不出——它测的
+是策略在合成负载上的相对差异，不是真实系统里实际发生的放置决策。
+
+`numaflow replay --trace <name>=<file.json> ...` 补上这一环：读入一份或多份
+**真实**放置轨迹（每条记录 `{key,size,access_count,origin_node,final_node}`，
+通常来自 `tests/vm/collect_relative_trace.sh` 在真实双 NUMA 节点 QEMU guest 上
+的采集结果），对每条记录调用与 `eval` 完全相同的纯函数代价模型
+（`nf_numa_access_cost`/`nf_numa_migrate_cost`，`numa_shim.c`），支持同一套
+`--cxl-latency-ns`/`--cxl-bandwidth-mbps` 标定，输出和 `eval` 的
+`bench_<workload>.json` 里 `migration` 数组同构的 JSON——`eval/report.py` 不用
+改一行代码就能多画一张对比面板。
+
+```bash
+./build/numaflow replay \
+    --trace noop=trace_noop.json --trace caat=trace_caat.json \
+    --trace composite_lru=trace_composite_lru.json --trace tinylfu=trace_tinylfu.json \
+    --nodes 2 --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000 \
+    --out results/bench_relative_perf_cxlcal.json
+```
+
+配套的 `tests/vm/relative_perf_bench.sh`（开发机上运行）编排整条链路：起停
+guest 内四个策略、取回四份轨迹、跑两次 `replay`（标定/不标定各一次）。**这是
+建模投影，不是实测延迟**——标定常数本身来自一次 CXLMemSim 简化设备模型的检查，
+不是硅片实测；详见 ADR-12（`docs/new/09-architecture-decisions.md`）。
+
 ## 4. TUI / GUI 与定时任务
 
 - **TUI**（`make` 后运行 `./build/nf_tui`）：列出原子操作/策略、以原子操作组合自定义
@@ -166,6 +195,11 @@ make test       # 编译并运行单元 + 集成测试
 make report     # 生成评测 JSON + results/report.html
 ./build/numaflow ops        # 列出 36 个原子操作
 ./build/numaflow strategies # 列出 13 个内置策略
+./build/numaflow eval --workload zipf --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
+                             # 合成轨迹公平评测，可选标定（见 3 节）
+./build/numaflow replay --trace caat=trace_caat.json [--trace ...] \
+                         --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
+                             # 真实放置轨迹 + 标定代价模型（见 3.1 节，ADR-12）
 ```
 
 在 Linux + 真实 libnuma 环境下，本子系统同样可编译运行（Makefile 自动选择后缀）；

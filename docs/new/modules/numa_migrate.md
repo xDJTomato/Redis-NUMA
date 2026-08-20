@@ -114,8 +114,12 @@ int numa_migrate_init(void) {
 - **理论上应被 `numa_key_migrate` 复用，但实际并未被调用**：见第 6 节。
 - **不直接被 NUMAflow 迁移策略调用**：`caat`/`composite_lru`/`tinylfu` 三个预设
   （`numaflow/src/nf_strategy.c`，经桥接 `src/numa_flow.c`）触发迁移时，最终
-  调用的是 `numa_key_migrate.c` 暴露的 `numa_migrate_single_key()`/
-  `numa_migrate_multiple_keys()`，而不是本模块的 `numa_migrate_memory()`。
+  调用的是 `numa_key_migrate.c` 暴露的 `numa_migrate_key_by_name()`（桥接层
+  的 `numa_flow_apply()` 回调按 key 名调用，内部经 `numa_key_migrate_dict_find()`
+  归一化查找，见 ADR-11 和 `numa_key_migrate.md`），而不是本模块的
+  `numa_migrate_memory()`，也不是 `numa_migrate_single_key()`/
+  `numa_migrate_multiple_keys()`（那两个是 `NUMA MIGRATE KEY`/pattern 手动命令
+  专用的入口，按 `robj*`/key 列表查找，不经过 NUMAflow 桥接）。
 
 ## 6. 未解决问题与已知限制（Open Issues & Known Limitations）
 

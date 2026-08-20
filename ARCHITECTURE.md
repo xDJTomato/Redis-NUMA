@@ -104,6 +104,8 @@ with a C11 compiler:
 cd numaflow && make && make test && make report
 ./build/numaflow ops          # list the 36 atomic operations
 ./build/numaflow strategies   # list the 13 built-in strategies (CAAT is default)
+./build/numaflow eval --workload zipf --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
+./build/numaflow replay --trace caat=trace_caat.json --trace noop=trace_noop.json
 python gui/server.py          # N8N-style DAG editor at http://127.0.0.1:8090
 ```
 
@@ -111,10 +113,17 @@ Layout:
 
 - `include/` + `src/` — the engine (`nf_ops.c` for the 36 atomic ops,
   `nf_strategy.c` for the strategy catalog including CAAT, `nf_bench.c` for
-  the fair evaluator, `nf_track.c` for the CMS + Doorkeeper + EWMA feedback
-  loop, `nf_bridge.c` for the store-agnostic bridge contract and migration
-  application, `nf_adapt.c` for the self-adapting DAG (parameter hill-climb
-  + structure selection), `numa_shim.c` for portable libnuma emulation).
+  the fair evaluator over a synthetic access trace, `nf_cli.c` for CLI
+  dispatch (`ops/strategies/templates/template/workflow/run/dump-ops/
+  dump-templates/eval/replay`), `nf_track.c` for the CMS + Doorkeeper + EWMA
+  feedback loop, `nf_bridge.c` for the store-agnostic bridge contract and
+  migration application, `nf_adapt.c` for the self-adapting DAG (parameter
+  hill-climb + structure selection), `numa_shim.c` for portable libnuma
+  emulation — also the home of the pure-function cost model
+  `nf_numa_access_cost`/`nf_numa_migrate_cost` that both `eval` and `replay`
+  feed into). `replay` feeds a *real* placement trace (not a synthetic one)
+  through that same calibratable cost model, producing output
+  shape-compatible with `eval`'s `bench_<workload>.json`.
 - `tui/nf_tui.c` — the interactive TUI.
 - `gui/` — the web-based DAG editor and Python bridge.
 - `eval/report.py` — pure-stdlib SVG/HTML report generator for the fair
@@ -132,6 +141,19 @@ environment doesn't support them:
   present) and runs `redis-server` + the `NUMA` command family +
   `redis-benchmark` inside it, to exercise the NUMA code paths against a
   real (if emulated) multi-node topology.
+- **`tests/vm/placement_quality.sh`** / **`tests/vm/relative_perf_bench.sh`**
+  (need `boot_numa_vm.sh --keep` to leave a guest running) — the smoke test
+  above doesn't run any migration strategy long enough to say anything
+  about placement; these do, against the same real (if latency-flat)
+  ≥2-node topology. `placement_quality.sh` measures hot-key-stays-local /
+  cold-key-moves-off ratios per strategy inside the guest (found and fixed
+  two previously zero-coverage bugs in the real migration execution path
+  the first time it ran — SDS key lookup, tick/recency truncation; see
+  ADR-11). `relative_perf_bench.sh` orchestrates all four strategies,
+  collects a real per-key placement trace from each, and feeds it through
+  NUMAflow's calibrated cost model (`numaflow replay`) for a *modeled*
+  relative ns-level projection — not a measured latency, since QEMU's two
+  `-numa node`s share the same host DRAM (see ADR-12).
 - **`external/CXLMemSim`** (`SlugLab/CXLMemSim`, not vendored into this
   repo's history) — a device-level CXL memory-timing simulator with its own
   patched QEMU. `tests/cxl/run_cxlmemsim.sh` validates the QEMU&harr;

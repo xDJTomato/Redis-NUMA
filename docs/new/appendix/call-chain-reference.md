@@ -94,14 +94,14 @@ main()
     │
     ├── #ifdef HAVE_NUMA  (initServer 之后)
     │     │
-    │     ├── numa_config_strategy_init()          // src/server.c:7384
-    │     │     └── numa_config_set_strategy(WEIGHTED_INTERLEAVE)  // src/server.c:7385，设为默认
+    │     ├── numa_config_strategy_init()          // src/server.c:7363
+    │     │     └── numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE)  // src/server.c:7364，设为默认
     │     │
-    │     ├── numa_key_migrate_init()              // src/server.c:7390
+    │     ├── numa_key_migrate_init()              // src/server.c:7369
     │     │
-    │     ├── numa_bw_monitor_init()               // src/server.c:7395
+    │     ├── numa_bw_monitor_init()               // src/server.c:7374
     │     │
-    │     └── numa_flow_init()
+    │     └── numa_flow_init()                     // src/server.c:7386
     │             │
     │             └── if (numa-enabled)  // 默认策略自动加载
     │                     numa_flow_load_default(numa-flow-default-strategy,
@@ -128,7 +128,9 @@ serverCron()  // 每 100ms 执行一次
     │     │     ├── numa_config_update_pressure_weights()  // 更新压力权重
     │     │     │     │
     │     │     │     └── for each node:
-    │     │     │           p = numaGetNodePressure(i)  // 读 /sys/.../meminfo
+    │     │     │           p = numa_bw_get_node_pressure(i)  // 共享的权威取值函数
+    │     │     │           //   （src/numa_bw_monitor.c，maxmemory 配额相对值/sysfs
+    │     │     │           //   meminfo 兜底两种算法，1 秒缓存；evict_numa 也读它）
     │     │     │           w = max(1, (1 - p) * 100)
     │     │     │           atomicSet(pressure_weights[i], w)
     │     │     │
@@ -138,11 +140,22 @@ serverCron()  // 每 100ms 执行一次
     │     │                   if (now - last_run >= interval_sec)
     │     │                       numa_flow_run_entry(entry)
     │     │                           │
-    │     │                           ├── dictGetSafeIterator(db->dict)
+    │     │                           ├── 有界、可恢复的 dictScan() 批量收集
+    │     │                           │     （NUMA_FLOW_SCAN_BATCH=4096，游标存在
+    │     │                           │     entry->scan_cursor 上跨 tick 续扫；ADR-10
+    │     │                           │     修复前这里是无界的 dictGetSafeIterator()
+    │     │                           │     全表遍历，在百万级 key 规模下把 Redis
+    │     │                           │     单线程堵死数分钟——见 ADR-10）
     │     │                           ├── 构造 nf_bridge_t：
     │     │                           │     enumerate = numa_flow_enumerate
     │     │                           │     apply     = numa_flow_apply
     │     │                           │     ctx.budget = 256
+    │     │                           │     ctx.tick    = server.lruclock & 0xFFFF
+    │     │                           │     //   截到 16 位以匹配 nf_item_t.recency
+    │     │                           │     //   （zmalloc 前缀 uint16_t）的精度；
+    │     │                           │     //   传完整 24 位会让所有 idle 计算算出
+    │     │                           │     //   数百万秒，composite_lru 的
+    │     │                           │     //   filter_hot 永远滤掉一切——见 ADR-11
     │     │                           │
     │     │                           └── nf_bridge_run(&br, &entry->graph, &result)
     │     │                                   │
@@ -153,6 +166,17 @@ serverCron()  // 每 100ms 执行一次
     │     │                                         入队时的原始节点做 diff，
     │     │                                         对变化项调用 apply()
     │     │                                             └── numa_migrate_key_by_name()
+    │     │                                                   └── numa_key_migrate_dict_find()
+    │     │                                                       // sdsnew(keyname) 归一化后
+    │     │                                                       // 再 dictFind——桥接传来的
+    │     │                                                       // nf_item_t.key 是普通
+    │     │                                                       // char[]，不是真 SDS，直接
+    │     │                                                       // dictFind 会让
+    │     │                                                       // dictSdsHash/
+    │     │                                                       // dictSdsKeyCompare 对它调
+    │     │                                                       // 用 sdslen() 读出垃圾长
+    │     │                                                       // 度，100% 静默 miss（且
+    │     │                                                       // 越界读）——见 ADR-11
     │     │
     │     └── (无 10 秒 compact 任务 — 旧版 numa_pool_try_compact 已移除)
     │
@@ -335,6 +359,7 @@ numa_flow_cron()
             │
             └── 结果与入队时的原始节点 diff，对变化项调用 apply()
                   └── numa_flow_apply() ──► numa_migrate_key_by_name()
+                        ──► numa_key_migrate_dict_find()（SDS 归一化，ADR-11）
 ```
 
 `composite_lru`（`build_composite_lru`：`score_hotness → filter_hot(threshold=5)
@@ -343,6 +368,16 @@ numa_flow_cron()
 → budget_limit → select_dest_node → emit_migrate`，同样只晋升不降级）是另外
 两个预设，通过 `NUMA FLOW DEFAULT composite_lru`/`tinylfu` 切换；`noop` 是空
 图，不做任何迁移。
+
+`filter_hot(threshold=5)` 这条链正是 ADR-11 那个 tick 截断 bug 曾经悄悄弄坏的
+地方：`score_hotness`/`op_decay_hotness` 内部算 `idle = ctx->tick - it.recency`，
+`ctx.tick` 在修复前传的是完整 24 位 `server.lruclock`，而 `it.recency` 只有
+`nf_item_t.recency`（zmalloc 前缀 `uint16_t last_access` 的精度）——两者数量级
+差了几百万，`idle` 恒为天文数字，`nf_staircase_decay()` 恒定返回最大衰减，
+hotness 被压到 `filter_hot(threshold=5)` 之下，composite_lru 因此永远迁移 0 个
+key。`caat`/`tinylfu` 用 CMS 频率（`cms_estimate`）而非 hotness 做门控，不受
+影响——这也是当时缩小排查范围的关键线索。见上方"serverCron 调用链"里
+`ctx.tick = server.lruclock & 0xFFFF` 那一行。
 
 ### migrate_string_type 内部流程
 
@@ -511,14 +546,16 @@ zmalloc.c
 ```
 serverCron ──► numa_flow_cron() ──► default 工作流（默认 CAAT）
     ──► nf_bridge_run()：enumerate() 枚举 keyspace ──► 原子操作 DAG 打分/过滤/决策
-    ──► apply() ──► numa_migrate_key_by_name() ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
+    ──► apply() ──► numa_migrate_key_by_name() ──► numa_key_migrate_dict_find()
+        （sdsnew() 归一化，ADR-11） ──► dictFind ──► 类型适配器 ──► 更新指针 ──► 释放旧内存
 ```
 
 ### 压力权重更新路径
 
 ```
 serverCron (每秒) ──► numa_config_update_pressure_weights()
-    ──► numaGetNodePressure(i) ──► atomicSet(pressure_weights[i], w)
+    ──► numa_bw_get_node_pressure(i)（src/numa_bw_monitor.c，共享的权威取值函数）
+        ──► atomicSet(pressure_weights[i], w)
     ──► 下次 zmalloc 时 atomicGet 读取，影响分配目标选择
 ```
 
@@ -544,7 +581,7 @@ serverCron (每秒) ──► numa_config_update_pressure_weights()
 ```
 线程 A (主线程): 处理客户端命令 ──► lookupKey ──► record_access
                                                      │
-线程 B (主线程): 执行 serverCron ──► numa_strategy_run_all ──► migrate
+线程 B (主线程): 执行 serverCron ──► numa_flow_cron ──► migrate
                                                      │
                                                      └── 安全：串行执行
 ```

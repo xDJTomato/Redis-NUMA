@@ -97,6 +97,32 @@ slirp NAT 下可能耗时数分钟的 `apt-get`，相比直接读 sysfs 没有�
 `"timeout"` 状态写入 `tests/vm/results/qemu_smoke_<ts>.json`，然后正常退出（一
 个跑得慢/跑不起来的 QEMU 环境不算作 NUMA 代码本身的 bug）。
 
+### 5b. 真实双 NUMA 节点验证：放置质量 + 相对性能基准
+
+1 节点的开发机永远测不到真正的迁移*执行*路径（那里 `migrations` 恒为
+0——决策做出来了，但没有第二个节点可以真的搬过去），上面那个冒烟测试也没有
+跑够久、跑够真实的迁移策略去验证放置效果。下面这两个工具在真实的 ≥2 节点拓
+扑上补上这一环：
+
+```bash
+./tests/vm/boot_numa_vm.sh --keep --timeout 600   # 先保持 guest 运行
+
+# 放置质量（在 guest 内按策略运行）：热 key 是否留在本地、冷 key 是否被挪走。
+# 第一次这样跑的时候就测出并修复了两个此前零覆盖的 bug（SDS key 查找、
+# tick/recency 截断）——见 docs/new/09-architecture-decisions.md 的 ADR-11。
+ssh -p 10222 -i tests/vm/.cache/vm_test_key numatest@127.0.0.1 \
+    './placement_quality.sh caat'
+
+# 相对性能基准（在开发机上运行，通过 SSH 编排 guest 里的全部四个策略）：
+# 采集一份真实的按 key 放置轨迹，喂进 NUMAflow 标定过的代价模型
+# （`numaflow replay`），算出一个*建模*的相对 ns 级投影——不是实测延迟，因为
+# QEMU 的两个 -numa node 背后是同一块宿主机 DRAM。见 ADR-12。
+./tests/vm/relative_perf_bench.sh
+```
+
+这两个工具都需要 `boot_numa_vm.sh --keep` 起的 guest 还在运行（上面那个纯冒烟
+测试跑完会把它关掉）。
+
 ### 6. CXLMemSim 设备级链路校验
 
 ```bash

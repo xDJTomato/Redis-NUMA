@@ -94,16 +94,23 @@ libnuma
 cd numaflow && make && make test && make report
 ./build/numaflow ops          # 列出 36 个原子操作
 ./build/numaflow strategies   # 列出 13 个内置策略（CAAT 为默认策略）
+./build/numaflow eval --workload zipf --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
+./build/numaflow replay --trace caat=trace_caat.json --trace noop=trace_noop.json
 python gui/server.py          # N8N 风格的 DAG 编辑器，http://127.0.0.1:8090
 ```
 
 目录结构：
 
 - `include/` + `src/`——引擎本身（`nf_ops.c` 对应 36 个原子操作，`nf_strategy.c`
-  是包含 CAAT 的策略目录，`nf_bench.c` 是公平评测框架，`nf_track.c` 是
+  是包含 CAAT 的策略目录，`nf_bench.c` 是基于合成访问轨迹的公平评测框架，
+  `nf_cli.c` 是 CLI 分发（`ops/strategies/templates/template/workflow/run/
+  dump-ops/dump-templates/eval/replay`），`nf_track.c` 是
   CMS + Doorkeeper + EWMA 反馈回路，`nf_bridge.c` 是与存储无关的桥接契约与迁移
   应用逻辑，`nf_adapt.c` 是自适应 DAG（参数爬山 + 结构选择），`numa_shim.c` 是
-  可移植的 libnuma 仿真层）。
+  可移植的 libnuma 仿真层——也提供 `eval` 和 `replay` 共用的纯函数代价模型
+  `nf_numa_access_cost`/`nf_numa_migrate_cost`）。`replay` 把一份**真实**放置
+  轨迹（不是合成的）喂进 `eval` 用的同一套可标定代价模型，产出和 `eval` 的
+  `bench_<workload>.json` 同构的结果。
 - `tui/nf_tui.c`——交互式 TUI。
 - `gui/`——基于 Web 的 DAG 编辑器及其 Python 桥接后端。
 - `eval/report.py`——纯 stdlib 实现的 SVG/HTML 报告生成器，用于展示公平评测
@@ -119,6 +126,16 @@ python gui/server.py          # N8N 风格的 DAG 编辑器，http://127.0.0.1:8
   云镜像（如果没有 `/dev/kvm` 就用纯 TCG 软件模拟），并在其中运行
   `redis-server` + `NUMA` 命令族 + `redis-benchmark`，用一个真实（即便是模拟的）
   多节点拓扑去实际跑一遍 NUMA 代码路径。
+- **`tests/vm/placement_quality.sh`** / **`tests/vm/relative_perf_bench.sh`**
+  （需要 `boot_numa_vm.sh --keep` 保持 guest 运行）——上面那个冒烟测试不会跑
+  够久、跑够真实的迁移策略去验证放置效果，这两个工具在同一个真实（即便延迟是
+  平的）≥2 节点拓扑上补上这一环。`placement_quality.sh` 在 guest 内按策略测量
+  热 key 是否留在本地、冷 key 是否被挪走（第一次这样跑的时候就测出并修复了真实
+  迁移执行路径里两个此前零覆盖的 bug——SDS key 查找、tick/recency 截断，见
+  ADR-11）。`relative_perf_bench.sh` 编排全部四个策略，从每个策略采集一份真实
+  的按 key 放置轨迹，喂进 NUMAflow 标定过的代价模型（`numaflow replay`），算出
+  一个*建模*的相对 ns 级投影——不是实测延迟，因为 QEMU 的两个 `-numa node` 背后
+  是同一块宿主机 DRAM（见 ADR-12）。
 - **`external/CXLMemSim`**（`SlugLab/CXLMemSim`，未被 vendor 进本仓库历史）——一
   个设备级的 CXL 内存时序仿真器，自带改版 QEMU。`tests/cxl/run_cxlmemsim.sh` 用
   来验证 QEMU↔`cxlmemsim_server` 的链路（一个 CXL Type2 端点通过 TCP 连接到

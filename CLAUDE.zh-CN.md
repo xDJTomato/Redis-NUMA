@@ -59,6 +59,13 @@ cd numaflow && make test
 # 可选：QEMU 多 NUMA 节点冒烟测试与 CXLMemSim 设备级链路校验
 ./tests/vm/boot_numa_vm.sh
 ./tests/cxl/run_cxlmemsim.sh
+
+# 真实双 NUMA 节点验证（需要先用 --keep 起一个 guest，见下）：
+#   放置质量（热 key 是否留在本地、冷 key 是否被挪走）与建模的相对性能基准
+#   （真实放置轨迹 x 标定过的代价模型）
+./tests/vm/boot_numa_vm.sh --keep --timeout 600
+./tests/vm/placement_quality.sh caat         # 在 guest 内按策略运行
+./tests/vm/relative_perf_bench.sh            # 在开发机上运行，编排全部四个策略
 ```
 
 测试结构：
@@ -67,7 +74,9 @@ cd numaflow && make test
 - `tests/ycsb/workloads/` — 工作负载定义（baseline、stress、bw_saturate、numa_migration）
 - `tests/legacy/numa/` — 归档的 NUMA 功能测试（C/bash）
 - `tests/ycsb/scripts/` — 辅助脚本（安装、评测、报告生成）
-- `tests/vm/` — QEMU 多 NUMA 节点冒烟测试（TCG，没有 `/dev/kvm` 时会优雅跳过）
+- `tests/vm/` — QEMU 多 NUMA 节点冒烟测试（TCG，没有 `/dev/kvm` 时会优雅跳过）；
+  也存放 `placement_quality.sh`/`collect_relative_trace.sh`/`relative_perf_bench.sh`
+  （ADR-11/ADR-12），这三个工具需要先用 `--keep` 起一个真实 ≥2 节点的 guest 才能跑
 - `tests/cxl/` — CXLMemSim 设备仿真链路校验（`external/CXLMemSim`）
 - `tests/report/` — `run_full_validation.sh` 使用的 HTML 报告生成器
 
@@ -146,15 +155,22 @@ evict_numa → server.c
 cd numaflow && make && make test && make report
 ./build/numaflow ops          # 列出 36 个原子操作
 ./build/numaflow strategies   # 列出 13 个内置策略（CAAT 为默认）
+./build/numaflow eval --workload zipf --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
+./build/numaflow replay --trace caat=trace_caat.json --trace noop=trace_noop.json
 python gui/server.py          # N8N 风格的 DAG 编辑器，http://127.0.0.1:8090
 ```
 
 组成：`include/` + `src/`（引擎）、`tui/nf_tui.c`（交互式 TUI）、`gui/`（Web 编
 辑器 + Python 桥接）、`eval/report.py`（SVG/HTML 可视化）、`tests/`（单元 + 桥接/
 自适应 + 冒烟测试）。关键文件：`nf_ops.c`（36 个原子操作）、`nf_strategy.c`（策
-略目录，含 CAAT）、`nf_bench.c`（公平评测器）、`nf_track.c`（CMS + Doorkeeper +
-EWMA 反馈）、`nf_bridge.c`（存储无关的桥接契约 + 迁移执行）、`nf_adapt.c`（自适
-应 DAG：参数爬山 + 结构选择）、`numa_shim.c`（可移植的 libnuma 仿真）。
+略目录，含 CAAT）、`nf_bench.c`（基于合成访问轨迹的公平评测器）、`nf_cli.c`
+（CLI 分发：`ops/strategies/templates/template/workflow/run/dump-ops/
+dump-templates/eval/replay`）、`nf_track.c`（CMS + Doorkeeper + EWMA 反馈）、
+`nf_bridge.c`（存储无关的桥接契约 + 迁移执行）、`nf_adapt.c`（自适应 DAG：参数
+爬山 + 结构选择）、`numa_shim.c`（可移植的 libnuma 仿真；也提供 `eval` 和
+`replay` 共用的纯函数代价模型 `nf_numa_access_cost`/`nf_numa_migrate_cost`）。
+`replay`（ADR-12 新增）把一份**真实**放置轨迹——不是合成的——喂进 `eval` 用的
+同一套可标定代价模型，产出和 `eval` 的 `bench_<workload>.json` 同构的结果。
 
 Redis 侧适配器 `src/numa_flow.c`（只在 `HAVE_NUMA` 下编译）实现了两个桥接回调，
 并暴露 `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT`；`serverCron` 按各自的时间

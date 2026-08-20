@@ -60,11 +60,29 @@ void numa_reset_migration_statistics(void);
 | `NUMA_KEY_MIGRATE_ETYPE` | -5 | 不支持的数据类型/编码 |
 
 调用方：`numa_migrate_single_key`（按 `robj*`）供 `NUMA MIGRATE KEY` 手动命令
-使用，内部走 `dictFind`；`numa_migrate_key_by_name`（按 SDS key 名）供
+使用，内部走 `dictFind`；`numa_migrate_key_by_name`（按 key 名字符串）供
 NUMAflow 通过 `src/numa_flow.c` 桥接触发的自动迁移使用——桥接层的 `apply()`
 回调按 NUMAflow DAG 跑出来的迁移决策（`caat`/`composite_lru`/`tinylfu` 预设，
 均定义在 `numaflow/src/nf_strategy.c`）调用这个入口，两条入口共享同一套类型适
 配器，区别只在查找方式。
+
+`numa_migrate_key_by_name` 内部调用一个新的静态辅助函数
+`numa_key_migrate_dict_find()`（ADR-11，`docs/new/09-architecture-decisions.md`）
+把传入的 `keyname` 先 `sdsnew()` 归一化再查 `db->dict`，而不是直接
+`dictFind(db->dict, keyname)`。这不是防御性编程，是修一个真实存在过的
+bug：`db->dict` 用 SDS 键，`dictSdsHash()`/`dictSdsKeyCompare()` 都会对
+**查找键**调用 `sdslen()`；但 NUMAflow 桥接（`src/numa_flow.c` 的
+`numa_flow_apply()`）传的是 `nf_item_t.key`，一个普通 `char[]`，不是真的
+SDS——`sdslen()` 会把指针前面的字节当 SDS header 读出垃圾长度，导致每次
+查找必然 miss（而且是一次越界读）。这个 bug 让 NUMAflow 驱动的迁移
+100% 静默失败了很长时间（`NUMA FLOW STATUS` 显示策略正确决策了几十次
+迁移，但 `NUMA MIGRATE STATS` 的 `successful_migrations` 恒为 0），只是
+因为它只有在真正的多 NUMA 节点硬件上才会被触发（开发主机长期只有 1 个
+节点，`migrations` 恒为 0，这条执行路径此前零覆盖），所以直到 ADR-11
+在真实 QEMU 双节点 guest 上第一次测才被发现。`numa_key_migrate_dict_find()`
+让 `numa_migrate_key_by_name()` 同时安全接受真实 SDS 和普通 C 字符串两种
+调用方，不再要求调用方自己记住"必须传 SDS"这个此前只写在头文件注释里、
+没有代码强制的约定。
 
 ## 3. 内部结构与关键路径（Internal Structure & Key Paths）
 

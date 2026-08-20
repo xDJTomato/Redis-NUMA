@@ -107,6 +107,36 @@ the last serial-console output, writes a `"timeout"` status to
 `tests/vm/results/qemu_smoke_<ts>.json`, and exits 0 (a slow/unavailable
 QEMU environment is not treated as a NUMA-code bug).
 
+### 5b. Real dual-NUMA-node validation: placement quality + relative-performance benchmark
+
+The 1-node dev host can never exercise the real migration *execution* path
+(`migrations` is always 0 there — decisions get made but nothing ever
+actually moves), and even the smoke test above doesn't run any migration
+strategy long enough to say anything about placement. These two tools do,
+against a real ≥2-node topology:
+
+```bash
+./tests/vm/boot_numa_vm.sh --keep --timeout 600   # keep the guest alive first
+
+# Placement quality (run per-strategy, inside the guest): hot-key-stays-local
+# and cold-key-moves-off ratios. Found and fixed two previously zero-coverage
+# bugs (SDS key lookup, tick/recency truncation) the first time this ran —
+# see ADR-11 in docs/new/09-architecture-decisions.md.
+ssh -p 10222 -i tests/vm/.cache/vm_test_key numatest@127.0.0.1 \
+    './placement_quality.sh caat'
+
+# Relative-performance benchmark (run on the host; orchestrates all four
+# strategies against the running guest via SSH): collects a real per-key
+# placement trace, then feeds it through NUMAflow's calibrated cost model
+# (`numaflow replay`) for a *modeled* relative ns-level projection — not a
+# measured latency, since QEMU's two -numa nodes share the same host DRAM.
+# See ADR-12.
+./tests/vm/relative_perf_bench.sh
+```
+
+Both require the guest from `boot_numa_vm.sh --keep` to still be running
+(the plain smoke test above tears it down when done).
+
 ### 6. CXLMemSim device-link check
 
 ```bash

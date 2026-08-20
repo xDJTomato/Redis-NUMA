@@ -11,12 +11,12 @@
    ——这是 NUMA 分配器最早初始化的一环，不在 `server.c` 里，而是挂在
    `zmalloc` 自己的初始化路径上。
 2. `initServer()` 返回后，`#ifdef HAVE_NUMA` 块依次调用：
-   - `numa_config_strategy_init()`（`src/server.c:7384`），随后
-     `numa_config_set_strategy(WEIGHTED_INTERLEAVE)`（`src/server.c:7385`）
-     把默认分配策略设为加权轮询插值。
-   - `numa_key_migrate_init()`（`src/server.c:7390`）。
-   - `numa_bw_monitor_init()`（`src/server.c:7395`）。
-   - `numa_flow_init()`：初始化 NUMAflow 桥接状态；除非
+   - `numa_config_strategy_init()`（`src/server.c:7363`），随后
+     `numa_config_set_strategy(NUMA_STRATEGY_CONFIG_WEIGHTED_INTERLEAVE)`
+     （`src/server.c:7364`）把默认分配策略设为加权轮询插值。
+   - `numa_key_migrate_init()`（`src/server.c:7369`）。
+   - `numa_bw_monitor_init()`（`src/server.c:7374`）。
+   - `numa_flow_init()`（`src/server.c:7386`）：初始化 NUMAflow 桥接状态；除非
      `numa-enabled no`，随后自动读取 `numa-flow-default-strategy`（默认
      `caat`）与 `numa-flow-interval-sec`，用 `nf_strategy_build()` 把对应的
      原子操作 DAG 登记为 `default` 工作流条目——不需要手动 `NUMA FLOW LOAD`
@@ -83,7 +83,7 @@ direct（`numa_alloc_onnode()`）→ 写入 16 字节 `numa_alloc_prefix_t` 前�
 ## 6.5 场景：运行时切换迁移策略
 
 `redis-cli NUMA FLOW DEFAULT composite_lru` → `numaCommand()` →
-`numa_cmd_flow()` → 在 `caat`/`composite_lru`/`tinylfu`/`noop` 四个预设名里校验
+`numa_flow_command()` → 在 `caat`/`composite_lru`/`tinylfu`/`noop` 四个预设名里校验
 参数 → `nf_strategy_build("composite_lru", ...)` 重新构造对应的原子操作 DAG →
 替换 `default` 工作流条目当前挂载的图 → 返回 `OK`，无需重启进程，下一次
 `numa_flow_cron()` 触发时就会跑新策略。加载自定义 DAG（GUI 编排导出的 JSON）走
@@ -95,7 +95,9 @@ direct（`numa_alloc_onnode()`）→ 写入 16 字节 `numa_alloc_prefix_t` 前�
 ## 6.6 场景：压力权重更新（服务于分配决策）
 
 `serverCron()` 每秒调用 `numa_config_update_pressure_weights()`：对每个节点读
-`numaGetNodePressure()`（`/sys/.../meminfo`），换算成权重后 `atomicSet` 写入
+共享的权威取值函数 `numa_bw_get_node_pressure()`（`src/numa_bw_monitor.c`——
+maxmemory 配额相对值和 sysfs `/sys/.../meminfo` 兜底两种算法，1 秒缓存；
+`evict_numa` 也读同一个函数，见 6.6.1），换算成权重后 `atomicSet` 写入
 `pressure_weights[]`；下一次 `zmalloc` 时 `numa_config_get_best_node()` 用
 `atomicGet` 读取这份权重，影响分配目标的选择——这是一条纯只读/原子操作的路径，
 不需要加锁。
