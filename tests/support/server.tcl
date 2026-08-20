@@ -286,7 +286,15 @@ proc spawn_server {config_file stdout stderr args} {
         # ASAN_OPTIONS environment variable is for address sanitizer. If a test
         # tries to allocate huge memory area and expects allocator to return
         # NULL, address sanitizer throws an error without this setting.
-        set pid [exec /usr/bin/env ASAN_OPTIONS=allocator_may_return_null=1 {*}$cmd >> $stdout 2>> $stderr &]
+        # detect_leaks=0: Redis never tears down the global Lua interpreter
+        # state before exit (nor should it - freeing it on every shutdown
+        # would be pure overhead for a no-op), so LeakSanitizer always
+        # reports the same fixed set of "leaked" allocations from
+        # lua_newstate/luaM_realloc_/strbuf_init on every single server
+        # instance the test suite starts. That's expected process-lifetime
+        # state, not a bug - only actual memory corruption (still caught by
+        # AddressSanitizer itself) should fail a test.
+        set pid [exec /usr/bin/env ASAN_OPTIONS=allocator_may_return_null=1:detect_leaks=0 {*}$cmd >> $stdout 2>> $stderr &]
     }
 
     if {$::wait_server} {
