@@ -7,7 +7,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
     - name: install dependencies
       run: sudo apt-get update && sudo apt-get install -y libnuma-dev tcl8.6 tclx
     - name: make
@@ -30,7 +30,7 @@ jobs:
   sanitizer-address:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
       - name: install dependencies
         run: sudo apt-get update && sudo apt-get install -y libnuma-dev tcl8.6 tclx
       - name: make
@@ -46,7 +46,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
     - name: build + test
       run: |
         cd numaflow
