@@ -41,8 +41,9 @@ CI's stricter settings before.
 - `src/object.c`: a duplicated comment-opener line before
   `trimStringObjectIfNeeded()` (two consecutive `/* Optimize the SDS
   string...` lines) — a merge/edit artifact, not a real doc change.
-- `src/server.c`: fixed a typo in a client-facing error string
-  (`"interract"` → `"interact"`) that made one of the two `CLIENT_SLAVE`
+- `src/server.c`: fixed a doubled-letter typo in a client-facing error
+  string (an extra "r" in the word "interact") that made one of the two
+  `CLIENT_SLAVE`
   rejection call sites inconsistent with the other (and with
   `tests/integration/replication.tcl`'s log-pattern assertion, which
   already expected the correct spelling).

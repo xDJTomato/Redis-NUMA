@@ -34,8 +34,8 @@
 - `src/object.c`：`trimStringObjectIfNeeded()` 前面有一行重复的注释起始行（连续两行
   `/* Optimize the SDS string...`）——是一次合并/编辑留下的痕迹，不是有意的文档
   改动。
-- `src/server.c`：修复了一处面向客户端错误字符串里的拼写错误
-  （`"interract"` → `"interact"`），这个笔误让两处 `CLIENT_SLAVE` 拒绝调用点的文案
+- `src/server.c`：修复了一处面向客户端错误字符串里的拼写错误（"interact"
+  一词多打了一个 "r"），这个笔误让两处 `CLIENT_SLAVE` 拒绝调用点的文案
   彼此不一致（也和 `tests/integration/replication.tcl` 里已经按正确拼写写好的日志
   匹配断言不一致）。
 - `tests/unit/test_numa_command.sh`：把循环变量 `strat` 改名为 `strategy_name`
