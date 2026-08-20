@@ -9,7 +9,14 @@
 #include <string.h>
 
 /* ---- tiny string->int map (key -> original node) ------------------------ */
-typedef struct { size_t cap; char **keys; int *vals; } kn_map_t;
+/* NOTE: this table auto-resizes (see kn_put) - it used to be a fixed-capacity
+ * table sized once at kn_init() with no resize logic, so any caller that
+ * enumerated more items than that initial guess would fill every slot and
+ * kn_put's linear-probe loop (`while (m->keys[i]) i++`) would spin forever
+ * with no empty slot left to find. That was never hit before because
+ * nothing previously enumerated more than kn_init()'s hardcoded capacity
+ * through this path at once. */
+typedef struct { size_t cap; size_t count; char **keys; int *vals; } kn_map_t;
 static uint64_t kn_hash(const char *s) {
     uint64_t h = UINT64_C(0xcbf29ce484222325);
     for (; *s; s++) { h ^= (uint8_t)*s; h *= UINT64_C(0x100000001b3); }
@@ -17,6 +24,7 @@ static uint64_t kn_hash(const char *s) {
 }
 static void kn_init(kn_map_t *m, size_t cap) {
     m->cap = cap * 2 + 1;
+    m->count = 0;
     m->keys = (char **)calloc(m->cap, sizeof(char *));
     m->vals = (int *)calloc(m->cap, sizeof(int));
 }
@@ -24,10 +32,31 @@ static void kn_free(kn_map_t *m) {
     for (size_t i = 0; i < m->cap; i++) free(m->keys[i]);
     free(m->keys); free(m->vals);
 }
+static void kn_grow(kn_map_t *m) {
+    size_t old_cap = m->cap;
+    char **old_keys = m->keys;
+    int *old_vals = m->vals;
+    m->cap = old_cap * 2;
+    m->keys = (char **)calloc(m->cap, sizeof(char *));
+    m->vals = (int *)calloc(m->cap, sizeof(int));
+    for (size_t i = 0; i < old_cap; i++) {
+        if (!old_keys[i]) continue;
+        size_t j = kn_hash(old_keys[i]) % m->cap;
+        while (m->keys[j]) j = (j + 1) % m->cap;
+        m->keys[j] = old_keys[i];
+        m->vals[j] = old_vals[i];
+    }
+    free(old_keys);
+    free(old_vals);
+}
 static void kn_put(kn_map_t *m, const char *k, int v) {
+    /* keep the load factor under ~70% so linear probing stays cheap and a
+     * free slot is always guaranteed to exist */
+    if ((m->count + 1) * 10 >= m->cap * 7) kn_grow(m);
     size_t i = kn_hash(k) % m->cap;
     while (m->keys[i]) i = (i + 1) % m->cap;
     m->keys[i] = strdup(k); m->vals[i] = v;
+    m->count++;
 }
 static int kn_get(kn_map_t *m, const char *k, int *found) {
     size_t i = kn_hash(k) % m->cap;

@@ -92,43 +92,63 @@ LRANGE_600: 18,146 req/s
 纯 C11 的 NUMAflow 评测框架（numaflow/），在可移植 libnuma 仿真拓扑上复现同一条
 访问轨迹，公平比较各调度策略。DRAM 容量约束为工作集约 50%，迫使策略做取舍。
 
-zipf / 3000 keys / 120000 访问 / budget=256 / 2 节点（dram0 + cxl1）:
+以下数字对应仓库的单一入口 `run_full_validation.sh` 自动生成并提交的
+`results/bench_*.json`/`results/report.html`（测试时间: 2026-08-20，见
+docs/new/09-architecture-decisions.md ADR-10）：
 
-  策略             | 本地命中率 | 净代价(ns) | 迁移次数
-  ----------------|-----------|-----------|--------
-  Baseline (noop) | 0.0%      | 305.0M    | 0
-  Composite LRU   | 81.2%     | 134.5M    | 2187
-  TinyLFU         | 79.3%     | 105.9M    | 832
-  CAAT（新默认）  | 91.0%     | 84.8M     | 2310
+20000 keys / 200000 访问 / epoch=5000 / budget=64 / 2 节点（dram0 + cxl1），
+四个工作负载全量对比：
 
-结论: CAAT 净代价比最佳基线（TinyLFU）低约 20%，比 Composite LRU 低约 37%；
-      它通过「晋升 + 降级」在容量约束下维持 DRAM 最优驻留，是新的默认策略。
+  工作负载  | 策略           | 本地命中率 | 净代价(ns) | 迁移次数
+  ---------|----------------|-----------|-----------|--------
+  zipf     | Baseline(noop) |   0.0%    | 504.9M    | 0
+  zipf     | Composite LRU  |  65.8%    | 238.3M    | 3161
+  zipf     | TinyLFU        |  65.8%    | 228.1M    | 1058
+  zipf     | CAAT（默认）   |  84.5%    | 183.7M    | 13521
+  hotspot  | Baseline(noop) |   0.0%    | 456.1M    | 0
+  hotspot  | Composite LRU  |  56.1%    | 250.6M    | 4453
+  hotspot  | TinyLFU        |  36.1%    | 326.9M    | 2586
+  hotspot  | CAAT（默认）   |  76.1%    | 185.4M    | 10321
+  uniform  | Baseline(noop) |   0.0%    | 467.7M    | 0
+  uniform  | Composite LRU  |  19.7%    | 408.8M    | 7826
+  uniform  | TinyLFU        |  13.6%    | 424.4M    | 4060
+  uniform  | CAAT（默认）   |  18.0%    | 388.5M    | 4117
+  temporal | Baseline(noop) |   0.0%    | 480.5M    | 0
+  temporal | Composite LRU  |  23.3%    | 394.0M    | 3132
+  temporal | TinyLFU        |  19.4%    | 407.4M    | 3578
+  temporal | CAAT（默认）   |  48.9%    | 307.8M    | 9613
 
-订正（本次新增，测试时间: 2026-08-19，见 docs/new/09-architecture-decisions.md
-ADR-09）: 上表数字已用修复过两个 bug 之后的二进制重新生成（此前一版数字
-——命中率 91.1%、迁移次数 2422——出自还带有其中一个 bug 的中间状态，另有一版
-更早提交到 results/bench_zipf.json 的数字命中率只有 84.6%，出自两个 bug 都还
-在的状态）。这两个 bug 是：① NUMAflow 桥接（src/numa_flow.c）从未真正调用过
-`nf_tracker_observe()`，导致 TinyLFU/CAAT 依赖的频率估计在真实 Redis 路径下恒
-为 0；② CAAT 旧版是单条线性 DAG 链，降级阶段的变更会被紧跟着的晋升阶段过滤器
-丢弃出图的终止节点，导致该次降级从未真正传给宿主执行。两者均已修复并有独立
-harness 验证（细节见 ADR-09）。
+  工作负载  | CAAT vs Composite LRU | CAAT vs TinyLFU
+  ---------|------------------------|-------------------
+  zipf     | 净代价低 22.9%（更优） | 净代价低 19.5%（更优）
+  hotspot  | 净代价低 26.0%（更优） | 净代价低 43.3%（更优）
+  uniform  | 净代价低  5.0%（更优） | 净代价低  8.5%（更优）
+  temporal | 净代价低 21.9%（更优） | 净代价低 24.5%（更优）
 
-**重要补充**：CAAT 相对 Composite LRU/TinyLFU 的优势是**工作负载依赖**的，不是
-全面成立的。用仓库自带的四个基准工作负载全量复测：
+结论: 在 budget=64（相对 20000 key 的紧约束比例）下，CAAT 在全部四个工作负载
+上净代价都低于 Composite LRU 和 TinyLFU，包括之前认为它会更差的 uniform 负载。
 
-  工作负载  | CAAT vs Composite LRU | CAAT vs TinyLFU | CAAT 本地命中率
-  ---------|------------------------|-------------------|------------------
-  zipf     | 净代价低 36.9%（更优） | 净代价低 19.9%（更优） | 91.0%
-  hotspot  | 净代价低 39.5%（更优） | 净代价低 16.4%（更优） | 89.6%
-  uniform  | 净代价高 31.1%（更差） | 净代价低 12.2%（更优） | 49.0%
-  temporal | 净代价高 3.3%（更差）  | 净代价低 16.4%（更优） | 57.3%
+**重要补充（budget/keyspace 比例会反转这个结论，不是无条件成立）**：换一组更
+宽松的参数（3000 keys / 120000 访问 / epoch=3000 / **budget=256**，即预算相对
+key 数量的比例从 64/20000≈0.32% 放宽到 256/3000≈8.5%）复测，CAAT 在 uniform
+负载上反而比 Composite LRU 净代价高 31.1%、在 temporal 上打平（高 3.3%），只有
+在 zipf/hotspot 这类有明显冷热分层的负载上才稳定更优（细节见
+docs/new/09-architecture-decisions.md ADR-09 的完整四工作负载对比表）。原因：
+`demote_cold` 会主动把"冷"数据搬离 DRAM，budget 越宽松，这个动作在没有真正
+冷热差异的负载（uniform）下就越容易变成纯粹浪费的迁移开销；budget 收紧后这个
+副作用被自然限流，CAAT 的"晋升+降级统一净收益决策"优势就重新占上风。ADR-08 把
+CAAT 设为内核默认这个决策本身不需要撤销（真实 Redis 场景的迁移预算通常远小于
+键空间规模，接近本节的 budget=64 场景），但引用"CAAT 更优"时应注明参数比例，
+不是无条件成立于任意 budget/keyspace 组合。
 
-CAAT 在有明显冷热分层的负载（zipf/hotspot）上明显更优，但在访问接近均匀分布、
-没有真正"冷"数据的 uniform 负载上反而更差——`demote_cold` 主动搬走"冷"数据这个
-动作，在没有真正冷热差异时变成纯粹的迁移开销浪费。ADR-08 把 CAAT 设为内核默认
-这个决策本身不需要撤销（真实 Redis 场景的访问分布多数偏态，接近 zipf/hotspot），
-但引用"CAAT 更优"时应注明是在哪类工作负载下更优，不是无条件成立。
+订正历史（见 ADR-09/ADR-10 的完整诊断过程）：这组数字此前经历过三个不同的错误
+状态——① 最初两个 bug 都在时命中率只有 84.6%；② 只修复"频率信号从未写入"这一个
+bug 后命中率到 91.1%、但 CAAT 的降级路径其实从未真正生效过（详见 ADR-09）；
+③ 本节数字对应的版本同时修好了这两个 bug，并且额外发现并修复了一个会导致
+NUMAflow Redis 桥接彻底挂死的严重 bug（`nf_bridge_run` 内部查找表容量硬编码
+且不扩容，真实规模下会死循环，见 ADR-10）——这也是为什么本次改用
+`run_full_validation.sh` 自带的、贴近真实使用场景的百万级 YCSB 端到端基准来
+交叉验证，而不只依赖 numaflow 自己的合成评测。
 
 复现:  cd numaflow && make && make bench && make report   # 生成 results/report.html
        cd numaflow && make test             # 全部单元/冒烟/桥接测试

@@ -193,11 +193,7 @@ check_prerequisites() {
     fi
 
     if command -v python3 &>/dev/null; then
-        if python3 -c "import matplotlib" 2>/dev/null; then
-            log_ok "python3 + matplotlib 可用"
-        else
-            log_warn "matplotlib 未安装，可视化将被跳过"
-        fi
+        log_ok "python3 可用（可视化依赖会自动安装到 .venv）"
     else
         log_warn "python3 未安装，可视化将被跳过"
     fi

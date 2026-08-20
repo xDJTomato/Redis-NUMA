@@ -342,3 +342,140 @@ temporal 负载上两者基本打平（CAAT 略差 3.3%）。
 访问接近均匀分布时反而更差"。`results/report.html` 和 `results/bench_*.json`
 已用修复后的二进制重新生成并提交；ADR-04 引用这组数字时应注明工作负载依赖性，
 不要再引用未注明工作负载的单一百分比。
+
+**追加发现（ADR-10 之后，用 `run_full_validation.sh` 自带的 20000 key /
+budget=64 参数复测才发现）**：上面"uniform 负载下 CAAT 更差"这个结论本身还有
+一层没写全的前提——它只在 budget 相对 keyspace 比较宽松时成立（本节用的是
+256/3000≈8.5%）。换成 `run_full_validation.sh` 的标准参数（20000 key /
+budget=64，比例≈0.32%，更接近真实 Redis 场景里"迁移预算远小于键空间规模"的
+情况）复测，CAAT 在全部四个工作负载（包括 uniform）上净代价都低于 Composite
+LRU/TinyLFU，见 `docs/test/benchmark_results.txt` 第 8 节的完整数字。原因：
+budget 越宽松，`demote_cold` 主动搬离"冷"数据这个动作在没有真正冷热差异的
+uniform 负载下就越容易变成纯粹浪费的迁移开销；budget 收紧后这个副作用被自然
+限流。所以完整结论应该是"CAAT 在访问分布有明显冷热分层、或迁移预算相对键空间
+偏紧时更优；只有在访问接近均匀分布**且**迁移预算相对键空间又比较宽松这两个
+条件同时成立时，才会不如更简单的 Composite LRU"——不是单一维度的"workload
+dependent"，是 workload 和 budget/keyspace 比例两个维度共同决定的。
+
+## ADR-10：为什么真实规模测试（而不是命令层 smoke test）是必需的 —— 一个真正的
+## 死循环，此前从未被触发过
+
+**问题**：ADR-09 修完两个 bug 后，`NUMA FLOW` 的命令分发、`NUMA FLOW DEFAULT`
+切换、小规模 smoke test 全部通过；这是否等于"Redis 集成路径已经可以放心使用"？
+
+**发现**：不等于。用真实的 `redis-benchmark`/YCSB 往一个跑着默认 CAAT 策略的
+Redis 实例灌入几十万到百万级别的 key 后，**服务器会在几十万 key 规模上完全失去
+响应——连 `PING` 都拿不到回复，进程持续占满一个 CPU 核心，state 一直是
+`R`（运行态，不是阻塞态）**。用 `_serverLog`/`fprintf`+`fflush` 逐节点插桩定位
+后发现：卡住的不是 DAG 的任何一个算子，而是 `numaflow/src/nf_bridge.c` 里
+`nf_bridge_run()` 内部一个不起眼的 `key -> 原始节点` 查找表（`kn_map_t`）——
+`kn_init(&map, 1024)` 把它的容量硬编码为 `1024*2+1=2049` 槽位，且 `kn_put()`
+只有线性探测（`while (m->keys[i]) i++`），**没有任何扩容逻辑**。一旦某次运行
+入队的 item 数量超过这个容量（本次触发条件正是 ADR-08 里为避免"每 tick 全表
+扫描"新增的 `NUMA_FLOW_SCAN_BATCH=4096`——批大小本身没错，但恰好超过了这个从未
+被检验过的隐藏上限），表被填满后 `kn_put` 的线性探测循环就再也找不到空槽位，
+变成一个**真正的、CPU 占满的死循环**——不是变慢，是永远不返回。这个 bug 在
+`nf_bridge_run()` 里从 NUMAflow 项目一开始就存在，此前从未被触发，原因有三：
+① Redis 集成此前是纯 opt-in（需要手动 `NUMA FLOW LOAD`），没有人在真实大数据集
+上长期跑过它；② numaflow 自己的公平评测 harness（`nf_bench.c`）走的是完全不同
+的代码路径（直接调用 `nf_exec_run`，根本不经过 `nf_bridge_run`/`kn_map_t`），
+所以 ADR-04/ADR-09 的评测数字从未受这个 bug 影响；③ 本次会话早前的验证（ADR-08
+的功能验证、ADR-09 的独立 harness 验证）用的都是几十个 item 的合成场景，远低于
+2049 这个隐藏阈值。
+
+**决策**：把 `kn_map_t` 改成正确的、会扩容的哈希表——`kn_put()` 在装载因子超过
+70% 时先 `kn_grow()`（容量翻倍并重新哈希所有已有条目）再插入，不再依赖调用方
+猜一个"足够大"的初始容量。同时保留 `NUMA_FLOW_SCAN_BATCH=4096` 的设计不变（它
+本身没有问题，问题是它第一次让代码路径吃到了超过 2049 的规模）。
+
+**验证**：修复后用 `redis-benchmark -n 1000000 -r 1000000 -t set -P 50`（约
+68 万去重后的 key）实测：1.4 秒内完成插入（~70 万 req/s），插入期间及之后
+`PING` 全程秒回，`NUMA FLOW STATUS default` 显示每个 tick 正确处理了 4096 个
+item。Redis 全量 `make test`、`numaflow` 自身的 `make test`、
+`tests/unit/test_numa_command.sh`（61/61）三者复测全部通过。
+
+**教训（写给后来者，也写给自己）**：ADR-09 当时的结论"两个 bug 已修复、经独立
+harness 验证"是真实但不完整的——**验证的规模不够**。命令层 smoke test 和几十个
+item 的合成场景能证明"逻辑走对了路径"，但不能证明"这条路径在真实数据量下不会
+撞上一个从未被检验过的容量假设"。这正是本仓库 ADR-06 那条教训（"没有冲突标记
+不代表合并正确"）的同构版本：**没有在小规模测试里报错，不代表在真实规模下没有
+错误**。这也是为什么这次刷新 `docs/test/benchmark_results.txt`/`results/*.json`
+时改用了仓库 `run_full_validation.sh` 自带的 YCSB 百万级 3 阶段基准（Fill→
+Hotspot→Sustain）而不是仅仅停留在 numaflow 自己的合成评测——真实 Redis 集成路径
+的规模验证，必须走真实的、大数据量的端到端基准，两者缺一不可。
+
+## ADR-11：迁移路径在真实双 NUMA 节点上的首次验证，发现两个零覆盖的 bug
+
+**问题**：ADR-10 修完扫描/哈希表两个 bug 后，`NUMA FLOW` 在百万级 key 规模下不再
+死循环、不再无响应；这是否等于"迁移这条路径本身是对的"？
+
+**发现**：不等于——而且此前完全无法验证，因为开发主机只有 1 个 NUMA 节点
+（`numa_pool_num_nodes()==1`），`current_node` 永远是 0，`select_dest_node` 永远
+选不出第二个候选节点，`migrations` 永远是 0。也就是说，"决策"这一半（哪些 key
+该迁移）此前每次都测过，但"执行"这一半（真的把数据挪到另一个节点）**从 ADR-08
+把三策略收敛进 NUMAflow 以来，从未被真正跑过一次**。用
+`tests/vm/boot_numa_vm.sh` 起一个真实的 QEMU 双 NUMA 节点 guest 后，第一次跑
+`caat`/`composite_lru`/`tinylfu`，立刻暴露两个此前零覆盖的 bug：
+
+1. **NUMAflow 驱动的迁移 100% 静默失败**（`NUMA FLOW STATUS` 显示策略正确决策了
+   几十次迁移，但 `NUMA MIGRATE STATS` 的 `successful_migrations` 恒为 0）。根因：
+   `numa_migrate_key_by_name()`（`src/numa_key_migrate.c`）内部直接
+   `dictFind(db->dict, keyname)`，而 `db->dict` 用 SDS 键——`dictSdsHash()`/
+   `dictSdsKeyCompare()` 都会对**查找键**调用 `sdslen()`。NUMAflow 桥接
+   （`src/numa_flow.c` 的 `numa_flow_apply`）传的是 `nf_item_t.key`，一个普通
+   `char[]` 而非 SDS，`sdslen()` 把指针前面的字节当 SDS header 读出垃圾长度，
+   于是每次查找必然 miss（而且是一次越界读）。旧接口签名是
+   `const char *keyname`，"必须传 SDS"这个契约只写在头文件注释里，签名本身没有
+   任何强制，把这个陷阱完全隐藏了。
+2. **`composite_lru` 预设永远不迁移任何数据**（`caat`/`tinylfu` 不受影响）。
+   `src/numa_flow.c` 把 `br.ctx.tick` 设成完整的 24 位 `server.lruclock`
+   （当时约 860 万），而 `nf_item_t.recency` 来自 zmalloc 前缀的 **uint16_t**
+   `last_access`（只有低 16 位）。DAG 里所有 `idle = ctx->tick - it.recency` 的
+   计算（`op_score_hotness`/`op_decay_hotness`）因此都得到数百万秒的"空闲时长"，
+   `nf_staircase_decay()` 恒定返回最大衰减值，hotness 被永久压到最低档，被
+   `filter_hot threshold=5` 全部滤除。`caat`/`tinylfu` 用 CMS 频率而非 hotness
+   做门控，所以只有 `composite_lru` 表现异常——这也是本次调查最初的线索。
+
+**决策**：
+- 新增 `numa_key_migrate_dict_find()`，在函数内部用 `sdsnew(keyname)` 归一化后再
+  查找、再释放，让 `numa_migrate_key_by_name()` 同时接受真实 SDS 和普通 C
+  字符串两种调用方，而不是要求调用方自己记住这个约定。
+- 把 `br.ctx.tick` 截断到 16 位（`server.lruclock & 0xFFFF`）以匹配
+  `nf_item_t.recency` 的实际精度。
+
+**验证**：新增 `tests/vm/placement_quality.sh`，在 QEMU 双节点 guest 内部对每个
+策略做同一套确定性实验——写 400 个 key，只对前 40 个（"热" key）打 8000 次 GET，
+静置后统计"热 key 是否驻留在本地节点"、"冷 key 是否被挪离本地节点"、以及实际迁移
+次数。之所以测这两个比例而不是吞吐/延迟：QEMU 的两个 `-numa node` 背后是同一块
+宿主机 DRAM，没有真实的跨节点延迟差，测不出迁移的性能收益；但"策略把数据放在哪"
+是可以直接观测、不依赖任何延迟建模、且跨策略可比的信号——"迁移收益 = 放置质量
+× 节点延迟差"，这里只测第一个因子。修复前后对比：
+
+```
+                        修复前              修复后
+successful_migrations   0                   50
+composite_lru 迁移次数   0（全部策略都是 0）  17
+
+修复后四策略对比：
+noop           hot_local= 21/40  ( 52.5%)  cold_off=131/360 ( 36.4%)  migrations=0
+composite_lru  hot_local= 40/40  (100.0%)  cold_off=157/360 ( 43.6%)  migrations=17
+tinylfu        hot_local= 40/40  (100.0%)  cold_off=146/360 ( 40.6%)  migrations=11
+caat           hot_local= 40/40  (100.0%)  cold_off=360/360 (100.0%)  migrations=40
+```
+
+三个真实迁移策略都能把 100% 的热 key 留在本地节点；但只有 CAAT 同时把 100% 的冷
+key 挪离本地节点——`composite_lru`/`tinylfu` 在这套引擎里只做"促升"（promote）、
+不做"降级"（demote），这与 ADR-04 当初的评测结论（CAAT 是三者中唯一同时执行
+promote 和 demote 的策略）在真实硬件上首次得到独立验证，而不只是 numaflow 自己
+合成评测里的数字。修复后复测 Redis 全量 `make test`、
+`tests/unit/test_numa_command.sh`（61/61）、`numaflow` 自身 `make test`，三者
+全部通过。
+
+**教训**：这是 ADR-10 那条教训的又一次同构重现——**这次缺的不是"规模"，是
+"节点数"**。开发主机长期只有 1 个 NUMA 节点，意味着"决策"和"执行"两个阶段里，
+执行阶段（真实跨节点搬移数据）从这套统一框架存在以来从未被跑过一次，无论此前
+的测试规模多大、覆盖率看起来多完整。`numa_pool_num_nodes()==1` 时
+`migrations` 恒为 0 不是"通过"，是"这条路径没有被执行"——这两者在测试报告里
+长得一样，但含义完全不同。这也解释了为什么这两个 bug 能在一次消费了 ADR-08/09/10
+全部修复的干净代码上，仍然是首次出现：它们只在"迁移真的会发生"时才会被触发，而
+"迁移真的会发生"本身需要 ≥2 个 NUMA 节点这个此前从未满足过的前提条件。

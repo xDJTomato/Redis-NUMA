@@ -63,7 +63,7 @@ ENABLE_LOCALITY_STATS=true
 ENABLE_TINYLFU=false
 DISABLE_MIGRATION=false
 ENABLE_CAAT=false
-PROCESS_NUMA_NODES="0,2"
+PROCESS_NUMA_NODES="auto"
 
 # Phase 参数
 PHASE1_RECORDS=1000000
@@ -306,10 +306,23 @@ start_redis() {
     pkill -f "redis-server.*:${REDIS_PORT}" 2>/dev/null || true
     sleep 1
 
-    # 将整个 Redis 进程限制在 Node 0/2 的 CPU 和内存节点上，应用层策略仍可在 0/2 间选择。
+    # 将整个 Redis 进程限制在指定 NUMA 节点的 CPU 和内存节点上，应用层策略仍可在
+    # 这些节点间选择。默认 (auto) 会探测实际可用节点数：<=2 个节点时用 "all"
+    # （无法有意义地做 0/2 这种跨节点绑定），>=3 个节点时才用 0,2（保留原有的
+    # "程序只用第 0/2 号节点，中间节点留给操作系统/其他进程"这个多节点场景默认值）。
     local -a numa_cmd=()
     if command -v numactl &>/dev/null; then
+        local numa_node_count
+        numa_node_count=$(( $(numactl --hardware 2>/dev/null | grep -c 'available:') > 0 ? $(numactl --hardware 2>/dev/null | sed -n 's/available: \([0-9]*\) nodes.*/\1/p') : 1 ))
         log "[DEBUG] 可用 NUMA 节点: $(numactl --hardware 2>/dev/null | grep 'available:' || echo '无法获取')"
+        if [[ "$PROCESS_NUMA_NODES" == "auto" ]]; then
+            if [[ "$numa_node_count" -le 2 ]]; then
+                PROCESS_NUMA_NODES="all"
+                log "自动探测到 $numa_node_count 个 NUMA 节点，--process-nodes 默认改为 all"
+            else
+                PROCESS_NUMA_NODES="0,2"
+            fi
+        fi
         if [[ "$PROCESS_NUMA_NODES" == "all" ]]; then
             log "未限制 Redis 进程 NUMA 节点 (--process-nodes all)"
         else

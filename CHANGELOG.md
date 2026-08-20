@@ -5,6 +5,78 @@
 All notable changes to this fork are documented here, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — 迁移路径在真实双 NUMA 节点上的首次验证（ADR-11）
+
+在 QEMU 双 NUMA 节点 guest（`tests/vm/boot_numa_vm.sh`）里第一次真正执行迁移路径，
+立刻暴露两个此前完全无法被发现的 bug——开发主机只有 1 个 NUMA 节点，
+`numa_pool_num_nodes()==1` 导致 `migrations` 恒为 0，整条执行路径零覆盖。
+
+### Fixed
+
+- **NUMAflow 驱动的迁移 100% 静默失败**（`applied=0`，尽管策略正确决策了几十次
+  迁移）。`numa_migrate_key_by_name()` 内部做 `dictFind(db->dict, keyname)`，而
+  `db->dict` 用 SDS 键——`dictSdsHash()` 和 `dictSdsKeyCompare()` 都会对**查找键**
+  调用 `sdslen()`。NUMAflow 桥接（`src/numa_flow.c` 的 `numa_flow_apply`）传的是
+  `nf_item_t.key`，一个普通 `char[]`，于是 `sdslen()` 把指针**前面**的字节当 SDS
+  头读出垃圾长度，每次查找必然 miss（而且是越界读）。原契约"必须传 SDS"只写在
+  头文件注释里，而签名是 `const char *`，把这个陷阱完全隐藏了。修复：新增
+  `numa_key_migrate_dict_find()` 在函数内部归一化，两种形式都安全。
+  实测：修复前 `successful_migrations=0`，修复后 `=50`。
+- **`composite_lru` 预设永远不迁移任何数据**（迁移次数恒为 0）。
+  `src/numa_flow.c` 把 `br.ctx.tick` 设成完整的 24 位 `server.lruclock`（当前约
+  860 万），而 `nf_item_t.recency` 来自 zmalloc 前缀的 **uint16_t** `last_access`
+  （只有低 16 位，0–65535）。于是 DAG 里所有 `idle = ctx->tick - it.recency`
+  的计算（`op_score_hotness` / `op_decay_hotness`）都得到数百万秒的空闲时间，
+  `nf_staircase_decay()` 恒定返回最大衰减值，hotness 被永久压到 3，被
+  `filter_hot threshold=5` 全部滤除。`caat`/`tinylfu` 不受影响，因为它们用 CMS
+  频率而非 hotness 做门控——这也解释了为什么只有 composite_lru 表现异常。
+  修复：把 `ctx.tick` 截断到 16 位以匹配前缀精度。
+
+### Added
+
+- `tests/vm/placement_quality.sh` — 在真实双节点 guest 里测量**放置质量**的对比
+  脚本。测的不是吞吐/延迟（QEMU 的两个 `-numa node` 背后是同一块宿主机 DRAM，
+  没有真实延迟差，测不出迁移收益），而是策略把数据放在哪：`hot_local_ratio`
+  （热 key 驻留本地节点比例）、`cold_off_ratio`（冷 key 被挪离本地节点比例）、
+  实际迁移次数。这个指标不依赖任何延迟建模，跨策略可比。
+
+## [Unreleased] — NUMAflow bridge scalability fixes (ADR-10)
+
+### Fixed
+
+- **`numa_flow_cron()` did a full, uncapped `dictGetSafeIterator()` walk of
+  the entire keyspace every tick** (`numa-flow-interval-sec`, default 1s).
+  With a multi-hundred-thousand-key dataset this turned every tick into an
+  O(keyspace size) synchronous scan blocking Redis's single command-processing
+  thread — the server became unresponsive to a plain `PING` for minutes.
+  This was always latent in the bridge design but never triggered before
+  ADR-08 made NUMAflow auto-load and run by default (previously opt-in only,
+  so nobody ran it against a real, large keyspace). Fixed by switching to a
+  bounded, resumable scan: `dictScan()` (the same primitive behind the
+  `SCAN` command) accumulates up to `NUMA_FLOW_SCAN_BATCH` (4096) keys per
+  tick and persists its cursor on the workflow entry, so a full pass over
+  the keyspace is spread across many ticks instead of done all at once —
+  mirroring the "progressive dictionary scan" the retired native
+  composite_lru module used for exactly this reason.
+- **A real, CPU-pegging infinite loop** in `numaflow/src/nf_bridge.c`'s
+  internal `kn_map_t` (key -> original-node lookup table used to diff
+  enumerate-time state against the DAG's final result). `kn_init()`
+  hardcoded its capacity to ~2049 slots with no resize logic; `kn_put()`'s
+  linear-probe insert loop (`while (m->keys[i]) i++`) never terminates once
+  the table fills, since there is no empty slot left to find. The scan fix
+  above (4096 keys/tick) was the first thing to ever push a real call
+  through this path above that hidden 2049-slot ceiling — this bug predates
+  this session entirely but was never triggered (numaflow's own benchmark
+  harness, `nf_bench.c`, calls the DAG executor directly and never goes
+  through this table at all). Fixed by making `kn_map_t` a proper
+  auto-resizing hash table (doubles + rehashes at 70% load factor).
+  Verified at ~700k-1M keys via `redis-benchmark`: healthy throughput
+  (~700k req/s), `PING` responsive throughout and after, full Redis
+  `make test`, numaflow's own test suite, and `test_numa_command.sh` all
+  still pass. See ADR-10 in `docs/new/09-architecture-decisions.md` for the
+  full diagnosis, including why the prior session's bug-fix verification
+  (correct but small-scale) wasn't sufficient to catch this.
+
 ## [Unreleased] — NUMA migration-strategy consolidation (ADR-08)
 
 ### Changed (breaking)

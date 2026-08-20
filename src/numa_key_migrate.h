@@ -93,7 +93,9 @@ void numa_key_migrate_cleanup(void);
 /* Single-key migration: migrate the given key to the target node. */
 int numa_migrate_single_key(redisDb *db, robj *key, int target_node);
 
-/* Migrate by key name (SDS): used by the composite_lru candidate pool. */
+/* Migrate by key name. `keyname` may be either a real SDS or a plain
+ * NUL-terminated C string - the lookup normalises it internally (see
+ * numa_key_migrate_dict_find in the .c for why that matters). */
 int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node);
 
 /* Get the representative data allocation base address of an object, used for locality stats and migration dedup. */

@@ -19,6 +19,19 @@
 
 #define NUMA_FLOW_MAX_LOADED 16
 #define NUMA_FLOW_DEFAULT_NAME "default"
+/* Upper bound on how many keys a single numa_flow_cron() tick will enumerate
+ * and run through the DAG. Without this, a full dictGetSafeIterator() walk
+ * of the whole keyspace every tick (numa-flow-interval-sec, default 1s)
+ * turns into an O(keyspace size) synchronous scan blocking Redis's single
+ * command-processing thread - with a multi-million-key dataset this made
+ * the server unresponsive to a plain PING for minutes. Bounding the batch
+ * and resuming from a persisted dictScan() cursor each tick (the same
+ * primitive the SCAN command uses) spreads a full-keyspace pass over many
+ * ticks instead of doing it all at once, mirroring the "progressive
+ * dictionary scan" design the retired native composite_lru module used for
+ * exactly this reason (see ADR-08/ADR-09 in
+ * docs/new/09-architecture-decisions.md). */
+#define NUMA_FLOW_SCAN_BATCH 4096
 
 /* ---- per-workflow runtime state ----------------------------------------- */
 typedef struct {
@@ -32,6 +45,7 @@ typedef struct {
     nf_adapt_t      adapt;
     nf_adapt_mode_t mode;
     nf_bridge_result_t last;
+    unsigned long   scan_cursor;       /* dictScan() resume point, progressive scan */
 } numa_flow_entry_t;
 
 /* ---- bridge global state ------------------------------------------------ */
@@ -44,12 +58,28 @@ static int g_initialized = 0;
 static redisDb *g_db = NULL;
 
 /* ---- bridge callbacks (implement nf_bridge_t) --------------------------- */
-typedef struct { redisDb *db; dictIterator *iter; } numa_flow_iter_t;
+/* Pre-collected, bounded batch of dict entries for one numa_flow_run_entry()
+ * tick (see NUMA_FLOW_SCAN_BATCH above). Populated by a dictScan() pass
+ * before the DAG runs, then popped one at a time by numa_flow_enumerate() -
+ * this keeps the nf_bridge_t enumerate() pull-callback contract while
+ * bounding total work per tick regardless of keyspace size. */
+typedef struct {
+    redisDb    *db;
+    dictEntry  *batch[NUMA_FLOW_SCAN_BATCH];
+    int         count;
+    int         pos;
+} numa_flow_iter_t;
+
+static void numa_flow_scan_collect(void *privdata, const dictEntry *de) {
+    numa_flow_iter_t *it = (numa_flow_iter_t *)privdata;
+    if (it->count < NUMA_FLOW_SCAN_BATCH)
+        it->batch[it->count++] = (dictEntry *)de;
+}
 
 static int numa_flow_enumerate(void *ud, nf_item_t *out) {
     numa_flow_iter_t *it = (numa_flow_iter_t *)ud;
-    dictEntry *de = dictNext(it->iter);
-    if (!de) return 1;   /* end of keyspace */
+    if (it->pos >= it->count) return 1;   /* end of this tick's batch */
+    dictEntry *de = it->batch[it->pos++];
     /* Redis db dict keys are SDS strings, not robj objects.  Treat them as
      * SDS directly and derive NUMA telemetry from the value allocation, which
      * is the only pointer with a NUMA prefix in this path. */
@@ -80,7 +110,21 @@ static int numa_flow_apply(void *ud, const char *key, int target) {
 static int numa_flow_run_entry(numa_flow_entry_t *e) {
     numa_flow_iter_t iter;
     iter.db = g_db;
-    iter.iter = dictGetSafeIterator(g_db->dict);
+    iter.count = 0;
+    iter.pos = 0;
+
+    /* Bounded, resumable full-keyspace scan: dictScan() (the same primitive
+     * behind the SCAN command) visits a handful of hash-table buckets per
+     * call and returns a cursor to resume from - safe across concurrent
+     * inserts/deletes/rehashing between calls. Loop it until this tick's
+     * batch is full or a full scan cycle completes (cursor back to 0), and
+     * persist the cursor on the entry so the next tick picks up where this
+     * one left off instead of starting over. */
+    unsigned long cursor = e->scan_cursor;
+    do {
+        cursor = dictScan(g_db->dict, cursor, numa_flow_scan_collect, &iter);
+    } while (cursor != 0 && iter.count < NUMA_FLOW_SCAN_BATCH);
+    e->scan_cursor = cursor;
 
     nf_bridge_t br; memset(&br, 0, sizeof(br));
     br.enumerate = numa_flow_enumerate;
@@ -92,11 +136,20 @@ static int numa_flow_run_entry(numa_flow_entry_t *e) {
     br.ctx.tracker = &g_tracker;
     br.ctx.budget = 256;
     br.ctx.rng = nf_rng_seed(e->runs + 1);
-    br.ctx.tick = (uint64_t)server.lruclock;
+    /* Truncate to 16 bits to match nf_item_t.recency, which comes from the
+     * zmalloc prefix's uint16_t last_access field (numa_get_last_access()).
+     * Passing the full 24-bit server.lruclock here made every idle
+     * computation in the DAG (idle = ctx->tick - it.recency, e.g. in
+     * op_score_hotness / op_decay_hotness) come out in the millions of
+     * seconds, so nf_staircase_decay() always returned its maximum and
+     * hotness was permanently pinned near 0 - which silently made the
+     * composite_lru preset's `filter_hot threshold=5` stage drop every
+     * candidate and migrate nothing at all. The caat/tinylfu presets were
+     * unaffected because they gate on CMS frequency, not hotness. */
+    br.ctx.tick = (uint64_t)(server.lruclock & 0xFFFF);
     br.tracker = &g_tracker;
 
     int rc = nf_bridge_run(&br, &e->graph, &e->last);
-    dictReleaseIterator(iter.iter);
     e->runs++;
 
     /* self-adaptation: fold feedback, possibly rebuild the DAG structure */

@@ -999,6 +999,30 @@ int numa_migrate_single_key(redisDb *db, robj *key, int target_node) {
     return result;
 }
 
+/*
+ * Look a key up in db->dict from a NUL-terminated C string.
+ *
+ * db->dict uses SDS keys, and both dictSdsHash() and dictSdsKeyCompare()
+ * call sdslen() on the *lookup* key as well as on the stored one. Passing a
+ * plain C string straight to dictFind() therefore makes sdslen() read the
+ * bytes immediately in front of the pointer as an SDS header, producing a
+ * garbage length: every lookup misses, and it is an out-of-bounds read on
+ * top of that.
+ *
+ * Both forms reach numa_migrate_key_by_name() legitimately -
+ * numa_migrate_entire_database() passes a real sds from dictGetKey(), while
+ * the NUMAflow bridge (src/numa_flow.c) passes nf_item_t.key, a plain char
+ * array - so normalise here rather than relying on an invisible "must be
+ * SDS" contract that the `const char *` signature actively hides.
+ */
+static dictEntry *numa_key_migrate_dict_find(redisDb *db, const char *keyname) {
+    sds lookup = sdsnew(keyname);
+    if (!lookup) return NULL;
+    dictEntry *de = dictFind(db->dict, lookup);
+    sdsfree(lookup);
+    return de;
+}
+
 int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node) {
     if (!global_ctx.initialized || !db || !keyname) {
         KEY_MIGRATE_LOG(LL_DEBUG,
@@ -1014,7 +1038,7 @@ int numa_migrate_key_by_name(redisDb *db, const char *keyname, int target_node) 
         return NUMA_KEY_MIGRATE_EINVAL;
     }
 
-    dictEntry *de = dictFind(db->dict, keyname);
+    dictEntry *de = numa_key_migrate_dict_find(db, keyname);
     if (!de) {
         KEY_MIGRATE_LOG(LL_DEBUG,
             "[NUMA Key Migrate][debug] by-name lookup miss key=%s target=%d",
