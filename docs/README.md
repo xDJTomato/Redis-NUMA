@@ -51,7 +51,6 @@ Redis 文档（`REDIS_ORIGINAL_README.md`、`TLS.md`）也各自配有 `.zh-CN.m
   1 个 CVE cherry-pick、验证方式。
 - **`test/`** — 测试组织、YCSB 指南、历史基准结果（含 `benchmark_results.txt` 中新增的
   NUMAflow 公平评测一节）、诊断使用说明。
-- **`thesis_chapter3.md` / `thesis_chapter4.md` / `thesis_review/`** — 论文章节与修改稿。
 - **`devlog/`** — 开发日志（`zmalloc-goals.txt` 等）与原始 Redis README（`original/`）。
 
 ## 构建与测试（快速入口）

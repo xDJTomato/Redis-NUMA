@@ -57,43 +57,211 @@ numaflow/
 | emit | `emit_migrate` / `demote_cold` / `balance_nodes` | 迁移执行 / 冷数据降级 / 再平衡 |
 | track | `track_access` | 访问追踪 |
 
-### 2.1 已有策略的 DAG 分解
+### 2.1 数据从哪来：`nf_item_t` 各字段的真实来源
 
-**Composite LRU（slot 1）**：
+四个迁移预设都读写同一个 `nf_item_t`（`include/nf_common.h`），字段语义和赋值方式
+决定了每个预设实际"看到"什么信号。在 Redis 桥接（`src/numa_flow.c` 的
+`numa_flow_enumerate()`）里，这些字段并不是凭空计算的合成值，而是分别接到两条完全
+独立的真实数据管道：
 
-```text
-score_hotness → filter_hot → rank_hotness → budget_limit → select_dest_node → emit_migrate
+| 字段 | 谁写入 | 写入时机 |
+| --- | --- | --- |
+| `current_node` | `numa_get_node_id(sample)` | 每次枚举时读 zmalloc 分配前缀 |
+| `access_count` / `recency` / `hotness` | zmalloc 分配前缀（`numa_alloc_prefix_t`） | `numa_key_migrate_touch()`——**每次真实的"触达"访问**都无条件更新，不管当前有没有迁移策略在跑（见 `src/db.c`） |
+| `freq_est` | NUMAflow 自己的 CMS + Doorkeeper 追踪器（`nf_track.c`），只在 `cms_estimate` 算子里按需查询 | `numa_flow_observe_access()`——与上面**同一处**真实访问路径调用，喂给 CMS，和 zmalloc 前缀的热度计数是两套完全独立的统计（ADR-09 修复前，这条线路完全没有人调用，`freq_est` 永远是 0，TinyLFU/CAAT 因此从不迁移任何数据） |
+| `cost_benefit` | `op_score_cost_benefit`（只有 CAAT 用它） | 每次 DAG 执行时按当前 `access_count`/`freq_est` 现算，不持久化 |
+
+也就是说：Composite LRU（用 `hotness`）和 TinyLFU（用 `freq_est`）看的是**两套互不
+相通的热度信号**，即使面对完全一样的访问模式，两者对"这个 key 有多热"的判断也
+不会逐 bit 一致——这不是 bug，是刻意保留下来的、对应它们各自原始设计（阶梯式 LRU
+衰减 vs. Count-Min Sketch 频率估计）的实现差异。
+
+### 2.2 `noop`——空图基线
+
+```c
+static int build_noop(nf_graph_t *g) { (void)g; return NF_OK; }
 ```
 
-**TinyLFU（slot 2）**（每访问的 `cms_observe` 在热路径完成，批处理只读估计）：
+不添加任何节点/边。`nf_exec_run()` 对空图的行为是"什么都不做，原样返回输入"，
+所以 `noop` 下 `migrations` 恒为 0——这不是"总是不满足迁移条件"，是图里根本没有
+任何算子会检查条件。作为吞吐/延迟对比的对照组，以及验证"NUMA 分配层单独的开销"
+时的基线。
+
+### 2.3 Composite LRU——阶梯式热度衰减，只晋升不降级
 
 ```text
-cms_estimate → filter_freq → rank_frequency → budget_limit → select_dest_node → emit_migrate
+score_hotness → filter_hot(threshold=5) → rank_hotness → budget_limit(budget=512)
+              → select_dest_node → emit_migrate
 ```
 
-### 2.2 新的默认策略：CAAT（Cost-Aware Adaptive Tiering）
+逐步展开：
 
-现有策略要么只看热度（Composite LRU），要么只看频率（TinyLFU），且都**只升不降**：
-一旦 DRAM 写满就停止晋升，无法回收。CAAT 是一个完整的**晋升 + 降级**流水线，在
-两个阶段各自发生任何变更**之前**先按原始驻留位置分叉（`filter_local`/
-`filter_remote`），避免旧版单链设计里"降级已执行但未通过晋升阶段过滤条件从而
-永远不到达终止节点、导致桥接层看不到这次迁移"的 bug（见
-[ADR-09](../new/09-architecture-decisions.md)）：
+1. **`score_hotness`**：`hotness = min(access_count, 7) - staircase_decay(idle)`，
+   `idle = ctx.tick - recency`。`staircase_decay()` 是四级阶梯：空闲 <10s 不衰减，
+   [10s,60s) 衰减 1，[60s,300s) 衰减 2，[300s,1800s) 衰减 3，≥1800s（30 分钟）
+   直接清零。这是"阶梯式惰性衰减"——不需要后台定时任务逐 key 扫描衰减，只在
+   每次真正被打分的时候按空闲时长一次性算出当前该衰减多少。
+2. **`filter_hot(threshold=5)`**：只留下 `hotness >= 5` 的候选——`access_count`
+   上限是 7，所以实际能通过这个门槛的，是最近访问过、访问次数够多、且没有空闲
+   太久的 key。
+3. **`rank_hotness`**：按 `hotness` 降序稳定排序。
+4. **`budget_limit(budget=512)`**：只保留排名前 512 个候选，其余计入
+   `ctx.stats.migrations_skipped`（不是真的被拒绝迁移，是"这一轮预算不够，下一轮
+   再评估"——因为热度信号是持久化在 zmalloc 前缀里的，没通过预算的候选不会丢失
+   状态）。
+5. **`select_dest_node`**：对每个候选调用 `nf_best_node()`——遍历所有节点，选
+   `nf_numa_access_cost() × (1 + 2×pressure)` 最小、且容量够放的那个；
+   `migrate = (dst != current_node)`，**不检查 `cost_benefit` 的正负**（Composite
+   LRU 没有设 `require_benefit`）——只要不在最优节点上，且通过了热度门槛，就迁移。
+6. **`emit_migrate`**：真正执行——目标节点容量不够就跳过（计入
+   `migrations_skipped`），够就记账（`nf_numa_account_free`/`_alloc`）、累加
+   `total_cost_ns`、把 `current_node` 改成 `selected_node`。
+
+**结构性限制**：整条链里没有任何算子会把已经在 DRAM 上的 key 移出去——一个
+key 一旦被判定为"不够热"，**不会**被这条链主动降级，只是单纯不再被选中；它
+会一直占着 DRAM 直到某个更好的候选把预算用满、或者它自己的 `hotness` 掉到 5
+以下又刚好被别的路径处理掉。这也是 composite_lru 和 tinylfu 在 ADR-11 的真实
+双节点测试里 `cold_off_ratio` 提升不了的根本原因：预设本身就没有降级机制，不是
+参数没调好。
+
+### 2.4 TinyLFU——Count-Min Sketch 频率估计，同样只晋升不降级
 
 ```text
-filter_local  → score_cost_benefit → demote_cold → emit_migrate      （DRAM 驻留项：只走降级子链）
-filter_remote → cms_estimate → filter_freq → filter_benefit → rank_cost
-              → budget_limit → select_dest_node → emit_migrate       （非 DRAM 驻留项：只走晋升子链）
+cms_estimate → filter_freq(threshold=2) → rank_frequency → budget_limit(budget=512)
+             → select_dest_node → emit_migrate
 ```
 
-其核心是 `score_cost_benefit`：
+结构和 Composite LRU 几乎镜像，只是打分方式换成频率估计而不是阶梯热度：
+
+1. **`cms_estimate`**：向 `nf_track.c` 的追踪器查询这个 key 的频率估计
+   （`nf_tracker_freq()`——4 行 Count-Min Sketch，每行用不同的哈希种子映射到
+   4096 个 4-bit 计数器格子，取 4 行里的**最小值**作为估计，这是 CMS 用多行取
+   min 抑制哈希碰撞高估的标准做法）。**关键细节：CMS 写入受 Doorkeeper 布隆
+   过滤器把关**——`nf_tracker_observe()` 每次访问先查两位布隆过滤器，第一次
+   见到某个 key 只在布隆过滤器里打标记、**不**增加 CMS 计数；只有第二次及以后
+   才真正 `cms_inc()`。这意味着**只被访问过一次的 key，`freq_est` 永远是 0**，
+   不管它的 zmalloc 前缀 `access_count` 是多少。
+2. **`filter_freq(threshold=2)`**：只留下 `freq_est >= 2` 的候选——按上面的
+   Doorkeeper 语义，这实际上要求"被真正计入 CMS 的访问≥2 次"，即"至少被访问
+   过 3 次"（第 1 次被布隆过滤器吃掉，第 2、3 次才让 CMS 从 0 涨到 2）。
+3. **`rank_frequency`**：按 `freq_est` 降序排序。
+4. **`budget_limit(budget=512)` → `select_dest_node` → `emit_migrate`**：和
+   Composite LRU 完全同一套实现（同一批算子函数），差异只在上游打分/过滤用的
+   字段。
+
+**全局衰减**：`nf_tracker_t.reset_interval`（Redis 桥接里固定为 100000 次观测）
+到点后触发 `nf_tracker_decay()`——把全部 CMS 计数器右移一位（相当于减半）、清空
+Doorkeeper 布隆过滤器。观测量不到这个阈值时（例如一次性小规模基准测试），衰减
+完全不会触发，`freq_est` 只会单调上升，不会因为"过了一段时间没访问"就自动降低——
+这与 Composite LRU 的 `hotness`（会随空闲时间主动衰减）是两种不同的"冷却"哲学：
+TinyLFU 的冷却只跟"总访问量"挂钩，不跟"墙钟时间"挂钩。
+
+同样**没有降级机制**——`caat`/`tinylfu`/`composite_lru` 三者里，只有 CAAT 会主动
+把 DRAM 上的 key 挪走。
+
+### 2.5 CAAT（Cost-Aware Adaptive Tiering）——唯一同时晋升 + 降级的预设
 
 ```text
-benefit = (cost(当前节点) - cost(目标节点)) × 访问率 - 迁移代价
+                     ┌── cms_estimate → score_cost_benefit ──┐
+                     │         （对全部候选统一打分一次）        │
+                     └──────────────────┬─────────────────────┘
+                                        │  按当前驻留位置分叉
+                    ┌───────────────────┴───────────────────┐
+                    ▼                                       ▼
+        filter_local(node=0)                     filter_remote(node=0)
+        （DRAM 驻留项：降级子链）                  （非 DRAM 驻留项：晋升子链）
+                    │                                       │
+        demote_cold(threshold=1)              filter_freq(threshold=1)
+                    │                                       │
+             emit_migrate                       filter_benefit(threshold=0)
+        （终止节点 A，唯一一次变更）                          │
+                                                        rank_cost
+                                                             │
+                                              budget_limit(budget=512)
+                                                             │
+                                        select_dest_node(require_benefit=1)
+                                                             │
+                                                       emit_migrate
+                                              （终止节点 B，唯一一次变更）
 ```
 
-只有**净收益为正**的 key 才会被晋升，且按收益排序、受容量与预算双重约束；同时把
-DRAM 上不再热的 key 降级到 CXL，让 DRAM 始终保持最优驻留。
+按分叉前后拆开看：
+
+**打分阶段（分叉前，对全部候选统一执行一次）**：
+- `cms_estimate`：和 TinyLFU 用同一个算子，读同一个 Doorkeeper+CMS 追踪器，
+  语义完全一致（含"只访问过一次算 0"的门槛）。
+- `score_cost_benefit`：先用 `nf_best_node()` 算出这个 key 理论上的最优落点
+  `dst`（遍历所有节点选 `access_cost × (1+2×pressure)` 最小且容量够放的一个），
+  再用 `nf_benefit()` 算净收益：
+  ```text
+  rate   = freq_est（若 CMS 有估计）否则 log2(1 + access_count)
+  gain   = (access_cost(当前节点) - access_cost(目标节点)) × rate
+  cost   = migrate_cost(当前节点 → 目标节点)     // 一次性搬迁代价：固定 1000ns
+                                                  // + 按源/目节点带宽折算的
+                                                  // 读出+写入传输时间
+  benefit = gain - cost
+  ```
+  `benefit` 写入 `it.cost_benefit`，供后面两条子链使用。**注意**：`rate` 优先取
+  `freq_est`，只有 CMS 没有估计（`freq_est==0`）时才退化到 `access_count` 的对数——
+  这意味着"只访问过一次"的 key 在这里的 `rate` 不是 0，是 `log2(2)=1`，和上面
+  `filter_freq`/`demote_cold` 用的"纯 `freq_est`"门槛不是一回事，容易被误读成同一
+  套信号。
+
+**分叉**（`filter_local`/`filter_remote` 按 `current_node==0` 与否二分）：这一步
+是 ADR-09 修的关键点——旧版单链设计把降级的 `emit_migrate` 直接接到晋升阶段的
+过滤器上，一个刚被降级、但没通过晋升侧 `filter_freq`/`filter_benefit` 门槛的 key
+就会从图的终止节点输出里彻底消失，桥接层的"结果 vs 入队原始状态"diff 永远看不到
+它，`apply()`（真正执行迁移）不会被调用——**它的 `current_node` 在内存里已经改了，
+但 Redis 侧从未真的把数据搬过去**。现在的写法保证每个 item 只经过其中一条子链、
+只被变更一次、必然到达唯一一个属于自己的终止节点。
+
+**降级子链**（DRAM 驻留项）：`demote_cold(threshold=1)`——**只看 `freq_est`，不看
+`cost_benefit`**：`current_node==dram_node && freq_est < 1` 就标记降级到 CXL。
+threshold 默认是 1，即 `freq_est==0`（前面提到的"只访问过一次"或"从未真正被
+CMS 计数过"）就会被判定为该降级——这是一个**纯频率门槛**，跟这个 key 之前打的
+`cost_benefit` 分数完全无关（分数算出来了，但降级子链根本没读它）。这解释了本次
+会话在真实 VM 上观测到的现象：CAAT 会把"只在建库时 `SET` 过一次、从未被真正
+`GET` 过"的 key 全部挪出 DRAM——这是它按设计应该做的事，只是当 DRAM 容量本来就
+绰绰有余时，这些迁移不会换回任何访问收益，纯粹是迁移代价的净支出（同一批 key
+换到 Composite LRU/TinyLFU 上则会因为压根没有降级机制而原地不动，若这些 key 恰好
+最初就分配在本地节点，反而会让 `local_hit_ratio` 这个只看"访问是否命中本地"的
+指标显得更高——这不代表它们的放置质量更好，只是分母里混进了大量几乎不产生任何
+真实访问权重的冷 key）。
+
+**晋升子链**（非 DRAM 驻留项）：`filter_freq(threshold=1)` 先过一道频率下限（比
+Composite LRU/TinyLFU 的默认阈值更松），`filter_benefit(threshold=0)` 再过一道
+净收益必须为正，`rank_cost` 按 `cost_benefit` 降序排序，`budget_limit(budget=512)`
+截断，`select_dest_node(require_benefit=1)` 重新确认目标节点和收益为正（双重
+保险——`filter_benefit` 已经筛过一次，这里 `require_benefit=1` 保证即使排序/截断
+之间数据有出入也不会晋升净收益为负的候选）。
+
+**与 Composite LRU/TinyLFU 的核心差异不是"更聪明的打分公式"，是拓扑本身**：
+后两者的图里根本没有任何路径能把 `current_node` 从 DRAM 改成别的值；CAAT 的图
+显式分出了一条独立的降级子链。这是"晋升+降级"这句话在实现层面唯一的含义，也是
+[ADR-04](../new/09-architecture-decisions.md)/[ADR-11](../new/09-architecture-decisions.md)
+反复强调"CAAT 是三者中唯一同时执行 promote 和 demote 的策略"这句话的具体出处。
+
+### 2.6 九种分配预设（`alloc_*`，决定新数据落在哪个节点，不涉及迁移）
+
+这 9 个原子操作对应的是 `numa_configurable_strategy.c` 里 zmalloc 层的分配策略
+（见 [ADR-08](../new/09-architecture-decisions.md)：内核里仍有 7 种独立行为，
+`WEIGHTED`/`WEIGHTED_INTERLEAVE` 共享同一份实现，`ADAPTIVE`/`LATENCY_AWARE` 是
+占位）。NUMAflow 里把全部 9 个都实现成了真正独立的原子操作，可以在 DAG 里替换
+内核占位的那两个：
+
+| 预设 | 决策规则 |
+| --- | --- |
+| `alloc_local_first` | 固定分配到参数指定的节点（默认节点 0） |
+| `alloc_interleave` | 每次请求独立均匀随机选节点 |
+| `alloc_round_robin` | 按请求序号对节点数取模，逐个轮询 |
+| `alloc_weighted` | 按各节点静态 `weight` 加权随机（权重和归一化后按累积区间落点选择） |
+| `alloc_pressure_aware` | 选当前 `pressure` 最低的节点 |
+| `alloc_cxl_optimized` | 按 value 大小分层：小于 `min_size`（默认 1024B）进节点 0，其余进节点 1 |
+| `alloc_weighted_interleave` | 加权随机，但权重 = `静态 weight × (1 - pressure)`，与 `alloc_weighted` 是同一套加权随机循环，只是权重来源多乘了一个压力因子 |
+| `alloc_adaptive` | 节点 0 压力 < 阈值（默认 0.8）就直接选节点 0，否则退化成 `pressure_aware`——这是内核里 `ADAPTIVE` 占位背后**真正**的实现 |
+| `alloc_latency_aware` | 对每个候选节点调用 `nf_best_node()`（与 CAAT 打分用的同一个函数）选建模访问代价最低的节点——这是内核里 `LATENCY_AWARE` 占位背后**真正**的实现 |
+
+
 
 ## 3. 公平评测框架（QEMU 不可用）
 
