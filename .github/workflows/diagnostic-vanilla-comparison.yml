@@ -1,0 +1,24 @@
+name: Diagnostic - vanilla Redis comparison
+
+# TEMPORARY diagnostic workflow, not meant to stay in the repo. Runs the
+# exact upstream redis/redis 7.2.6 tag (no NUMA fork changes at all) on the
+# same GitHub-hosted runner class, to check whether
+# tests/unit/maxmemory.tcl's `test_slave_buffers` (1M pipelined SETRANGE
+# against a paused replica) hangs there too. If it does, the CI hang we're
+# chasing on the NUMA fork's own ci.yml is a runner/environment issue, not
+# something this fork introduced.
+
+on: [push]
+
+jobs:
+  vanilla-redis-maxmemory-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: clone vanilla redis 7.2.6
+        run: git clone --branch 7.2.6 --depth 1 https://github.com/redis/redis.git /tmp/vanilla-redis
+      - name: install dependencies
+        run: sudo apt-get update && sudo apt-get install -y tcl8.6 tclx
+      - name: build
+        run: cd /tmp/vanilla-redis && make -j$(nproc)
+      - name: run just the suspect test
+        run: cd /tmp/vanilla-redis && timeout 900 ./runtest --single unit/maxmemory --verbose --dump-logs
