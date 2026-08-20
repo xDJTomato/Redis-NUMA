@@ -52,6 +52,8 @@ Redis 文档（`REDIS_ORIGINAL_README.md`、`TLS.md`）也各自配有 `.zh-CN.m
 - **`test/`** — 测试组织、YCSB 指南、历史基准结果（含 `benchmark_results.txt` 中新增的
   NUMAflow 公平评测一节）、诊断使用说明。
 - **`devlog/`** — 开发日志（`zmalloc-goals.txt` 等）与原始 Redis README（`original/`）。
+- **`legacy/`** — 从仓库根目录移出的未经修改的上游 Redis 遗留文件
+  （`00-RELEASENOTES`、`MANIFESTO`、`BUGS`、`INSTALL`），仅作历史存档保留，不再维护。
 
 ## 构建与测试（快速入口）
 

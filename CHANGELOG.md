@@ -5,65 +5,114 @@
 All notable changes to this fork are documented here, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — 相对性能基准：真实放置轨迹 x 标定代价模型（ADR-12）
+## [Unreleased] — repository CI/CD and OSS-scaffolding cleanup
+
+### Changed
+
+- `.github/workflows/ci.yml` rewritten from an unmodified copy of upstream
+  `redis/redis`'s CI to jobs that actually exercise this fork: installs
+  `libnuma-dev` and builds/tests the Redis core (`make test` +
+  `runtest-moduleapi`), adds an ASan build (`SANITIZER=address`) covering
+  the NUMA allocator's manual memory management, and adds a NUMAflow
+  build+test job on both Linux and macOS. Dropped jobs that tested things
+  irrelevant or actively wrong for this project: 32-bit, Debian-old,
+  generic macOS, and a CentOS 7 jemalloc build (jemalloc is incompatible
+  with the NUMA allocator, and the job never installed `libnuma-devel`
+  either).
+- `.github/workflows/daily.yml` and `.github/workflows/external.yml`
+  removed — upstream's scheduled fleet-regression workflows, gated on
+  `github.repository == 'redis/redis'`, so they never ran on this fork at
+  all.
+- `.github/workflows/codeql-analysis.yml` — dropped the same
+  `redis/redis`-only gate so CodeQL actually runs here.
 
 ### Added
 
-- `numaflow replay --trace <name>=<file.json> ...`（`numaflow/src/nf_cli.c`）：
-  新 CLI 子命令，把一份真实放置轨迹（`{key,size,access_count,origin_node,
-  final_node}` 的 JSON 数组）喂进 NUMAflow 已有的纯函数代价模型
-  （`nf_numa_access_cost`/`nf_numa_migrate_cost`），支持和 `eval` 相同的
-  `--cxl-latency-ns`/`--cxl-bandwidth-mbps` 标定，输出和
-  `bench_<workload>.json` 的 `migration` 数组同构的 JSON——`numaflow/eval/
-  report.py`、`tests/report/generate_full_report.py` 不需要改一行代码即可
-  多画一张对比面板。
-- `tests/vm/collect_relative_trace.sh`（guest 内运行）+
-  `tests/vm/relative_perf_bench.sh`（开发机上运行）：在真实双节点 QEMU
-  guest 里对 noop/composite_lru/tinylfu/caat 四个策略采集真实放置轨迹
-  （fill 后即时快照 + 手动触发 `NUMA FLOW RUN default` 若干次 + 最终快照），
-  取回后跑 `numaflow replay` 产出 `results/bench_relative_perf.json` /
-  `bench_relative_perf_cxlcal.json`，并打印"这是建模投影不是实测延迟"的
-  双语免责声明。
-- 详见 ADR-12（`docs/new/09-architecture-decisions.md`），包括实现过程中
-  发现并修正的两个方法论错误：(1) 假设所有 key 起始节点是 0（实际上
-  `local_first` 分配策略下起始节点取决于分配调用发生时线程被调度到哪个
-  vCPU），(2) `local_hit_ratio` 一开始按 `final_node==origin_node` 算，导致
-  任何从不迁移的策略都结构性地恒为 100%，与实际放置质量无关。
+- `.github/PULL_REQUEST_TEMPLATE.md`.
+- `LICENSE` at the repo root (same BSD-3-Clause text as `COPYING`, kept for
+  tooling/humans that specifically look for `LICENSE`).
+- `docs/legacy/` — houses `00-RELEASENOTES`, `MANIFESTO`, `BUGS`, `INSTALL`,
+  moved out of the repo root; these are unmodified upstream Redis artifacts
+  kept only for provenance.
 
-## [Unreleased] — 迁移路径在真实双 NUMA 节点上的首次验证（ADR-11）
+## [Unreleased] — relative-performance benchmark: real placement trace x calibrated cost model (ADR-12)
 
-在 QEMU 双 NUMA 节点 guest（`tests/vm/boot_numa_vm.sh`）里第一次真正执行迁移路径，
-立刻暴露两个此前完全无法被发现的 bug——开发主机只有 1 个 NUMA 节点，
-`numa_pool_num_nodes()==1` 导致 `migrations` 恒为 0，整条执行路径零覆盖。
+### Added
+
+- `numaflow replay --trace <name>=<file.json> ...` (`numaflow/src/nf_cli.c`):
+  a new CLI subcommand that feeds a real placement trace (a JSON array of
+  `{key,size,access_count,origin_node,final_node}`) through NUMAflow's
+  existing pure-function cost model (`nf_numa_access_cost`/
+  `nf_numa_migrate_cost`), supporting the same `--cxl-latency-ns`/
+  `--cxl-bandwidth-mbps` calibration as `eval`, and producing JSON
+  shape-compatible with `bench_<workload>.json`'s `migration` array —
+  `numaflow/eval/report.py` and `tests/report/generate_full_report.py` need
+  zero code changes to render an extra comparison panel.
+- `tests/vm/collect_relative_trace.sh` (runs in the guest) +
+  `tests/vm/relative_perf_bench.sh` (runs on the host): collects a real
+  placement trace for the noop/composite_lru/tinylfu/caat strategies inside
+  a real dual-node QEMU guest (an immediate post-fill snapshot + several
+  manual `NUMA FLOW RUN default` triggers + a final snapshot), then feeds
+  it through `numaflow replay` to produce `results/bench_relative_perf.json`
+  / `bench_relative_perf_cxlcal.json`, printing a bilingual disclaimer that
+  this is a modeled projection, not measured latency.
+- See ADR-12 (`docs/new/09-architecture-decisions.md`) for the two
+  methodology bugs found and fixed while building this: (1) assuming every
+  key's origin node was 0 (in fact, under the `local_first` allocation
+  strategy, the origin node depends on which vCPU the allocating thread
+  happened to be scheduled on), and (2) `local_hit_ratio` initially
+  computed as `final_node==origin_node`, which is structurally 100% for any
+  strategy that never migrates anything, regardless of actual placement
+  quality.
+
+## [Unreleased] — first validation of the migration path on real dual-NUMA-node hardware (ADR-11)
+
+Running the migration path for the first time inside a real dual-NUMA-node
+QEMU guest (`tests/vm/boot_numa_vm.sh`) immediately exposed two bugs that
+were previously impossible to trigger — the dev host has only 1 NUMA node,
+so `numa_pool_num_nodes()==1` forced `migrations` to always be 0, leaving
+the entire execution path at zero coverage.
 
 ### Fixed
 
-- **NUMAflow 驱动的迁移 100% 静默失败**（`applied=0`，尽管策略正确决策了几十次
-  迁移）。`numa_migrate_key_by_name()` 内部做 `dictFind(db->dict, keyname)`，而
-  `db->dict` 用 SDS 键——`dictSdsHash()` 和 `dictSdsKeyCompare()` 都会对**查找键**
-  调用 `sdslen()`。NUMAflow 桥接（`src/numa_flow.c` 的 `numa_flow_apply`）传的是
-  `nf_item_t.key`，一个普通 `char[]`，于是 `sdslen()` 把指针**前面**的字节当 SDS
-  头读出垃圾长度，每次查找必然 miss（而且是越界读）。原契约"必须传 SDS"只写在
-  头文件注释里，而签名是 `const char *`，把这个陷阱完全隐藏了。修复：新增
-  `numa_key_migrate_dict_find()` 在函数内部归一化，两种形式都安全。
-  实测：修复前 `successful_migrations=0`，修复后 `=50`。
-- **`composite_lru` 预设永远不迁移任何数据**（迁移次数恒为 0）。
-  `src/numa_flow.c` 把 `br.ctx.tick` 设成完整的 24 位 `server.lruclock`（当前约
-  860 万），而 `nf_item_t.recency` 来自 zmalloc 前缀的 **uint16_t** `last_access`
-  （只有低 16 位，0–65535）。于是 DAG 里所有 `idle = ctx->tick - it.recency`
-  的计算（`op_score_hotness` / `op_decay_hotness`）都得到数百万秒的空闲时间，
-  `nf_staircase_decay()` 恒定返回最大衰减值，hotness 被永久压到 3，被
-  `filter_hot threshold=5` 全部滤除。`caat`/`tinylfu` 不受影响，因为它们用 CMS
-  频率而非 hotness 做门控——这也解释了为什么只有 composite_lru 表现异常。
-  修复：把 `ctx.tick` 截断到 16 位以匹配前缀精度。
+- **NUMAflow-driven migration silently failed 100% of the time**
+  (`applied=0`, despite the strategy correctly deciding on dozens of
+  migrations). `numa_migrate_key_by_name()` calls
+  `dictFind(db->dict, keyname)` internally, and `db->dict` uses SDS keys —
+  both `dictSdsHash()` and `dictSdsKeyCompare()` call `sdslen()` on the
+  **lookup key**. The NUMAflow bridge (`numa_flow_apply` in
+  `src/numa_flow.c`) passes `nf_item_t.key`, a plain `char[]`, so
+  `sdslen()` reads garbage length out of the bytes **before** the pointer,
+  guaranteeing a miss (and an out-of-bounds read) on every lookup. The
+  "must be SDS" contract was documented only in a header comment, while
+  the signature read `const char *`, completely hiding the trap. Fixed by
+  adding `numa_key_migrate_dict_find()`, which normalizes internally so
+  both forms are safe. Measured: `successful_migrations=0` before the fix,
+  `=50` after.
+- **The `composite_lru` preset never migrated any data** (migration count
+  stuck at 0). `src/numa_flow.c` set `br.ctx.tick` to the full 24-bit
+  `server.lruclock` (currently ~8.6 million), while `nf_item_t.recency`
+  comes from the zmalloc prefix's **uint16_t** `last_access` (only the low
+  16 bits, 0–65535). Every `idle = ctx->tick - it.recency` computation in
+  the DAG (`op_score_hotness` / `op_decay_hotness`) therefore got an idle
+  time of several million seconds, so `nf_staircase_decay()` always
+  returned the maximum decay, hotness was permanently pinned at 3, and
+  everything was filtered out by `filter_hot threshold=5`. `caat`/
+  `tinylfu` were unaffected because they gate on CMS frequency, not
+  hotness — which is why only composite_lru misbehaved. Fixed by
+  truncating `ctx.tick` to 16 bits to match the prefix's precision.
 
 ### Added
 
-- `tests/vm/placement_quality.sh` — 在真实双节点 guest 里测量**放置质量**的对比
-  脚本。测的不是吞吐/延迟（QEMU 的两个 `-numa node` 背后是同一块宿主机 DRAM，
-  没有真实延迟差，测不出迁移收益），而是策略把数据放在哪：`hot_local_ratio`
-  （热 key 驻留本地节点比例）、`cold_off_ratio`（冷 key 被挪离本地节点比例）、
-  实际迁移次数。这个指标不依赖任何延迟建模，跨策略可比。
+- `tests/vm/placement_quality.sh` — a comparison script that measures
+  **placement quality** inside a real dual-node guest. It doesn't measure
+  throughput/latency (QEMU's two `-numa node`s share the same host DRAM
+  underneath, so there's no real latency gap to show a migration benefit
+  for) — instead it measures where a strategy actually puts data:
+  `hot_local_ratio` (fraction of hot keys resident on their local node),
+  `cold_off_ratio` (fraction of cold keys moved off their local node), and
+  the actual migration count. This metric doesn't depend on any latency
+  model, so it's comparable across strategies.
 
 ## [Unreleased] — NUMAflow bridge scalability fixes (ADR-10)
 

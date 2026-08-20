@@ -5,6 +5,120 @@
 
 > 本文档是 [`CHANGELOG.md`](CHANGELOG.md) 的中文版本；英文版是权威原文，两者并存。
 
+## [未发布] — 仓库 CI/CD 与开源脚手架清理
+
+### 变更
+
+- `.github/workflows/ci.yml` 从原样照抄的上游 `redis/redis` CI 重写为真正针对本
+  fork 的 job：安装 `libnuma-dev` 并构建/测试 Redis 内核（`make test` +
+  `runtest-moduleapi`），新增一个覆盖 NUMA 分配器手动内存管理的 ASan 构建
+  （`SANITIZER=address`），以及一个在 Linux 和 macOS 上都跑的 NUMAflow 构建+测试
+  job。删除了对本项目无意义甚至完全错误的 job：32 位、Debian-old、通用 macOS，
+  以及一个 CentOS 7 jemalloc 构建（jemalloc 与 NUMA 分配器不兼容，而且该 job 从未
+  安装 `libnuma-devel`）。
+- 删除 `.github/workflows/daily.yml` 与 `.github/workflows/external.yml`——上游的
+  定时 fleet 回归测试工作流，用 `github.repository == 'redis/redis'` 卡死，在这个
+  fork 上从来不会真正运行。
+- `.github/workflows/codeql-analysis.yml`——去掉同样的 `redis/redis` 专属门槛，
+  让 CodeQL 在本仓库真正跑起来。
+
+### 新增
+
+- `.github/PULL_REQUEST_TEMPLATE.md`。
+- 仓库根目录新增 `LICENSE`（与 `COPYING` 内容相同的 BSD-3-Clause 文本），方便习惯
+  直接找 `LICENSE` 的工具/人。
+- `docs/legacy/`——收纳从仓库根目录移出的 `00-RELEASENOTES`、`MANIFESTO`、`BUGS`、
+  `INSTALL`；这些是未经修改的上游 Redis 遗留文件，仅作历史存档保留。
+
+## [未发布] — 相对性能基准：真实放置轨迹 x 标定代价模型（ADR-12）
+
+### 新增
+
+- `numaflow replay --trace <name>=<file.json> ...`（`numaflow/src/nf_cli.c`）：
+  新 CLI 子命令，把一份真实放置轨迹（`{key,size,access_count,origin_node,
+  final_node}` 的 JSON 数组）喂进 NUMAflow 已有的纯函数代价模型
+  （`nf_numa_access_cost`/`nf_numa_migrate_cost`），支持和 `eval` 相同的
+  `--cxl-latency-ns`/`--cxl-bandwidth-mbps` 标定，输出和
+  `bench_<workload>.json` 的 `migration` 数组同构的 JSON——`numaflow/eval/
+  report.py`、`tests/report/generate_full_report.py` 不需要改一行代码即可
+  多画一张对比面板。
+- `tests/vm/collect_relative_trace.sh`（guest 内运行）+
+  `tests/vm/relative_perf_bench.sh`（开发机上运行）：在真实双节点 QEMU
+  guest 里对 noop/composite_lru/tinylfu/caat 四个策略采集真实放置轨迹
+  （fill 后即时快照 + 手动触发 `NUMA FLOW RUN default` 若干次 + 最终快照），
+  取回后跑 `numaflow replay` 产出 `results/bench_relative_perf.json` /
+  `bench_relative_perf_cxlcal.json`，并打印"这是建模投影不是实测延迟"的
+  双语免责声明。
+- 详见 ADR-12（`docs/new/09-architecture-decisions.md`），包括实现过程中
+  发现并修正的两个方法论错误：(1) 假设所有 key 起始节点是 0（实际上
+  `local_first` 分配策略下起始节点取决于分配调用发生时线程被调度到哪个
+  vCPU），(2) `local_hit_ratio` 一开始按 `final_node==origin_node` 算，导致
+  任何从不迁移的策略都结构性地恒为 100%，与实际放置质量无关。
+
+## [未发布] — 迁移路径在真实双 NUMA 节点上的首次验证（ADR-11）
+
+在 QEMU 双 NUMA 节点 guest（`tests/vm/boot_numa_vm.sh`）里第一次真正执行迁移路径，
+立刻暴露两个此前完全无法被发现的 bug——开发主机只有 1 个 NUMA 节点，
+`numa_pool_num_nodes()==1` 导致 `migrations` 恒为 0，整条执行路径零覆盖。
+
+### 修复
+
+- **NUMAflow 驱动的迁移 100% 静默失败**（`applied=0`，尽管策略正确决策了几十次
+  迁移）。`numa_migrate_key_by_name()` 内部做 `dictFind(db->dict, keyname)`，而
+  `db->dict` 用 SDS 键——`dictSdsHash()` 和 `dictSdsKeyCompare()` 都会对**查找键**
+  调用 `sdslen()`。NUMAflow 桥接（`src/numa_flow.c` 的 `numa_flow_apply`）传的是
+  `nf_item_t.key`，一个普通 `char[]`，于是 `sdslen()` 把指针**前面**的字节当 SDS
+  头读出垃圾长度，每次查找必然 miss（而且是越界读）。原契约"必须传 SDS"只写在
+  头文件注释里，而签名是 `const char *`，把这个陷阱完全隐藏了。修复：新增
+  `numa_key_migrate_dict_find()` 在函数内部归一化，两种形式都安全。
+  实测：修复前 `successful_migrations=0`，修复后 `=50`。
+- **`composite_lru` 预设永远不迁移任何数据**（迁移次数恒为 0）。
+  `src/numa_flow.c` 把 `br.ctx.tick` 设成完整的 24 位 `server.lruclock`（当前约
+  860 万），而 `nf_item_t.recency` 来自 zmalloc 前缀的 **uint16_t** `last_access`
+  （只有低 16 位，0–65535）。于是 DAG 里所有 `idle = ctx->tick - it.recency`
+  的计算（`op_score_hotness` / `op_decay_hotness`）都得到数百万秒的空闲时间，
+  `nf_staircase_decay()` 恒定返回最大衰减值，hotness 被永久压到 3，被
+  `filter_hot threshold=5` 全部滤除。`caat`/`tinylfu` 不受影响，因为它们用 CMS
+  频率而非 hotness 做门控——这也解释了为什么只有 composite_lru 表现异常。
+  修复：把 `ctx.tick` 截断到 16 位以匹配前缀精度。
+
+### 新增
+
+- `tests/vm/placement_quality.sh` — 在真实双节点 guest 里测量**放置质量**的对比
+  脚本。测的不是吞吐/延迟（QEMU 的两个 `-numa node` 背后是同一块宿主机 DRAM，
+  没有真实延迟差，测不出迁移收益），而是策略把数据放在哪：`hot_local_ratio`
+  （热 key 驻留本地节点比例）、`cold_off_ratio`（冷 key 被挪离本地节点比例）、
+  实际迁移次数。这个指标不依赖任何延迟建模，跨策略可比。
+
+## [未发布] — NUMAflow 桥接层可扩展性修复（ADR-10）
+
+### 修复
+
+- **`numa_flow_cron()` 每个 tick 都会对整个 keyspace 做一次完整、无上限的
+  `dictGetSafeIterator()` 遍历**（`numa-flow-interval-sec`，默认 1 秒）。在几十万
+  key 规模的数据集上，这让每个 tick 都变成一次 O(keyspace 大小) 的同步扫描，阻塞
+  Redis 单线程的命令处理——服务器对一条普通的 `PING` 都会失去响应达数分钟。这个
+  问题在桥接层设计里一直潜伏，但在 ADR-08 让 NUMAflow 默认自动加载并运行之前从未
+  被触发（此前是需要手动 opt-in 的，所以没人在真实的大 keyspace 上跑过它）。修复
+  方式是换成有界、可恢复的扫描：`dictScan()`（`SCAN` 命令背后同一个原语）每个
+  tick 最多累积 `NUMA_FLOW_SCAN_BATCH`（4096）个 key，并把游标持久化在工作流条目
+  上，这样对整个 keyspace 的一次完整遍历会分摊到很多个 tick 上，而不是一次做完
+  ——这和已退役的原生 composite_lru 模块出于同样的原因使用的"渐进式字典扫描"
+  思路一致。
+- **`numaflow/src/nf_bridge.c` 内部 `kn_map_t`（用于对比 enumerate 时状态与 DAG
+  最终结果的 key -> 原始节点查找表）里一个真实存在的、会把 CPU 跑满的死循环**。
+  `kn_init()` 把容量硬编码为约 2049 个槽位，且没有扩容逻辑；`kn_put()` 的线性探测
+  插入循环（`while (m->keys[i]) i++`）一旦表满就永远不会终止，因为已经找不到空槽
+  了。上面的扫描修复（每 tick 4096 个 key）是第一次真正把调用量推过这个隐藏的
+  2049 槽位上限——这个 bug 比本次修复会话本身更早存在，但此前从未被触发过
+  （numaflow 自己的基准测试 harness `nf_bench.c` 直接调用 DAG 执行器，完全不经过
+  这张表）。修复方式是把 `kn_map_t` 改成一个真正的自动扩容哈希表（负载因子达到
+  70% 时翻倍并重新哈希）。通过 `redis-benchmark` 在约 70 万–100 万 key 规模下验证：
+  吞吐健康（约 70 万 req/s），`PING` 在整个过程中及之后都保持响应，完整的 Redis
+  `make test`、numaflow 自身的测试套件、以及 `test_numa_command.sh` 均通过。完整
+  诊断过程见 `docs/new/09-architecture-decisions.md` 的 ADR-10，包括为什么上一次
+  session 的修复验证（正确但规模太小）没能捕获这个问题。
+
 ## [未发布] — NUMA 迁移策略收敛（ADR-08）
 
 ### 变更（破坏性）
