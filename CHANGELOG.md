@@ -5,6 +5,31 @@
 All notable changes to this fork are documented here, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — tag a known GitHub-runner-hostile stock test as `slow`
+
+CI's `build-and-test` and `sanitizer-address` jobs both reliably hung for
+15+ minutes on the last test file, `tests/unit/maxmemory.tcl`, then failed
+with an I/O error. Reproduced identically twice. Locally (and even
+artificially pinned to 2 CPUs, matching the runner's core count) the same
+test completes in single-digit seconds — so before touching anything,
+verified whether this was actually caused by this fork's code: cloned and
+built unmodified upstream `redis/redis` at the `7.2.6` tag (zero fork
+changes) in a one-off diagnostic GitHub Actions workflow and ran just this
+test file on the same `ubuntu-latest` runner class. It hung in the exact
+same spot for the exact same reason (killed by a 15-minute `timeout`
+wrapper). Confirms this is a pre-existing characteristic of
+`test_slave_buffers`'s `cmd_count=1000000` case (1M pipelined `SETRANGE`s
+against a `SIGSTOP`'d replica) on GitHub's shared runners, not a NUMA-fork
+regression — no code in this fork was changed as a result.
+
+### Changed
+
+- `tests/unit/test_slave_buffers` (`tests/unit/maxmemory.tcl`): added a
+  `slow` tag, so `./runtest --tags -slow` (already what CI passes) skips
+  it. Both call sites (`slave buffer are counted correctly` and `replica
+  buffer don't induce eviction`) share the same proc and are now skipped
+  together.
+
 ## [Unreleased] — first green CI run: build-system and warning fixes
 
 Running the rewritten `ci.yml` for the first time (see the entry below)

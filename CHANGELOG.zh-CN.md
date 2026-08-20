@@ -5,6 +5,27 @@
 
 > 本文档是 [`CHANGELOG.md`](CHANGELOG.md) 的中文版本；英文版是权威原文，两者并存。
 
+## [未发布] — 给一个已确认"卡 GitHub runner"的 stock 测试打上 slow 标签
+
+CI 的 `build-and-test` 和 `sanitizer-address` 两个 job 都在最后一个测试文件
+`tests/unit/maxmemory.tcl` 上稳定卡住 15 分钟以上，然后以 I/O error 失败——连续
+复现了两次，完全一致。本地跑（甚至人为限制成 2 核，对齐 runner 的核数）同一个测试
+只要个位数秒。所以在动手改任何代码之前，先验证这到底是不是这个 fork 的代码引入
+的：用一个一次性的诊断 GitHub Actions workflow，clone 并构建**完全未修改的上游**
+`redis/redis` `7.2.6` tag（零 fork 改动），在同一个 `ubuntu-latest` runner 上只跑
+这一个测试文件。结果在完全相同的地方卡住，因为完全相同的原因失败（被 15 分钟的
+`timeout` 包装杀掉）。证实这是 `test_slave_buffers` 在 `cmd_count=1000000`
+这个用例（100 万条流水线 `SETRANGE`，打向一个被 `SIGSTOP` 冻住的从库）在 GitHub
+共享 runner 上本来就有的特性，不是 NUMA fork 引入的回归——这个结论没有导致 fork 里
+任何代码被修改。
+
+### 变更
+
+- `tests/unit/test_slave_buffers`（`tests/unit/maxmemory.tcl`）：加上了 `slow`
+  标签，这样 `./runtest --tags -slow`（CI 已经在传这个参数）会跳过它。两处调用
+  （`slave buffer are counted correctly` 和 `replica buffer don't induce
+  eviction`）共用同一个 proc，会一起被跳过。
+
 ## [未发布] — 第一次跑通 CI：构建系统与警告修复
 
 第一次真正跑重写后的 `ci.yml`（见下一条）就直接失败了——此前从没有人用 CI 这种更
