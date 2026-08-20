@@ -134,25 +134,6 @@ static inline int bitmap_try_set(uint32_t *bitmap, int bit) {
     return (old & mask) == 0;  /* 1 means the bit was claimed, 0 means it was already set. */
 }
 
-/* Find the first free bit using CPU instructions (O(1) per 32-bit word).
- * P2 fix: lock-free version using atomic reads. */
-static int bitmap_find_first_free(uint32_t *bitmap, int max_bits) {
-    int num_words = (max_bits + 31) / 32;
-    for (int i = 0; i < num_words; i++) {
-        /* Atomically read the current bitmap state. */
-        uint32_t word = __atomic_load_n(&bitmap[i], __ATOMIC_ACQUIRE);
-        uint32_t inverted = ~word;
-        if (inverted != 0) {
-            int bit_pos = __builtin_ffs(inverted) - 1;
-            int global_pos = i * 32 + bit_pos;
-            if (global_pos < max_bits) {
-                return global_pos;
-            }
-        }
-    }
-    return -1;
-}
-
 /* Lock-free find-and-set: locate a free bit and set it atomically.
  * Returns the bit index on success, -1 if no free bit exists. */
 static int bitmap_find_and_set(uint32_t *bitmap, int max_bits) {
@@ -539,7 +520,7 @@ void *numa_slab_alloc(size_t size, int node, size_t *total_size) {
 }
 
 /* Free to a slab - P2 fix: lock-free fast path using atomic operations. */
-void numa_slab_free(void *ptr, size_t total_size, int node) {
+void numa_slab_free(void *ptr) {
     if (!slab_ctx.initialized || !ptr) {
         return;
     }

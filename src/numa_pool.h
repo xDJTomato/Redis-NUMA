@@ -40,7 +40,7 @@ void *numa_slab_alloc(size_t size, int node, size_t *total_size);
 
 /* Free an object allocated by numa_slab_alloc.
  * Marks the slot free via atomic bitmap operations. */
-void numa_slab_free(void *ptr, size_t total_size, int node);
+void numa_slab_free(void *ptr);
 
 /* Return whether a given size should use the slab path.
  * Returns 1 when size <= SLAB_MAX_OBJECT_SIZE (64KB), otherwise 0. */

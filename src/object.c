@@ -614,7 +614,6 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 }
 
 /* Optimize the SDS string inside the string object to require little space,
-/* Optimize the SDS string inside the string object to require little space,
  * in case there is more than 10% of free space at the end of the SDS. */
 void trimStringObjectIfNeeded(robj *o, int trim_small_values) {
     if (o->encoding != OBJ_ENCODING_RAW) return;

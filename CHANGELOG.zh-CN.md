@@ -5,6 +5,42 @@
 
 > 本文档是 [`CHANGELOG.md`](CHANGELOG.md) 的中文版本；英文版是权威原文，两者并存。
 
+## [未发布] — 第一次跑通 CI：构建系统与警告修复
+
+第一次真正跑重写后的 `ci.yml`（见下一条）就直接失败了——此前从没有人用 CI 这种更
+严格的设置真正构建过这个 fork。
+
+### 修复
+
+- **CI 里的 `make ... REDIS_CFLAGS='-Werror'` 悄悄破坏了 NUMAflow 的构建**。
+  `src/Makefile:124` 用 `REDIS_CFLAGS+=-I../numaflow/include` 让 Redis 内核的构建
+  能找到 NUMAflow 的头文件——但 GNU Make 不允许 makefile 里的 `+=` 修改一个已经在
+  `make` 命令行上设置过的变量，所以在命令行上传入*任何* `REDIS_CFLAGS=...`（不只是
+  `-Werror`）都会悄悄丢掉这个 include 路径，导致所有 `#include` 了某个 `nf_*.h` 的
+  文件构建失败。本地没能提前发现，因为文档里写的构建命令（`make -j$(nproc)`，不带
+  `REDIS_CFLAGS`）根本不会触发这个问题。修复方式是把 `ci.yml` 的 `build-and-test`
+  与 `sanitizer-address` job 里的 `REDIS_CFLAGS='-Werror'` 整个去掉，改为完全匹配
+  项目实际文档化的构建命令。
+- `src/zmalloc.c`：`numa_tcache_free_miss` 这个计数器和它的三个兄弟
+  `numa_tcache_alloc_hit`/`numa_tcache_alloc_miss`/`numa_tcache_free_hit` 一起声明，
+  但和另外三个不一样，从来没有在任何地方被真正递增过——这是一个真实的埋点缺失
+  bug，不是死代码。现在在 `numa_free_with_size()` 里 tcache-free-miss 的那个分支
+  （一次池分配的 free 没能塞进 tcache、转而走 slab 归还路径）补上了这次递增。
+- `src/numa_pool.c`：删除了 `bitmap_find_first_free()`——一个完全没被调用的、更早
+  版本的位图扫描实现，已经被四处调用点都在用的 `bitmap_find_and_set()` 取代。
+- `numa_slab_free()`（`src/numa_pool.c`/`.h`）的 `total_size` 和 `node` 两个参数
+  函数体内根本没用到（它需要的一切都从指针所在 slab 的 header 里自己算出来）。
+  把签名精简成 `(void *ptr)`，并同步更新了 `src/zmalloc.c` 里的两处调用。
+- `src/object.c`：`trimStringObjectIfNeeded()` 前面有一行重复的注释起始行（连续两行
+  `/* Optimize the SDS string...`）——是一次合并/编辑留下的痕迹，不是有意的文档
+  改动。
+- `src/server.c`：修复了一处面向客户端错误字符串里的拼写错误
+  （`"interract"` → `"interact"`），这个笔误让两处 `CLIENT_SLAVE` 拒绝调用点的文案
+  彼此不一致（也和 `tests/integration/replication.tcl` 里已经按正确拼写写好的日志
+  匹配断言不一致）。
+- `tests/unit/test_numa_command.sh`：把循环变量 `strat` 改名为 `strategy_name`
+  （`strat` 不是一个单词，是 codespell 的一个误报）。
+
 ## [未发布] — 仓库 CI/CD 与开源脚手架清理
 
 ### 变更

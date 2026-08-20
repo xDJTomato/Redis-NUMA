@@ -324,9 +324,9 @@ suite_config() {
     assert_contains "CONFIG GET 返回 node_weights"      "$out" "node_weights"
 
     # 4-2 SET strategy（合法值）
-    for strat in local_first interleaved round_robin weighted; do
-        out=$(cli NUMA CONFIG SET strategy "$strat")
-        assert_eq "CONFIG SET strategy $strat 返回 OK" "$out" "OK"
+    for strategy_name in local_first interleaved round_robin weighted; do
+        out=$(cli NUMA CONFIG SET strategy "$strategy_name")
+        assert_eq "CONFIG SET strategy $strategy_name 返回 OK" "$out" "OK"
     done
 
     # 4-3 SET strategy（非法值）

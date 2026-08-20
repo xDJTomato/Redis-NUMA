@@ -11,11 +11,15 @@ jobs:
     - name: install dependencies
       run: sudo apt-get update && sudo apt-get install -y libnuma-dev tcl8.6 tclx
     - name: make
-      # Fail build if there are warnings. Linux always builds with
-      # -DHAVE_NUMA -lnuma and MALLOC=libc forced (src/Makefile:133-140).
+      # Not -Werror: src/Makefile's REDIS_CFLAGS+=-I../numaflow/include
+      # (needed to find the NUMAflow headers) is silently dropped if
+      # REDIS_CFLAGS is also set on the make command line (GNU Make
+      # command-line variables can't be appended to from the makefile).
+      # Linux always builds with -DHAVE_NUMA -lnuma and MALLOC=libc forced
+      # (src/Makefile:133-140).
       run: |
         cd src
-        make -j$(nproc) REDIS_CFLAGS='-Werror'
+        make -j$(nproc)
     - name: test
       run: ./runtest --verbose --tags -slow --dump-logs
     - name: module api test
@@ -36,7 +40,7 @@ jobs:
       - name: make
         run: |
           cd src
-          make -j$(nproc) SANITIZER=address REDIS_CFLAGS='-Werror'
+          make -j$(nproc) SANITIZER=address
       - name: test
         run: ./runtest --verbose --tags -slow --dump-logs
 

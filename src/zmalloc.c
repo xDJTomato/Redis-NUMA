@@ -347,12 +347,11 @@ static void tcache_drain_bin(int cls) {
         void *user_ptr = bin->ptrs[--bin->count];
         numa_alloc_prefix_t *prefix = numa_get_prefix(user_ptr);
         size_t total_size = prefix->size + PREFIX_SIZE;
-        int node_id = (int)prefix->node_id;
         /* tcache drain: the logical used-memory counters were already
          * released when the object entered the tcache.  Only return the
          * block to the slab and update pool instrumentation here. */
         void *raw_ptr = (char *)user_ptr - PREFIX_SIZE;
-        numa_slab_free(raw_ptr, total_size, node_id);
+        numa_slab_free(raw_ptr);
         atomicDecr(numa_alloc_slab_bytes, total_size);
         atomicDecr(numa_alloc_slab_count, 1);
         drain--;
@@ -576,7 +575,8 @@ static void numa_free_with_size(void *user_ptr)
 
     /* Slab path: return to the slab. */
     if (prefix->from_pool) {
-        numa_slab_free(raw_ptr, total_size, node_id);
+        atomicIncr(numa_tcache_free_miss, 1);
+        numa_slab_free(raw_ptr);
         atomicDecr(numa_alloc_slab_bytes, total_size);
         atomicDecr(numa_alloc_slab_count, 1);
     } else {

@@ -4178,7 +4178,7 @@ int processCommand(client *c) {
      * The main objective here is to prevent abuse of client pause check
      * from which replicas are exempt. */
     if ((c->flags & CLIENT_SLAVE) && (is_may_replicate_command || is_write_command || is_read_command)) {
-        rejectCommandFormat(c, "Replica can't interract with the keyspace");
+        rejectCommandFormat(c, "Replica can't interact with the keyspace");
         return C_OK;
     }
 

@@ -5,6 +5,50 @@
 All notable changes to this fork are documented here, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — first green CI run: build-system and warning fixes
+
+Running the rewritten `ci.yml` for the first time (see the entry below)
+immediately failed, since nothing had ever actually built this fork with
+CI's stricter settings before.
+
+### Fixed
+
+- **CI's `make ... REDIS_CFLAGS='-Werror'` silently broke the NUMAflow
+  build.** `src/Makefile:124` does `REDIS_CFLAGS+=-I../numaflow/include` to
+  make the NUMAflow headers visible to the Redis core build — but GNU Make
+  does not let a makefile's `+=` modify a variable that was set on the
+  `make` command line, so passing *any* `REDIS_CFLAGS=...` on the CLI (not
+  just `-Werror`) silently dropped that include path and broke every file
+  that includes an `nf_*.h` header. Not caught locally because the
+  documented build command (`make -j$(nproc)`, no `REDIS_CFLAGS`) never
+  triggers it. Fixed by dropping `REDIS_CFLAGS='-Werror'` from `ci.yml`'s
+  `build-and-test` and `sanitizer-address` jobs entirely, matching the
+  project's actual documented build command.
+- `src/zmalloc.c`: `numa_tcache_free_miss` was declared as a counter
+  alongside `numa_tcache_alloc_hit`/`numa_tcache_alloc_miss`/
+  `numa_tcache_free_hit`, but unlike its three siblings, was never
+  incremented anywhere — a real missing-instrumentation bug, not dead
+  code. Now incremented at the tcache-free-miss site in
+  `numa_free_with_size()` (the slab-return path taken when a pool-backed
+  free doesn't fit the tcache).
+- `src/numa_pool.c`: removed `bitmap_find_first_free()`, an entirely
+  unused earlier version of the bitmap-scan logic — `bitmap_find_and_set()`
+  (used at all 4 call sites) superseded it.
+- `numa_slab_free()` (`src/numa_pool.c`/`.h`) took `total_size` and `node`
+  parameters that the function never used (it derives everything it needs
+  from the pointer's slab header). Trimmed the signature to `(void *ptr)`
+  and updated both call sites in `src/zmalloc.c`.
+- `src/object.c`: a duplicated comment-opener line before
+  `trimStringObjectIfNeeded()` (two consecutive `/* Optimize the SDS
+  string...` lines) — a merge/edit artifact, not a real doc change.
+- `src/server.c`: fixed a typo in a client-facing error string
+  (`"interract"` → `"interact"`) that made one of the two `CLIENT_SLAVE`
+  rejection call sites inconsistent with the other (and with
+  `tests/integration/replication.tcl`'s log-pattern assertion, which
+  already expected the correct spelling).
+- `tests/unit/test_numa_command.sh`: renamed the `strat` loop variable
+  (a codespell false positive — `strat` isn't a word) to `strategy_name`.
+
 ## [Unreleased] — repository CI/CD and OSS-scaffolding cleanup
 
 ### Changed
