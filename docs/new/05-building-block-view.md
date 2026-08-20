@@ -74,7 +74,7 @@ libnuma
 | NUMA 感知淘汰 | `evict_numa.c/h` | 淘汰前先尝试降级：距离(40%)+压力(30%)+带宽(30%) 加权评分选目标节点 | [`modules/evict_numa.md`](modules/evict_numa.md) |
 | NUMAflow 桥接 | `numa_flow.c/h` | 唯一实现三个迁移策略（`caat`/`composite_lru`/`tinylfu`/`noop`）的地方——全部是 NUMAflow 原子操作 DAG 预设，内核不再有原生实现；启动时自动加载默认策略，暴露 `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT/DEFAULT` | [`09-architecture-decisions.md`](09-architecture-decisions.md)（ADR-08/ADR-09） |
 
-`numa_strategy_slots`（16 槎位 vtable 框架）、`numa_composite_lru`、`numa_tinylfu`
+`numa_strategy_slots`（16 槽位 vtable 框架）、`numa_composite_lru`、`numa_tinylfu`
 三个原生模块已随 ADR-08 从代码库删除，不再是构件清单的一部分；它们曾经的设计
 记录保留在对应的（已标注"已退役"横幅的）`modules/*.md` 页面里，供历史查阅。
 
@@ -92,16 +92,14 @@ libnuma
   compaction 与 `numa_flow_cron()` 挂在 `serverCron`。这条初始化顺序约定属于
   「贯穿性设计概念」，见
   [`08-crosscutting-concepts.md`](08-crosscutting-concepts.md)，不单独设详情页。
-- **`evict.h`/`evict.c`** — `evictionPoolEntry` 扩展的三个字段
-  (`current_node`/`object_size`/`numa_migrated`)，属于 `evict_numa` 构件本身的接口，
-  见 [`modules/evict_numa.md`](modules/evict_numa.md)。
+- **`evict.h`/`evict.c`** — 淘汰主循环中的降级拦截钩子（`evictionTryNumaDemote`），在即将释放内存前尝试将候选 Key 降级到低负载节点，未修改 Redis 原生的 `evictionPoolEntry` 结构体。详情见 [`modules/evict_numa.md`](modules/evict_numa.md)。
 
-## 5.5 已退役：策略槎位与 AE 时间事件调度（ADR-08）
+## 5.5 已退役：策略槽位与 AE 时间事件调度（ADR-08）
 
 在三个迁移策略被统一收敛进 NUMAflow 之前，`numa_strategy_slots` 默认由
-`serverCron`（每秒一次）驱动每个启用的策略槎位，且每个槎位可以单独切换为挂在
+`serverCron`（每秒一次）驱动每个启用的策略槽位，且每个槽位可以单独切换为挂在
 Redis 事件循环（`ae.c`）上的**时间事件**驱动，带 deadline/budget/续跑语义。这套
-调度增强随槎位框架一起退役（见 [ADR-08](09-architecture-decisions.md)）：现在
+调度增强随槽位框架一起退役（见 [ADR-08](09-architecture-decisions.md)）：现在
 唯一剩下的调度路径是 `numa_flow_cron()` 按 `numa-flow-interval-sec` 判断是否该
 跑，单线程 `serverCron` 驱动，没有 AE time event 变体。调度模型、状态机等历史
 设计记录仍保留在 [`modules/ae_strategy_scheduler.md`](modules/ae_strategy_scheduler.md)。

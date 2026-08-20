@@ -3,7 +3,7 @@
 > **已退役（[ADR-08](../09-architecture-decisions.md)）**：`src/numa_strategy_slots.{c,h}`
 > 已从代码库删除。三个迁移策略（`caat`/`composite_lru`/`tinylfu`）现在统一由
 > NUMAflow 的原子操作框架实现（`numaflow/src/nf_strategy.c`），通过
-> `NUMA FLOW` 命令管理，不再有内核原生的槎位/vtable 框架。以下内容保留作为该
+> `NUMA FLOW` 命令管理，不再有内核原生的槽位/vtable 框架。以下内容保留作为该
 > 框架曾经存在过的设计记录。
 
 > 文件：`src/numa_strategy_slots.c` / `src/numa_strategy_slots.h`（已删除）
@@ -20,8 +20,8 @@
    插槽改用 Redis 的 AE（`aeEventLoop`）时间事件独立调度（见第 5 节及
    [`ae_strategy_scheduler.md`](ae_strategy_scheduler.md)）。
 
-槎位 0 固定是空操作（no-op）兜底策略；槎位 1（Composite LRU）和槎位 2（TinyLFU）
-是内置的两个具体迁移策略实现，槎位 3–15 留给自定义策略。
+槽位 0 固定是空操作（no-op）兜底策略；槽位 1（Composite LRU）和槽位 2（TinyLFU）
+是内置的两个具体迁移策略实现，槽位 3–15 留给自定义策略。
 
 ## 2. 接口
 
@@ -68,7 +68,7 @@ void numa_strategy_run_all(void);                    /* serverCron 每秒调用�
 int  numa_strategy_run_slot(int slot_id);
 
 int  numa_strategy_scheduler_init(aeEventLoop *el);   /* 初始化 AE 调度器 */
-int  numa_strategy_slot_schedule_ae(int slot_id);     /* 把某槎位改成 AE 调度 */
+int  numa_strategy_slot_schedule_ae(int slot_id);     /* 把某槽位改成 AE 调度 */
 int  numa_strategy_slot_unschedule_ae(int slot_id);
 void numa_strategy_scheduler_cron(void);               /* AE 调度器健康检查，serverCron 调用 */
 ```
@@ -127,15 +127,15 @@ Slot 3–15: 空闲，留给自定义策略
 `server.c` 的 `serverCron` 每秒调用一次：
 
 ```c
-numa_strategy_run_all();          /* 遍历并执行所有启用的槎位 */
+numa_strategy_run_all();          /* 遍历并执行所有启用的槽位 */
 numa_strategy_scheduler_cron();   /* AE 调度器的健康检查（见第 5 节） */
 ```
 
 `numa_strategy_run_all()` 按优先级从高到低（HIGH → NORMAL → LOW）遍历全部 16 个
-槎位：跳过空槎位、未启用的槎位、优先级不匹配的槎位、还没到执行间隔的槎位，对剩下
-的槎位调用 `strategy->vtable->execute(strategy)`，并更新执行次数/耗时/失败次数等
+槽位：跳过空槽位、未启用的槽位、优先级不匹配的槽位、还没到执行间隔的槽位，对剩下
+的槽位调用 `strategy->vtable->execute(strategy)`，并更新执行次数/耗时/失败次数等
 统计。当前内置的 Composite LRU（Slot 1）与 TinyLFU（Slot 2）优先级都是 HIGH，
-No-op（Slot 0）是 LOW；同优先级按槎位 ID 顺序执行。
+No-op（Slot 0）是 LOW；同优先级按槽位 ID 顺序执行。
 
 ### 3.4 内置策略注册
 
@@ -145,24 +145,24 @@ int numa_strategy_register_composite_lru(void);  /* Slot 1，默认启用 */
 int numa_strategy_register_tinylfu(void);        /* Slot 2，注册后立即 disable */
 ```
 
-`numa_strategy_init()` 依次调用上面三个注册函数并把它们插入对应槎位；TinyLFU 注
+`numa_strategy_init()` 依次调用上面三个注册函数并把它们插入对应槽位；TinyLFU 注
 册后会立即被 `numa_strategy_slot_disable(2)` 禁用，用户需要通过
 `NUMA STRATEGY SLOT ENABLE 2` 手动打开，避免它和 Composite LRU 同时决定同一批
 key 的迁移，互相打架。
 
 ## 4. 质量与性能特性
 
-- **O(1) 空间的槎位数组**：16 个槎位是编译期常量数组，没有动态扩容，遍历成本恒定
+- **O(1) 空间的槽位数组**：16 个槽位是编译期常量数组，没有动态扩容，遍历成本恒定
   且极小。
 - **互斥锁保护，但执行阶段不是无锁的**：所有插槽插入/移除/启用/禁用、以及执行调
   度本身都通过 `strategy_manager.lock` 保护，防止并发注册和并发执行同一策略互相
   踩踏；这意味着策略的 `execute`/`execute_step` 本身应当保持轻量，不能在持锁期间
   做长时间阻塞操作。
 - **失败隔离**：单个策略执行返回非 `NUMA_STRATEGY_OK` 只会累加该策略自己的
-  `total_failures`，不会影响其他槎位继续执行——一个写坏的自定义策略不会拖垫整个
+  `total_failures`，不会影响其他槽位继续执行——一个写坏的自定义策略不会拖累整个
   框架。
-- **两种调度粒度可以共存**：同一时刻，一部分槎位可以走 serverCron 的固定 1 秒节
-  奏，另一部分槎位可以切到 AE 时间事件、拥有自己独立的调度周期和执行预算——这是
+- **两种调度粒度可以共存**：同一时刻，一部分槽位可以走 serverCron 的固定 1 秒节
+  奏，另一部分槽位可以切到 AE 时间事件、拥有自己独立的调度周期和执行预算——这是
   为了让"重"策略不拖慢"轻"策略，详见第 5 节。
 
 ## 5. 与其他模块的关系
@@ -175,7 +175,7 @@ key 的迁移，互相打架。
   `numa_strategy_slot_list()`；`NUMA STRATEGY SLOT <id> <name>` 调
   `numa_strategy_slot_insert()`；`NUMA STRATEGY SLOT SCHEDULE <id> ae|servercron`
   调 `numa_strategy_slot_schedule_ae()`/`numa_strategy_slot_unschedule_ae()`。
-- **AE 时间事件调度**：除了默认的 serverCron 轮询，每个槎位还可以单独切换成基于
+- **AE 时间事件调度**：除了默认的 serverCron 轮询，每个槽位还可以单独切换成基于
   Redis 事件循环（`aeEventLoop`）的时间事件调度模式（`scheduler_mode ==
   NUMA_STRATEGY_SCHED_AE`），拥有自己的执行预算（`step_budget`）、单步最大运行时
   间（`max_runtime_us_per_step`）和超时计数（`timeout_count`），通过
@@ -187,11 +187,11 @@ key 的迁移，互相打架。
 
 - **持锁执行**：`numa_strategy_run_all()` 在持有全局锁期间依次调用每个策略的
   `execute()`；如果某个策略的 `execute()` 意外阻塞（例如做了同步 I/O），会连带
-  拖住其它所有走 serverCron 路径的槎位。AE 调度模式部分缓解了这个问题，但只对切
-  换到 AE 模式的槎位生效。
+  拖住其它所有走 serverCron 路径的槽位。AE 调度模式部分缓解了这个问题，但只对切
+  换到 AE 模式的槽位生效。
 - **自定义策略的插槽号是手动指定的**：`numa_strategy_slot_insert(3, ...)` 这类调
-  用需要开发者自己保证不和已占用的槎位冲突（0–2 已被内置策略占用），框架本身在
-  `NUMA_STRATEGY_EEXIST` 之外没有更智能的"自动分配空闲槎位"机制。
-- **两套调度路径并存增加了心智负担**：同一个框架里，槎位可能处于 serverCron 模
+  用需要开发者自己保证不和已占用的槽位冲突（0–2 已被内置策略占用），框架本身在
+  `NUMA_STRATEGY_EEXIST` 之外没有更智能的"自动分配空闲槽位"机制。
+- **两套调度路径并存增加了心智负担**：同一个框架里，槽位可能处于 serverCron 模
   式或 AE 模式，两种模式下策略需要实现的回调不完全一样（`execute` vs
   `execute_step`），为框架增加了一层需要读者同时理解两套调度语义的复杂度。

@@ -80,6 +80,32 @@ struct evictionPoolEntry {
 
 ### 3.2 淘汰主循环里的插入点
 
+```text
+               performEvictions() 淘汰主循环
+                         │
+                         ▼
+               选取候选 bestkey 与 val
+                         │
+                         ▼
+        是否启用降级 (server.numa_demote_enabled)
+        且未超出单轮预算 (numa_demotions < max_migrate)?
+            │                         │
+         [是]                        [否]
+            ▼                         │
+   evictionTryNumaDemote() 尝试降级     │
+     ├─ 对象大小 ≥ min_size ?          │
+     ├─ 挑选最佳目标节点 (综合评分)       │
+     └─ numa_migrate_single_key()     │
+            │                         │
+     ┌──────┴──────┐                  │
+  [成功 OK]     [无节点/失败]          │
+     ▼             ▼                  │
+ 释放本地内存    落入原生真实淘汰流程 ◄────┘
+ 条目移出候选池          │
+ numa_demotions++        ▼
+ continue 下一个  dbAsyncDeleteValue / dbSyncDelete
+```
+
 `src/evict.c` 的 `performEvictions()` 在原生逐个淘汰候选 key 的循环里，选出
 `bestkey` 之后、真正执行淘汰之前，插入了这一段（`#ifdef HAVE_NUMA` 包裹）：
 
@@ -172,12 +198,30 @@ score = 归一化距离 × distance_weight/100
       + 归一化带宽 × bandwidth_weight/100
 ```
 
-分数**越低越好**，取分数最小的候选节点作为最终降级目标。三个权重对应
+分数**越低越好**（代表代价与负载越小），取分数最小的候选节点作为最终降级目标。三个权重对应
 `redis.conf` 里的 `numa-demote-distance-weight`（默认 40）、
 `numa-demote-pressure-weight`（默认 30）、`numa-demote-bandwidth-weight`
-（默认 30）——`ARCHITECTURE.md` 里"距离 40% + 压力 30% + 带宽 30%"这句概括说的
-就是这三个默认值，这一点和代码是一致的，需要修正的只是上一节提到的
-`evictionPoolEntry` 字段描述。
+（默认 30）。
+
+#### 算例说明（Worked Example）
+
+假设 Redis 部署在包含 3 个节点的拓扑上（Node 0: 本地 DRAM, Node 1: 远端 DRAM, Node 2: CXL 内存池）。
+当前 Node 0 内存写满触发淘汰，候选 Key 对象大小为 8KB。
+候选节点状态如下：
+- **Node 1 (远端 DRAM)**：NUMA 物理距离 = 20，内存压力 = 0.70（70%），当前带宽利用率 = 0.50（50%）
+- **Node 2 (CXL 扩展)**：NUMA 物理距离 = 30，内存压力 = 0.20（20%），当前带宽利用率 = 0.10（10%）
+
+1. **归一化计算**（以最大值作为分母）：
+   - 最大距离 = 30 $\rightarrow$ Node 1 距离得分 = $20 / 30 \approx 0.67$；Node 2 距离得分 = $30 / 30 = 1.00$
+   - 最大压力 = 0.70 $\rightarrow$ Node 1 压力得分 = $0.70 / 0.70 = 1.00$；Node 2 压力得分 = $0.20 / 0.70 \approx 0.29$
+   - 最大带宽 = 0.50 $\rightarrow$ Node 1 带宽得分 = $0.50 / 0.50 = 1.00$；Node 2 带宽得分 = $0.10 / 0.50 = 0.20$
+
+2. **加权综合评分计算**（权重：距离 40% + 压力 30% + 带宽 30%）：
+   - $\text{Score}_{\text{Node 1}} = 0.67 \times 0.40 + 1.00 \times 0.30 + 1.00 \times 0.30 = 0.268 + 0.300 + 0.300 = \mathbf{0.868}$
+   - $\text{Score}_{\text{Node 2}} = 1.00 \times 0.40 + 0.29 \times 0.30 + 0.20 \times 0.30 = 0.400 + 0.087 + 0.060 = \mathbf{0.547}$
+
+3. **决策结果**：
+   Node 2 的综合代价更低（$0.547 < 0.868$）。虽然 CXL 距离稍远，但因其当前内存极为充裕且带宽近乎空闲，算法最终选定 **Node 2** 作为降级目标。
 
 ## 4. 质量与性能特性（Quality & Performance Characteristics）
 

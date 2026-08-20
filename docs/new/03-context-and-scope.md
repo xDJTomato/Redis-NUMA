@@ -28,7 +28,7 @@
    RESP 客户端  ───────►│                           │
   （标准 Redis 协议 +    │      redis-server 进程     │
      NUMA 命令族）       │  （本项目：Redis 7.2.6 +   │
-                        │   10 个 NUMA 模块）         │
+                        │   8 个 NUMA 模块）         │
                         │                           │
                         │  ┌─────────────────────┐  │
                         │  │  NUMAflow 引擎        │  │◄── 可选：GUI/TUI 通过

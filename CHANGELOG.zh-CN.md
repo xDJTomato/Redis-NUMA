@@ -225,7 +225,7 @@ CI 的 `build-and-test` 和 `sanitizer-address` 两个 job 都在最后一个测
   item 最多被变更一次，并且总能到达且仅到达一个终止节点。用一个独立的
   harness 直接驱动真实的桥接/引擎代码端到端验证了修复效果。
 - 之前，per-key 热度追踪（zmalloc 分配前缀上的 `numa_get_hotness`/
-  `numa_get_access_count`）只在（现已移除的）Composite LRU/TinyLFU 槎位启用时
+  `numa_get_access_count`）只在（现已移除的）Composite LRU/TinyLFU 槽位启用时
   才会更新。现在通过 `numa_key_migrate_touch()`
   （`src/numa_key_migrate.c`/`src/db.c`）无条件更新，这样无论当前启用哪个（或
   不启用任何）迁移策略，NUMAflow 的 `enumerate()` 都能拿到一个真实信号。

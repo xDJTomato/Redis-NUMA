@@ -37,7 +37,7 @@ tests/ycsb/
 #### 1. 编译 Redis
 
 ```bash
-cd /path/to/redis-cxl
+cd /path/to/Redis-NUMA
 cd src && make -j$(nproc)
 cd ..
 ```

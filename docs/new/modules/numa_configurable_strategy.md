@@ -38,6 +38,23 @@ NUMA CONFIG HELP
 
 ### 3.1 九个策略名，七套实现
 
+```text
+               numa_config_get_best_node(size) 节点决策入口
+                                     │
+      ┌──────────────────────────────┼──────────────────────────────┐
+      ▼                              ▼                              ▼
+  [local_first]               [round_robin]                  [interleaved]
+  固定返回 Node 0             TLS 计数器轮询取模             TLS 种子伪随机取模
+      │                              │                              │
+      ▼                              ▼                              ▼
+  [cxl_optimized]             [pressure_aware]               [weighted_interleave] (默认)
+  size < 阈值 ? Node 0 : 1    选节点压力最低者               按节点压力动态加权随机
+                                     │                              │
+                                     ▼                              ▼
+                              [weighted] (静态)              [adaptive / latency_aware]
+                              持短锁读静态权重加权随机       内核占位 -> 推荐 NUMAflow DAG 编排
+```
+
 ```c
 typedef enum {
     NUMA_STRATEGY_CONFIG_LOCAL_FIRST = 0,      /* 本地优先：固定返回 node 0 */

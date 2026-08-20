@@ -121,7 +121,7 @@ ADR-08）：
    `default` 工作流条目，除非 `numa-enabled no`；运行时用 `NUMA FLOW DEFAULT
    <name>` 切换，或用 `NUMA FLOW LOAD` 加载自定义工作流。
 
-16 槎位 vtable 策略框架（`numa_strategy_slots`）及其原生的 Composite LRU / TinyLFU
+16 槽位 vtable 策略框架（`numa_strategy_slots`）及其原生的 Composite LRU / TinyLFU
 实现（`numa_composite_lru`、`numa_tinylfu`）已经退役——见
 `docs/new/09-architecture-decisions.md` 的 ADR-08 以及 `docs/new/modules/` 下对应
 的（已存档）模块文档。

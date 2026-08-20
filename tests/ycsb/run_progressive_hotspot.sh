@@ -92,7 +92,7 @@ usage() {
   --read-proportion P      读比例 (默认: 0.5)
   --update-proportion P    更新比例 (默认: 0.5)
   --numa-strategy NAME     NUMA 分配策略 (默认: cxl_optimized)
-  --ae-scheduler           已失效（ADR-08 移除了 AE/servercron 逐槎位调度），仅保留参数解析
+  --ae-scheduler           已失效（ADR-08 移除了 AE/servercron 逐槽位调度），仅保留参数解析
   --tinylfu                切换到 TinyLFU 策略 (NUMA FLOW DEFAULT tinylfu)
   --no-locality-stats      禁用 NUMA 本地/远端访问计数
   --no-access-tracking     禁用 Composite LRU 访问热路径统计
@@ -300,7 +300,7 @@ init_numa() {
     fi
 
     if [[ "$ENABLE_AE_SCHEDULER" == true ]]; then
-        # ADR-08 之后 numa_strategy_slots（连同 ADR-07 的逐槎位 AE/servercron
+        # ADR-08 之后 numa_strategy_slots（连同 ADR-07 的逐槽位 AE/servercron
         # 调度切换）已整体退役，NUMAflow 只有 serverCron 一种调度路径。这个
         # 开关现在是无效的 no-op，保留仅为了不破坏调用方的参数解析。
         log_warn "--ae-scheduler 已失效：AE/servercron 调度切换随 numa_strategy_slots 一起被移除（ADR-08），本次运行仍走 serverCron"

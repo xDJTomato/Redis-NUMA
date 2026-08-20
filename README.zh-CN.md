@@ -85,7 +85,7 @@ make clean && make -j$(nproc)
   （默认 `caat`）；运行期可用 `NUMA FLOW DEFAULT <name>` 切换，或用
   `NUMA FLOW LOAD/RUN/LIST/STATUS/UNLOAD/ADAPT` 加载自定义工作流。
 
-旧的 16 槎位 vtable 策略框架（`numa_strategy_slots`）及其原生 Composite LRU /
+旧的 16 槽位 vtable 策略框架（`numa_strategy_slots`）及其原生 Composite LRU /
 TinyLFU 实现已退役——详见 `docs/new/09-architecture-decisions.md` 的 ADR-08。
 
 ## 配置

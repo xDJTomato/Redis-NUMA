@@ -14,7 +14,7 @@
 
 ## 1. 职责（Responsibility）
 
-`numa_composite_lru` 是策略插槎框架（`numa_strategy_slots`）Slot 1 上注册的**默认
+`numa_composite_lru` 是策略插槽框架（`numa_strategy_slots`）Slot 1 上注册的**默认
 迁移策略**：结合 Redis 原生按 key 的访问信息（PREFIX 元数据）与 NUMA 位置信息，
 决定哪些 key 应该在 DRAM（本地节点）与 CXL（远端节点）之间双向迁移——热 key 从远
 端拉回本地以降低访问延迟，本地压力过高时把冷 key 推到远端腾出空间。它不负责底层

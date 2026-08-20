@@ -51,22 +51,22 @@ malloc）。本项目要不要保留这个默认值？
   变化（不透明 `dictEntry`、listpack、quicklist 容器类型），既拿到了需要的改动，
   又不必处理更大的 8.x 重构，也保持在本项目一直使用的许可证下。
 
-## ADR-03：为什么是 16 槎位可插拔框架，而不是硬编码一个策略
+## ADR-03：为什么是 16 槽位可插拔框架，而不是硬编码一个策略
 
 **问题**：迁移策略要不要直接写死在 `serverCron` 里？
 
 **考虑过的选项**：
 - A. 硬编码一个"最优"策略，简单直接；
-- B. 设计一个基于 vtable 多态的槎位框架，允许同时注册多个策略、按需启停切换。
+- B. 设计一个基于 vtable 多态的槽位框架，允许同时注册多个策略、按需启停切换。
 
-**决策**：选 B——`numa_strategy_slots` 提供 16 个槎位，槎位 0 固定空操作，槎位 1
-默认装载 Composite LRU，槎位 2 可选装载 TinyLFU。
+**决策**：选 B——`numa_strategy_slots` 提供 16 个槽位，槽位 0 固定空操作，槽位 1
+默认装载 Composite LRU，槽位 2 可选装载 TinyLFU。
 
 **后果**：
 - 优点：研究/对比不同迁移算法不需要相互覆盖或来回改 `server.c`；`NUMA STRATEGY
-  SLOT <id> <name>` 可以在运行时切换；每个槎位独立统计、独立开关，一个槎位的
-  bug 不会直接拖垮其他槎位。
-- 代价：框架本身的复杂度（vtable、槎位状态机、调度模式选择）比"就写一个函数"
+  SLOT <id> <name>` 可以在运行时切换；每个槽位独立统计、独立开关，一个槽位的
+  bug 不会直接拖垮其他槽位。
+- 代价：框架本身的复杂度（vtable、槽位状态机、调度模式选择）比"就写一个函数"
   高得多，且需要一份清晰的模块依赖顺序文档（见
   [`05-building-block-view.md`](05-building-block-view.md)）来避免初始化顺序
   错误——这类顺序错误是本项目最常见的启动期崩溃原因。
@@ -156,15 +156,15 @@ malloc）。本项目要不要保留这个默认值？
   核查已知 CVE——本项目就在合并后单独 cherry-pick 了 CVE-2025-32023
   的 HyperLogLog 越界写修复。
 
-## ADR-07：为什么 AE time-event 调度是每槎位可选模式，而不是整体替换 serverCron
+## ADR-07：为什么 AE time-event 调度是每槽位可选模式，而不是整体替换 serverCron
 
-**问题**：`serverCron` 每秒统一驱动所有策略槎位，如果某个策略执行较慢，会拖长
-整个 `serverCron` 周期、影响所有其他定时任务。要不要把全部槎位调度整体迁移到
+**问题**：`serverCron` 每秒统一驱动所有策略槽位，如果某个策略执行较慢，会拖长
+整个 `serverCron` 周期、影响所有其他定时任务。要不要把全部槽位调度整体迁移到
 Redis 自身的 AE 事件循环（`aeCreateTimeEvent`）？
 
 **考虑过的选项**：
 - A. 整体从 `serverCron` 迁移到 AE time event 调度；
-- B. 保留 `serverCron` 作为默认调度方式，新增 AE 调度作为**逐槎位可选**的另一种
+- B. 保留 `serverCron` 作为默认调度方式，新增 AE 调度作为**逐槽位可选**的另一种
   模式，两者共存，通过 `NUMA STRATEGY SLOT SCHEDULE <id> ae|servercron` 切换。
 
 **决策**：选 B。已验证为真实实现（不是纸面设计）：`src/numa_strategy_slots.h`
@@ -186,12 +186,12 @@ Redis 自身的 AE 事件循环（`aeCreateTimeEvent`）？
 
 ## ADR-08：为什么撤销 ADR-03/04/05 的分层，把三个迁移策略统一收敛到 NUMAflow
 
-**问题**：ADR-03/04/05 把"内核原生 vtable 槎位框架（Composite LRU 默认开、
+**问题**：ADR-03/04/05 把"内核原生 vtable 槽位框架（Composite LRU 默认开、
 TinyLFU 默认关）"和"NUMAflow DAG 引擎（CAAT 默认）"设计成两套并存的分层实现——
 内核保持简单可预测，NUMAflow 追求最优、可独立快速迭代。这个分层现在还站得住吗？
 
 **发现**（三路并行代码调研的结论，细节见对应模块文档）：
-- 槎位2（TinyLFU）在实践中完全不可达：没有任何 config/redis.conf 入口打开它，
+- 槽位2（TinyLFU）在实践中完全不可达：没有任何 config/redis.conf 入口打开它，
   唯一路径是运维手敲 `NUMA STRATEGY ENABLE 2`；ADR-03 承诺的"两者不能同时启用"
   互斥保护也从未落地成代码。
 - `nf_strategy.c` 的 `build_composite_lru`/`build_tinylfu`/`build_caat` 早就把
@@ -205,12 +205,12 @@ TinyLFU 默认关）"和"NUMAflow DAG 引擎（CAAT 默认）"设计成两套并
   LOAD 任何工作流——"内核默认保持简单"实际上变成了"内核默认使用较差的实现"。
 - `numa_key_migrate_touch()`（原 `composite_lru_record_access` 内联在
   `db.c` 里的一部分）曾经是 NUMAflow `enumerate()` 读取真实热度数据的唯一入口，
-  且被锁在槎位1/2 是否 enabled 的判断之后——删除内核原生实现前必须先把这个钩子
+  且被锁在槽位1/2 是否 enabled 的判断之后——删除内核原生实现前必须先把这个钩子
   解耦成中立、无条件调用，否则 NUMAflow 会瞬间读到全 0 的热度。
 
 **决策**：撤销 ADR-03/04/05 的分层结论，把三个策略（`caat`/`composite_lru`/
 `tinylfu`，外加 `noop`）统一收敛到 NUMAflow 的原子操作框架，不重新实现任何算法：
-- 删除 `src/numa_strategy_slots.{c,h}`（连带 ADR-07 的逐槎位 AE/servercron 调度
+- 删除 `src/numa_strategy_slots.{c,h}`（连带 ADR-07 的逐槽位 AE/servercron 调度
   切换，调度对象本身没了）和 `src/numa_composite_lru.{c,h}`、
   `src/numa_tinylfu.{c,h}`。
 - 新增 `numa-flow-default-strategy`（默认 `caat`）+ `numa-flow-interval-sec`
@@ -219,7 +219,7 @@ TinyLFU 默认关）"和"NUMAflow DAG 引擎（CAAT 默认）"设计成两套并
   `NUMA FLOW LOAD` 才能得到迁移行为。`NUMA FLOW DEFAULT <name>` 命令支持运行时
   在三个预设间切换，不需要写 JSON 文件。
 - `numa_key_migrate_touch()`（`src/numa_key_migrate.c`）把热度追踪钩子从
-  "槎位1/2 是否 enabled" 的判断中解耦出来，改为 `db.c` 的访问路径无条件调用，
+  "槽位1/2 是否 enabled" 的判断中解耦出来，改为 `db.c` 的访问路径无条件调用，
   写入 zmalloc 分配前缀这一个中立的 ground truth；composite_lru 自己的
   `key_heat_map`/热点环形缓冲和 `numa_key_migrate` 自己的 `hotness_level` 惰性
   衰减两套额外的影子状态一并退役。
@@ -231,7 +231,7 @@ TinyLFU 默认关）"和"NUMAflow DAG 引擎（CAAT 默认）"设计成两套并
 - 代价：`NUMA STRATEGY` 命令、`numa-migrate-config`/`composite_lru.json` 配置面
   被整体移除，是一次破坏性变更；依赖这些接口的历史脚本/测试需要迁移到
   `NUMA FLOW` 等价命令（见 [`CHANGELOG.md`](../../CHANGELOG.md)）。
-- ADR-07（AE/servercron 逐槎位调度）随槎位框架删除一起失效——NUMAflow 的调度
+- ADR-07（AE/servercron 逐槽位调度）随槽位框架删除一起失效——NUMAflow 的调度
   模型（`numa_flow_cron()` 按 `interval_sec` 判断是否该跑）是唯一剩下的调度路径，
   单线程 serverCron 驱动，没有 AE time event 变体。
 - ADR-05 的核心判断（复杂自适应逻辑不进 zmalloc 热路径）继续有效，未被撤销：

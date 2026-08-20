@@ -5,7 +5,7 @@
 ### 1. 准备环境
 ```bash
 # 启动Redis (NUMA内存池版本)
-cd /path/to/redis-CXL  
+cd /path/to/Redis-NUMA  
 make MALLOC=libc
 ./src/redis-server ./redis.conf &
 

@@ -25,7 +25,7 @@
 | 迁移/分配决策需要感知真实的节点带宽压力，而不是只看容量 | `numa_bw_monitor` 实时按节点采集带宽（resctrl/numastat/manual 三级降级），并提供统一的 `numa_bw_get_node_pressure()`，供 `PRESSURE_AWARE`/`evict_numa` 共用同一套评分依据 | [`modules/numa_bw_monitor.md`](modules/numa_bw_monitor.md) |
 | 所有 5 种 Redis 数据类型、所有内部编码都要被正确迁移，不能有"部分实现" | `numa_key_migrate` 为 STRING/HASH/LIST/SET/ZSET 的每一种内部编码（listpack/ziplist/hashtable/quicklist/skiplist/intset）都实现了对应适配器 | [`modules/numa_key_migrate.md`](modules/numa_key_migrate.md) |
 | 用户/运维需要统一、可脚本化的操作入口 | 单一 `NUMA` 命令族（`MIGRATE`/`CONFIG`/`FLOW`/`HELP`），走 Redis 7 的声明式命令自省系统注册 | [`modules/numa_command.md`](modules/numa_command.md) |
-| 慢策略不能拖慢 `serverCron`、拖累主事件循环尾延迟 | `numa_flow_cron()` 按 `interval_sec` 判断是否该跑 NUMAflow 工作流，单线程 `serverCron` 驱动；原先"每个策略槎位可选 `servercron`/`ae` 两种调度模式"的设计已随槎位框架一起退役（见 ADR-07/ADR-08），不再有 AE time event 变体 | [`09-architecture-decisions.md`](09-architecture-decisions.md)、[`modules/ae_strategy_scheduler.md`](modules/ae_strategy_scheduler.md)（历史设计记录） |
+| 慢策略不能拖慢 `serverCron`、拖累主事件循环尾延迟 | `numa_flow_cron()` 按 `interval_sec` 判断是否该跑 NUMAflow 工作流，单线程 `serverCron` 驱动；原先"每个策略槽位可选 `servercron`/`ae` 两种调度模式"的设计已随槽位框架一起退役（见 ADR-07/ADR-08），不再有 AE time event 变体 | [`09-architecture-decisions.md`](09-architecture-decisions.md)、[`modules/ae_strategy_scheduler.md`](modules/ae_strategy_scheduler.md)（历史设计记录） |
 | 策略研究/对比不应该被"一次只能跑一个策略"限制，也不应该只能靠改内核代码试新想法 | 独立于 Redis/libnuma 的纯 C11 子系统 **NUMAflow**：把上述策略拆成 36 个可组合的原子操作，允许在不改内核的前提下用 DAG 拼出新策略，并在此基础上设计了新默认策略 **CAAT**（晋升+降级，见 4.3） | [`docs/numaflow/README.md`](../numaflow/README.md) |
 
 ## 4.3 为什么需要 NUMAflow，而不是止步于（曾经的）内核原生 Composite LRU/TinyLFU
@@ -71,9 +71,47 @@ zipf/hotspot），但引用"CAAT 全面更优"时应注明这是有工作负载�
 `alloc_latency_aware` 两个原子操作），通过 `NUMA FLOW` 桥接进 Redis。完整的决策
 记录见 [`09-architecture-decisions.md`](09-architecture-decisions.md)。
 
-## 4.5 小结：分层决策，而不是单点优化
+## 4.5 一个 Key 的全生命周期（Life of a Key）
 
-把 4.2 的表格连起来看，本项目的解决方案其实是一条完整的决策链：
+为了直观展现各模块如何协同工作，以下是单个 Redis Key 从创建、访问、调度迁移到承压降级的端到端全生命周期：
+
+```text
+┌───────────────────────────────────────────────────────────────────────────┐
+│ 1. [创建与初始分配] 客户端执行 SET mykey "hello"                             │
+│    ├─ zmalloc() 拦截请求                                                  │
+│    ├─ numa_configurable_strategy: 根据各节点实时压力加权随机，选定 Node 0 (DRAM) │
+│    └─ numa_pool: 分配内存并在头部写入 16B PREFIX (node_id=0, hotness=0)   │
+└─────────────────────────────────────┬─────────────────────────────────────┘
+                                      │
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│ 2. [高频读写与热度追踪] 客户端持续执行 GET mykey                             │
+│    ├─ db.c (lookupKey): 命中该 Key                                        │
+│    ├─ numa_key_migrate_touch(): O(1) 递增 PREFIX 中的 access_count 与 hotness│
+│    └─ numa_flow_observe_access(): 记录至 NUMAflow 频率追踪器 (CMS/Doorkeeper)│
+└─────────────────────────────────────┬─────────────────────────────────────┘
+                                      │
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│ 3. [后台策略编排与动态迁移] serverCron 周期触发 numa_flow_cron              │
+│    ├─ NUMAflow 执行 CAAT 工作流 DAG：                                     │
+│    │  benefit = (远端访问代价 - 本地访问代价) × 访问频次 - 迁移代价            │
+│    ├─ 若 mykey 变冷且 Node 0 承压：产生降级决策 (Node 0 DRAM -> Node 1 CXL) │
+│    └─ numa_key_migrate: 分配 Node 1 空间 -> 拷贝数据 -> 原子切指针 -> 释放旧内存│
+└─────────────────────────────────────┬─────────────────────────────────────┘
+                                      │
+                                      ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│ 4. [内存承压与淘汰前拦截] 系统达到 maxmemory 上限，触发 performEvictions   │
+│    ├─ evict_numa (evictionTryNumaDemote): 拦截原生淘汰流程                │
+│    ├─ 综合评分选目标节点：Score = 距离(40%) + 压力(30%) + 带宽(30%)         │
+│    └─ 若存在更充裕的 Node 2 (CXL)：优先迁往 Node 2 降级，避免直接丢弃数据      │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+## 4.6 小结：分层决策，而不是单点优化
+
+把上述机制连起来看，本项目的解决方案是一条层次分明、各司其职的完整决策链：
 
 ```
 新分配 → numa_configurable_strategy（选节点）
@@ -87,6 +125,6 @@ numa_flow_cron 定时检查 → NUMAflow 默认工作流：CAAT / Composite LRU 
 统一操作入口 → NUMA 命令族 / NUMA FLOW
 ```
 
-每一层都可以独立替换或关闭（`numa-enabled no` 只保留分配优化、槎位可插拔、
+每一层都可以独立替换或关闭（`numa-enabled no` 只保留分配优化、槽位可插拔、
 NUMAflow 是完全独立的子系统），这正是为什么第 9 章的多条决策记录都在反复回答
 同一个问题："这一层的复杂度，值得放进内核，还是应该留在可替换的外围？"

@@ -6,7 +6,7 @@
 
 ## NUMA 模块层（叠加在 Redis 内核之上）
 
-`src/` 下共八个模块，全部由 `#ifdef HAVE_NUMA` 包裹（16 槎位 vtable 策略框架及其
+`src/` 下共八个模块，全部由 `#ifdef HAVE_NUMA` 包裹（16 槽位 vtable 策略框架及其
 原生的 Composite LRU / TinyLFU 实现已经退役——见
 `docs/new/09-architecture-decisions.md` 的 ADR-08）：
 

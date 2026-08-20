@@ -37,7 +37,7 @@
    - 读出 PREFIX 里的当前热度与上次访问时间；
    - 按空闲时长做阶梯式惰性衰减；
    - 热度 +1（上限 7）——这是 NUMAflow `enumerate()` 读取的唯一中立
-     ground truth，不再依赖任何策略槎位是否 enabled。
+     ground truth，不再依赖任何策略槽位是否 enabled。
 3. 同一处访问路径上，`db.c` 也调用 `numa_flow_observe_access(key)`
    （`src/numa_flow.c`）：把这次真实访问喂给 `nf_tracker_observe()`——这是
    Redis 桥接里唯一调用该函数的地方（此前的一个真实 bug：这一步完全缺失，

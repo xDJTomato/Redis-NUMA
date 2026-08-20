@@ -66,23 +66,7 @@ NUMAflow 通过 `src/numa_flow.c` 桥接触发的自动迁移使用——桥接�
 均定义在 `numaflow/src/nf_strategy.c`）调用这个入口，两条入口共享同一套类型适
 配器，区别只在查找方式。
 
-`numa_migrate_key_by_name` 内部调用一个新的静态辅助函数
-`numa_key_migrate_dict_find()`（ADR-11，`docs/new/09-architecture-decisions.md`）
-把传入的 `keyname` 先 `sdsnew()` 归一化再查 `db->dict`，而不是直接
-`dictFind(db->dict, keyname)`。这不是防御性编程，是修一个真实存在过的
-bug：`db->dict` 用 SDS 键，`dictSdsHash()`/`dictSdsKeyCompare()` 都会对
-**查找键**调用 `sdslen()`；但 NUMAflow 桥接（`src/numa_flow.c` 的
-`numa_flow_apply()`）传的是 `nf_item_t.key`，一个普通 `char[]`，不是真的
-SDS——`sdslen()` 会把指针前面的字节当 SDS header 读出垃圾长度，导致每次
-查找必然 miss（而且是一次越界读）。这个 bug 让 NUMAflow 驱动的迁移
-100% 静默失败了很长时间（`NUMA FLOW STATUS` 显示策略正确决策了几十次
-迁移，但 `NUMA MIGRATE STATS` 的 `successful_migrations` 恒为 0），只是
-因为它只有在真正的多 NUMA 节点硬件上才会被触发（开发主机长期只有 1 个
-节点，`migrations` 恒为 0，这条执行路径此前零覆盖），所以直到 ADR-11
-在真实 QEMU 双节点 guest 上第一次测才被发现。`numa_key_migrate_dict_find()`
-让 `numa_migrate_key_by_name()` 同时安全接受真实 SDS 和普通 C 字符串两种
-调用方，不再要求调用方自己记住"必须传 SDS"这个此前只写在头文件注释里、
-没有代码强制的约定。
+`numa_migrate_key_by_name` 内部通过静态辅助函数 `numa_key_migrate_dict_find()` 将入参 keyname 统一归一化为 SDS 后再查询 `db->dict`，能够无缝兼容标准 SDS 键和普通 C 字符串两种调用方（见文末第 7 节的设计背景）。
 
 ## 3. 内部结构与关键路径（Internal Structure & Key Paths）
 
@@ -125,6 +109,41 @@ typedef struct {
 ### 3.2 五种数据类型 × 全部编码的迁移适配器
 
 这是本模块最核心的部分——**全部实现，没有占位**（`CLAUDE.md` 特别强调的一点）：
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       Redis 5 种数据类型跨节点迁移路径                      │
+├───────────┬──────────────────────────────┬──────────────────────────────────┤
+│ 数据类型  │ 内部编码 (Encoding)          │ 迁移策略与内存操作               │
+├───────────┼──────────────────────────────┼──────────────────────────────────┤
+│ STRING    │ RAW / EMBSTR                 │ 目标节点分配新 SDS -> memcpy 数据 │
+│           │ INT (整数对象)               │ 共享整数对象，零内存开销，直接跳过 │
+├───────────┼──────────────────────────────┼──────────────────────────────────┤
+│ HASH      │ LISTPACK / ZIPLIST (紧凑块)  │ 计算总长度 -> 目标节点分配 -> 复制 │
+│           │ HT (Hashtable 散列表)        │ 遍历 dict 节点 -> 目标节点递归重建│
+├───────────┼──────────────────────────────┼──────────────────────────────────┤
+│ LIST      │ QUICKLIST                    │ 逐 quicklistNode 遍历：          │
+│           │ (包含 LZF压缩 与 RAW 原始容器)│ 复制 quicklistLZF 或整块 entry   │
+├───────────┼──────────────────────────────┼──────────────────────────────────┤
+│ SET       │ INTSET (整型数组)            │ 计算 blob 长度 -> 目标节点整块复制│
+│           │ HT (Hashtable 散列表)        │ 逐元素 sdsdup 重建新哈希表       │
+├───────────┼──────────────────────────────┼──────────────────────────────────┤
+│ ZSET      │ LISTPACK / ZIPLIST           │ 整块连续内存分配并复制            │
+│           │ SKIPLIST (跳表 + Dict 双索引)│ 从尾至头遍历，新跳表插入并建索引 │
+└───────────┴──────────────────────────────┴──────────────────────────────────┘
+
+ [原子指针切换模型 (Single Thread Execution)]
+ ┌─────────────────┐      1. 在目标节点分配并拷贝
+ │ robj *val       │ ───────────────────────────────────► ┌────────────────────┐
+ │  type=STRING    │                                      │ 新内存块 (Target)  │
+ │  ptr ─────────┐ │      2. val->ptr = new_ptr (原子切换)│ (Node 1)           │
+ └───────────────┼─┘ ───────────────────────────────────► └────────────────────┘
+                 ▼
+        ┌────────────────────┐
+        │ 旧内存块 (Source)  │ ──► 3. zfree(old_ptr) 释放旧空间
+        │ (Node 0)           │
+        └────────────────────┘
+```
 
 | 类型 | 涉及编码 | 迁移方式 |
 | --- | --- | --- |
@@ -175,7 +194,7 @@ lookupKeyReadWithFlags() 命中
 **[ADR-08](../09-architecture-decisions.md) 之后的两个关键变化**：
 
 1. `numa_key_migrate_touch()` 原来内联在已删除的 `composite_lru_record_access()`
-   里，被"槎位 1/2 是否 enabled"的判断锁着；现在提取成中立函数，从 `db.c` 无条
+   里，被"槽位 1/2 是否 enabled"的判断锁着；现在提取成中立函数，从 `db.c` 无条
    件调用，是 NUMAflow 的 `enumerate()`（通过桥接 `src/numa_flow.c`）读取的唯一
    热度 ground truth，不再依赖任何迁移策略是否启用。上文"5. 同步
    `key_numa_metadata_t` 兼容字典"/"6. 写入候选池"两步（原设计里紧跟在热度更新
@@ -251,6 +270,13 @@ lookupKeyReadWithFlags() 命中
 - 大对象（如超大 hashtable/skiplist）的逐元素重建是同步阻塞操作，发生在
   Redis 主线程内——没有分片/让出机制。这曾是已退役的
   [AE 策略调度器](ae_strategy_scheduler.md)（[ADR-08](../09-architecture-decisions.md)
-  之后随槎位框架一起失效）想解决的同一类问题的下一层："单次大 key 迁移内部可
+  之后随槽位框架一起失效）想解决的同一类问题的下一层："单次大 key 迁移内部可
   中断"；NUMAflow 目前的调度模型（`numa_flow_cron()` 按 `interval_sec` 判断是否
   该跑一次工作流）同样没有下探到这一层，一次 `apply()` 回调内部仍是不可中断的。
+
+## 7. 设计考量与历史经验（Historical Context & Lessons）
+
+- **SDS 键与普通字符串的查找兼容性（ADR-11）**：
+  历史版本中，NUMAflow 桥接回调 `apply()` 传入的是 `nf_item_t.key`（普通 `char[]`），而 `db->dict` 内部由 `dictSdsHash` 处理键计算并调用 `sdslen()`。普通 C 字符串指针缺少 SDS Header，导致前置读取长度错误并引发越界和 100% 查找 miss。通过引入 `numa_key_migrate_dict_find()`，在函数内部自动规整为临时 SDS 键，使得接口能安全容纳各种格式的调用方。
+- **类型适配器在 Redis 7 中的 API 兼容**：
+  在 Redis 7.2.6 升级中，`quicklistNode` 将旧版的 `zl` 属性重命名为 `entry`，同时 `dictEntry` 变为 opaque 不透明结构。本模块在迁移适配器中全面遵循了新的迭代器与访问器 API，确保在无冲突标记的合并下依然保证内存安全。

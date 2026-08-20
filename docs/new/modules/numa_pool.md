@@ -64,6 +64,29 @@ const size_t numa_pool_size_classes[NUMA_POOL_SIZE_CLASSES] = {
 
 为消除 >4KB 对象的 per-object page 对齐浪费，分配器把 33 级大小 class 分成两层：
 
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            NUMA 两级 Slab 分配体系                           │
+├──────────────────────────────────────┬──────────────────────────────────────┤
+│  小 Slab (Small Slab, Class 0 ~ 23)  │  大 Slab (Large Slab, Class 24 ~ 32) │
+├──────────────────────────────────────┼──────────────────────────────────────┤
+│ • 适用对象：8B ~ 4KB                  │ • 适用对象：5KB ~ 64KB               │
+│ • Slab 尺寸：64 KB 对齐              │ • Slab 尺寸：2 MB 对齐 (Memkind 机制)│
+│ • 分配方式：numa_alloc_onnode        │ • 分配方式：mmap 4MB -> 裁剪 2MB 对齐│
+│ • 位图管理：96 × uint32 (3072 位)     │   -> mbind 绑定目标节点 -> munmap 边界 │
+└──────────────────────────────────────┴──────────────────────────────────────┘
+
+ [Slab 内存物理排布与位图索引]
+ ┌──────────────────┬─────────────────┬─────────────────┬───┬─────────────────┐
+ │ numa_slab_header │ Slot 0          │ Slot 1          │...│ Slot N          │
+ │ (魔数/类别/回指) │ (PREFIX + Data) │ (PREFIX + Data) │...│ (PREFIX + Data) │
+ └──────────────────┴─────────────────┴─────────────────┴───┴─────────────────┘
+         ▲                   ▲
+         │                   │
+   Slab 起始地址      Slot 偏移 = HeaderSize + Index * obj_size
+   (64KB/2MB 对齐)    Bitmap: 0 = 空闲 (可分配), 1 = 已占用 (CAS 置位)
+```
+
 - **小 slab**（class 0–23，≤4KB 对象）：`SLAB_SIZE = 64KB`，位图管理（`SLAB_BITMAP_SIZE=96` × 32bit = 3072 bit）。
 - **大 slab**（class 24–32，>4KB 对象，源码用 `is_large_slab_class()`：`class_idx >= 24`）：`LARGE_SLAB_SIZE = 2MB`，用 `mmap` + `mbind` + `munmap` 的 memkind 风格分配，消除 page 对齐浪费。
 
@@ -90,7 +113,7 @@ typedef struct numa_slab_header {
 typedef struct numa_slab {
     void *memory;                            // Slab 内存基址（64KB/2MB 对齐）
     uint32_t bitmap[SLAB_BITMAP_SIZE / 32];  // 3072bit 位图
-    uint16_t free_count;                     // 剩余空闲槎位数
+    uint16_t free_count;                     // 剩余空闲槽位数
     struct numa_slab *next;                  // 同状态链表指针
     uint16_t class_idx;                      // 大小分类索引
 } numa_slab_t;

@@ -30,7 +30,7 @@ PERF_DURATION=10                  # perf采样时长(秒)
 ------------
 1. 启动Redis服务器 (使用NUMA内存池版本):
    ```bash
-   cd /path/to/redis-CXL
+   cd /path/to/Redis-NUMA
    make MALLOC=libc  # NUMA内存池需要libc
    ./src/redis-server ./redis.conf
    ```

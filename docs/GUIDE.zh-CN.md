@@ -79,6 +79,26 @@ NUMA 拓扑**——它们只关心把一块空闲内存尽快给你，不关心�
    （见 [第 5 章](#第-5-章numaflow-子系统把策略拆成乐高积木)），把「迁移策略」这
    件事拆成可组合的原子操作，并在此基础上设计了一个新的默认策略 **CAAT**。
 
+```text
+┌───────────────────────────────────────────────────────────────────────────┐
+│                    一个 Redis Key 在本系统中的端到端全生命周期               │
+├───────────────────────────────────────────────────────────────────────────┤
+│ 1. [创建分配] SET key "value"                                             │
+│    └─► numa_configurable_strategy 按节点压力加权随机选定 Node 0 (DRAM)      │
+│    └─► zmalloc / numa_pool 写入 16 字节 PREFIX 元数据 (node=0, hotness=0) │
+│                                                                           │
+│ 2. [热度累加] 客户端高频 GET key                                            │
+│    └─► db.c 触发 numa_key_migrate_touch()，O(1) 递增 access_count 与热度   │
+│                                                                           │
+│ 3. [策略调度] serverCron 触发 numa_flow_cron (NUMAflow CAAT 工作流 DAG)    │
+│    └─► 净收益 Benefit = (远端访问代价 - 本地访问代价) × 频次 - 迁移代价       │
+│    └─► 若 Key 变冷且 DRAM 承压，产生降级决策 (Node 0 DRAM -> Node 1 CXL) │
+│                                                                           │
+│ 4. [承压降级] 达到 maxmemory 触发淘汰                                      │
+│    └─► evict_numa: 评分 (距离40% + 压力30% + 带宽30%) 拦截淘汰，优先降级   │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
 带着这个整体图像，我们从「怎么把它跑起来」开始。
 
 ---
@@ -201,7 +221,7 @@ NUMAflow 的原子操作引擎，见 3.4 节与[第 5 章](#第-5-章numaflow-�
 - **33 个尺寸类（size class）**，覆盖 8 字节到 64KB——类似 jemalloc/tcmalloc 的
   思路：把请求量化到固定档位，避免每次都精确匹配尺寸带来的碎片和查找开销。
 - **原子位图管理的两级 Slab**：小对象（≤4KB）走 64KB 的小 slab，大对象走 2MB 的
-  大 slab；每个 slab 内部用一个原子位图记录哪些槎位空闲，分配/释放都是原子位图
+  大 slab；每个 slab 内部用一个原子位图记录哪些槽位空闲，分配/释放都是原子位图
   操作（`bitmap_find_and_set`/`bitmap_clear`），不需要全局锁。
 - **Thread-Local Cache（tcache）**：每个线程为每个尺寸类维护一小批已分配对象，
   命中 tcache 时完全不用碰共享的 slab 状态，是真正的无锁快速路径；tcache 缓存打
@@ -250,9 +270,9 @@ NUMAflow 的原子操作引擎，见 3.4 节与[第 5 章](#第-5-章numaflow-�
 
 **文件**：`src/numa_flow.c` / `.h`（`HAVE_NUMA` 下才编译）
 
-这个项目早期的设计是内核原生的 **16 槎位可插拔策略框架**（`numa_strategy_slots`）
-分别装载两个手写策略实现：Composite LRU（槎位 1，默认开启，双通道热候选环形缓冲
-区 + 渐进式字典扫描）和 TinyLFU（槎位 2，默认关闭，Count-Min Sketch + Doorkeeper
+这个项目早期的设计是内核原生的 **16 槽位可插拔策略框架**（`numa_strategy_slots`）
+分别装载两个手写策略实现：Composite LRU（槽位 1，默认开启，双通道热候选环形缓冲
+区 + 渐进式字典扫描）和 TinyLFU（槽位 2，默认关闭，Count-Min Sketch + Doorkeeper
 布隆过滤器，固定约 40KB 内存）。这套框架已经**整体退役**——`src/numa_strategy_
 slots.{c,h}`、`src/numa_composite_lru.{c,h}`、`src/numa_tinylfu.{c,h}` 都已从代码
 库删除，原因和过程记在 [ADR-08](../new/09-architecture-decisions.md)：简单说是因
@@ -269,7 +289,7 @@ nf_strategy.c`），`numa_flow.c` 是接入 Redis 的唯一桥接层：
   周期执行——不再需要手动 `NUMA FLOW LOAD` 才能得到迁移行为；
 - 运行时用 `NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>` 在三个预设间切
   换，或者用 `NUMA FLOW LOAD` 加载自定义工作流 JSON；
-- `numa_key_migrate_touch()`（3.3 节）不再受"槎位 1/2 是否启用"的条件限制，改为
+- `numa_key_migrate_touch()`（3.3 节）不再受"槽位 1/2 是否启用"的条件限制，改为
   在 `db.c` 的真实访问路径上无条件调用，为 NUMAflow 的 `enumerate()` 提供中立的热
   度 ground truth。
 
@@ -340,7 +360,7 @@ NUMA FLOW DEFAULT <caat|composite_lru|tinylfu|noop>         运行时切换默�
 NUMA HELP                          打印本帮助
 ```
 
-`NUMA STRATEGY`（槎位插拔/启停/调度/查询）和 `NUMA CONFIG LOAD`（composite-lru
+`NUMA STRATEGY`（槽位插拔/启停/调度/查询）和 `NUMA CONFIG LOAD`（composite-lru
 JSON 热加载）随 ADR-08 的收敛一起被整体移除；`NUMA CONFIG SET`/`GET` 里
 `access_tracking`/`locality_stats`/`debug_logging` 这几个 composite-lru 私有参数
 也一并消失了，因为它们的数据源不再存在。
@@ -507,14 +527,14 @@ n8n/Node-RED 那种可视化工作流工具的思路，只是这里的"节点"�
 
 ### 5.3 已有策略如何用原子操作拼出来
 
-**Composite LRU**（历史上曾经是内核槎位 1，现在只以 NUMAflow 预设的形式存在，
+**Composite LRU**（历史上曾经是内核槽位 1，现在只以 NUMAflow 预设的形式存在，
 `build_composite_lru`）：
 
 ```text
 score_hotness → filter_hot → rank_hotness → budget_limit → select_dest_node → emit_migrate
 ```
 
-**TinyLFU**（历史上曾经是内核槎位 2，现在是 `build_tinylfu` 预设；`cms_observe`
+**TinyLFU**（历史上曾经是内核槽位 2，现在是 `build_tinylfu` 预设；`cms_observe`
 在每次访问的热路径完成，其余在批处理里只做只读的频率估计）：
 
 ```text
@@ -750,7 +770,7 @@ diff 一遍，而不是只凭感觉猜。**
   `numa_object_sample_alloc_size` 里）改写成用
   `dictGetIterator`/`dictNext`/`dictGetKey`/`dictGetVal`/`dictReleaseIterator`，
   统计内存用 `dictEntryMemUsage()` 和 `dictSlots(d)`，而不是
-  `sizeof(dictEntry)` 加手算槎位数。
+  `sizeof(dictEntry)` 加手算槽位数。
 - **`dictType` 的回调**（`keyCompare`/`keyDup`/`keyDestructor`/
   `valDestructor`）第一个参数从 `void *privdata` 变成 `dict *d`——两个模块的回调
   表都要同步改。

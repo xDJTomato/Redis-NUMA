@@ -207,6 +207,17 @@ TinyLFU 的冷却只跟"总访问量"挂钩，不跟"墙钟时间"挂钩。
   `filter_freq`/`demote_cold` 用的"纯 `freq_est`"门槛不是一回事，容易被误读成同一
   套信号。
 
+  ##### 算例说明（CAAT 晋升净收益具体计算）：
+  假设某 Key（大小 1KB）当前驻留在 Node 1 (CXL 内存，访问延迟 250ns)，目标晋升节点为 Node 0 (DRAM，访问延迟 80ns)。
+  - **访问频次**：该 Key 处于高频活跃状态，CMS 估算访问率 `freq_est = 20`。
+  - **访问收益（Gain）**：
+    $$\text{Gain} = (\text{Cost}_{\text{CXL}} - \text{Cost}_{\text{DRAM}}) \times \text{rate} = (250\text{ns} - 80\text{ns}) \times 20 = 170\text{ns} \times 20 = \mathbf{3400\text{ns}}$$
+  - **一次性迁移代价（Cost）**：
+    $$\text{Cost} = \text{BaseCost} + \text{TransferCost} = 1000\text{ns} + 100\text{ns} = \mathbf{1100\text{ns}}$$
+  - **净收益（Benefit）**：
+    $$\text{Benefit} = \text{Gain} - \text{Cost} = 3400\text{ns} - 1100\text{ns} = +\mathbf{2300\text{ns}} > 0$$
+  - **决策**：净收益为正（$+2300\text{ns}$），通过 `filter_benefit(threshold=0)` 门槛，准予加入晋升队列；若另一低频 Key 仅被访问 2 次（$\text{Gain} = 340\text{ns} < 1100\text{ns}$，$\text{Benefit} = -760\text{ns}$），则被直接拒绝晋升，从而避免盲目迁移打满总线带宽。
+
 **分叉**（`filter_local`/`filter_remote` 按 `current_node==0` 与否二分）：这一步
 是 ADR-09 修的关键点——旧版单链设计把降级的 `emit_migrate` 直接接到晋升阶段的
 过滤器上，一个刚被降级、但没通过晋升侧 `filter_freq`/`filter_benefit` 门槛的 key

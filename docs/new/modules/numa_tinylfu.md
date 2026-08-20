@@ -18,7 +18,7 @@
 （[modules/numa_composite_lru.md](numa_composite_lru.md)）之外的第二种迁移决策
 来源——Composite LRU 看的是「最近有没有访问」（热度阶梯 + 惰性衰减），TinyLFU 看
 的是「历史上访问了多少次」（Count-Min Sketch 频率估计），二者提供不同的语义，因此
-框架层把它们做成互斥的策略槎位，而不是合并成一个策略。
+框架层把它们做成互斥的策略槽位，而不是合并成一个策略。
 
 算法参考 Caffeine（Ben Manes）的 Window-TinyLFU 设计的简化版：Count-Min Sketch
 （CMS）+ Doorkeeper 布隆过滤器，固定约 40KB 内存（CMS 32KB + Doorkeeper 8KB +
@@ -123,7 +123,7 @@ SipHash + 4 次位操作（Doorkeeper）+ 4 次数组读取（CMS）——**无�
   没有变冷，避免迁移一个已经不再热的 key；
 - 返回值区分 `IDLE`（环形缓冲区空）/`AGAIN`（预算用完但还有候选）/`PROGRESS`
   （处理完且缓冲区已空）/`TIMEOUT`（撞到 deadline），供上层调度器判断下一次何
-  时再调度这个槎位。
+  时再调度这个槽位。
 
 这个 `execute_step` 签名和状态机（deadline + budget + 可续跑 + 显式返回码）是
 [modules/ae_strategy_scheduler.md](ae_strategy_scheduler.md) 里定义的策略接口
@@ -171,7 +171,7 @@ NUMA 模块初始化发生在数据库对象创建之前（见
 [08-crosscutting-concepts.md](../08-crosscutting-concepts.md) 的初始化顺序约
 定），策略层没有办法在 `init()` 时就拿到 `redisDb*`。
 
-**与 Slot 1 的互斥关系**：框架层允许同时启用两个槎位，但语义上二者会对同一批
+**与 Slot 1 的互斥关系**：框架层允许同时启用两个槽位，但语义上二者会对同一批
 key 给出可能冲突的迁移决策（一个基于新近度，一个基于频率），且都会往
 `numa_migrate_key_by_name()` 提交迁移请求，造成不必要的迁移抖动。默认只启用
 Slot 1，Slot 2 注册后立即被 `numa_strategy_slot_disable(2)` 禁用（`src/numa_strategy_slots.c`），
@@ -179,7 +179,7 @@ Slot 1，Slot 2 注册后立即被 `numa_strategy_slot_disable(2)` 禁用（`src
 
 ## 6. 未解决问题与已知限制 (Open Issues & Known Limitations)
 
-- 与 Composite LRU 互斥但框架层没有强制校验——同时手动启用两个槎位不会报错，
+- 与 Composite LRU 互斥但框架层没有强制校验——同时手动启用两个槽位不会报错，
   但会产生上面提到的迁移决策冲突，目前依赖运维自律而非代码保证。
 - 只支持迁回「主线程所在节点」这一个目标，无法表达更细粒度的多节点频率分布
   策略（比如"这个 key 该去 CXL 节点 A 还是 B"）。

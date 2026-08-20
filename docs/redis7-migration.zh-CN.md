@@ -63,7 +63,7 @@ commit"）——它**不**与 `redis/redis` 共享提交历史。直接对着它
   里）被改写成使用
   `dictGetIterator`/`dictNext`/`dictGetKey`/`dictGetVal`/`dictReleaseIterator`，
   统计条目大小改用 `dictEntryMemUsage()` 和 `dictSlots(d)`，而不是
-  `sizeof(dictEntry)` 加手算槎位数。
+  `sizeof(dictEntry)` 加手算槽位数。
 - **`dictType` 的回调函数**（`keyCompare`/`keyDup`/`keyDestructor`/
   `valDestructor`）第一个参数现在是 `dict *d`，而不是 `void *privdata`——两个模块
   的回调表都相应更新。
