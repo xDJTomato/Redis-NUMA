@@ -6,6 +6,7 @@
 #include "nf_bench.h"
 #include "nf_track.h"
 #include "nf_json.h"
+#include "numa_shim.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,14 @@ static void usage(void) {
     printf("    --seed <n>       PRNG seed\n");
     printf("    --cxl-latency-ns <n>      override tier-1 latency (e.g. from a real CXLMemSim run)\n");
     printf("    --cxl-bandwidth-mbps <n>  override tier-1 bandwidth (e.g. from a real CXLMemSim run)\n");
+    printf("    --out <file>     write JSON to file\n");
+    printf("  replay [opts]           feed a real placement trace through the\n");
+    printf("                          cost model, print bench_*.json-shaped JSON\n");
+    printf("    --trace <name>=<file>    one JSON trace per strategy (repeatable);\n");
+    printf("                             must cover noop,composite_lru,tinylfu,caat\n");
+    printf("    --nodes <n>              emulated NUMA node count (default 2)\n");
+    printf("    --cxl-latency-ns <n>      same calibration override as `eval`\n");
+    printf("    --cxl-bandwidth-mbps <n>  same calibration override as `eval`\n");
     printf("    --out <file>     write JSON to file\n");
 }
 
@@ -202,6 +211,185 @@ static int cmd_eval(int argc, char **argv) {
     return 0;
 }
 
+/* ---- replay: feed a real placement trace through the cost model --------
+ * Unlike `eval` (which generates its own synthetic access trace), `replay`
+ * takes a trace of what a strategy *actually* decided on a real system - one
+ * JSON array per strategy of {key, size, access_count, origin_node,
+ * final_node} records - and runs it through the same pure cost-model
+ * functions (nf_numa_access_cost / nf_numa_migrate_cost) `eval` uses, with
+ * the same --cxl-latency-ns/--cxl-bandwidth-mbps calibration. This is a
+ * modeled projection of a *real* placement decision onto calibrated
+ * hardware parameters, not a measurement - the trace itself carries no
+ * timing information, only "who accessed what, how often, and where it
+ * ended up". See ADR-12 in docs/new/09-architecture-decisions.md. */
+typedef struct {
+    double   local_hit_ratio;
+    double   access_cost;
+    double   migration_cost;
+    double   net_cost;
+    uint64_t migrations;
+    uint64_t node_bytes[NF_MAX_NODES];
+} replay_result_t;
+
+static char *read_whole_file(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long len = ftell(fp);
+    if (len < 0 || fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return NULL; }
+    char *buf = (char *)malloc((size_t)len + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t got = fread(buf, 1, (size_t)len, fp);
+    fclose(fp);
+    buf[got] = '\0';
+    return buf;
+}
+
+static int replay_trace_file(const char *path, const numaflow_env_t *env, replay_result_t *out) {
+    memset(out, 0, sizeof(*out));
+    char *buf = read_whole_file(path);
+    if (!buf) { fprintf(stderr, "cannot read trace %s\n", path); return -1; }
+
+    const char *err = NULL;
+    nf_json_t *arr = nf_json_parse(buf, &err);
+    free(buf);
+    if (!arr) { fprintf(stderr, "parse %s: %s\n", path, err ? err : "unknown error"); return -1; }
+    if (nf_json_type(arr) != NF_JSON_ARR) {
+        fprintf(stderr, "trace %s: expected a top-level JSON array\n", path);
+        nf_json_free(arr);
+        return -1;
+    }
+
+    /* The accessing CPU is always on env->local_cpu_node (this is a
+     * single-threaded model, same convention nf_bench.c uses) - "local"
+     * means the data sits on that node *now* (final_node), which is
+     * independent of where a given key originally landed. Comparing
+     * final_node against a per-record origin_node instead would make
+     * local_hit_ratio tautologically 100% for any strategy that never
+     * migrates (final always equals origin when nothing moved it), making
+     * noop look best by construction regardless of where it actually
+     * happened to land - exactly the kind of structurally-guaranteed,
+     * uninformative metric this session already got burned by once. */
+    int local_node = (int)env->local_cpu_node;
+    double total_weight = 0.0, local_weight = 0.0;
+    size_t n = nf_json_arr_len(arr);
+    for (size_t i = 0; i < n; i++) {
+        nf_json_t *rec = nf_json_arr_get(arr, i);
+        size_t size   = (size_t)nf_json_obj_get_num(rec, "size", 0.0);
+        double acc    = nf_json_obj_get_num(rec, "access_count", 0.0);
+        int origin    = (int)nf_json_obj_get_num(rec, "origin_node", 0.0);
+        int final_node = (int)nf_json_obj_get_num(rec, "final_node", (double)origin);
+        if (origin < 0 || origin >= env->node_count) origin = 0;
+        if (final_node < 0 || final_node >= env->node_count) final_node = origin;
+
+        out->access_cost += nf_numa_access_cost(env, local_node, final_node, size) * acc;
+        total_weight += acc;
+        if (final_node == local_node) local_weight += acc;
+
+        if (final_node != origin) {
+            out->migration_cost += nf_numa_migrate_cost(env, origin, final_node, size);
+            out->migrations++;
+        }
+        out->node_bytes[final_node] += size;
+    }
+    nf_json_free(arr);
+    out->local_hit_ratio = total_weight > 0.0 ? local_weight / total_weight : 0.0;
+    out->net_cost = out->access_cost + out->migration_cost;
+    return 0;
+}
+
+static nf_json_t *replay_result_to_json(const char *name, const replay_result_t *r, int nodes) {
+    nf_json_t *o = nf_json_new_obj();
+    nf_json_obj_set(o, "strategy", nf_json_new_str(name));
+    nf_json_obj_set(o, "local_hit_ratio", nf_json_new_num(r->local_hit_ratio));
+    nf_json_obj_set(o, "access_cost", nf_json_new_num(r->access_cost));
+    nf_json_obj_set(o, "migration_cost", nf_json_new_num(r->migration_cost));
+    nf_json_obj_set(o, "net_cost", nf_json_new_num(r->net_cost));
+    nf_json_obj_set(o, "migrations", nf_json_new_num((double)r->migrations));
+    /* No tracker ran over a static trace, so there is no feedback score;
+     * kept as a zeroed field only so this stays drop-in shape-compatible
+     * with eval's result_to_json() for report.py. */
+    nf_json_obj_set(o, "feedback", nf_json_new_num(0.0));
+    nf_json_t *nb = nf_json_new_arr();
+    for (int i = 0; i < nodes; i++) nf_json_arr_push(nb, nf_json_new_num((double)r->node_bytes[i]));
+    nf_json_obj_set(o, "node_bytes", nb);
+    return o;
+}
+
+#define NF_CLI_MAX_TRACES 16
+
+static int cmd_replay(int argc, char **argv) {
+    const char *trace_names[NF_CLI_MAX_TRACES];
+    const char *trace_paths[NF_CLI_MAX_TRACES];
+    int trace_count = 0;
+    int nodes = 2;
+    double cxl_latency_ns = 0.0, cxl_bandwidth_mbps = 0.0;
+    const char *out = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--trace") == 0) {
+            const char *spec = argval(argc, argv, &i, argv[i]);
+            const char *eq = strchr(spec, '=');
+            if (!eq || eq == spec) { fprintf(stderr, "--trace expects name=file, got '%s'\n", spec); return 2; }
+            if (trace_count >= NF_CLI_MAX_TRACES) { fprintf(stderr, "too many --trace entries (max %d)\n", NF_CLI_MAX_TRACES); return 2; }
+            char *name = (char *)malloc((size_t)(eq - spec) + 1);
+            memcpy(name, spec, (size_t)(eq - spec)); name[eq - spec] = '\0';
+            trace_names[trace_count] = name;
+            trace_paths[trace_count] = eq + 1;
+            trace_count++;
+        }
+        else if (strcmp(argv[i], "--nodes") == 0) nodes = atoi(argval(argc, argv, &i, argv[i]));
+        else if (strcmp(argv[i], "--cxl-latency-ns") == 0) cxl_latency_ns = atof(argval(argc, argv, &i, argv[i]));
+        else if (strcmp(argv[i], "--cxl-bandwidth-mbps") == 0) cxl_bandwidth_mbps = atof(argval(argc, argv, &i, argv[i]));
+        else if (strcmp(argv[i], "--out") == 0) out = argval(argc, argv, &i, argv[i]);
+        else if (strcmp(argv[i], "--help") == 0) { usage(); return 0; }
+        else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
+    }
+    if (trace_count == 0) { fprintf(stderr, "at least one --trace name=file is required\n"); return 2; }
+
+    numaflow_env_t env; nf_numa_env_init(&env);
+    nf_numa_configure_default(&env, nodes);
+    if (cxl_latency_ns > 0.0 && env.node_count > 1) env.nodes[1].latency_ns = cxl_latency_ns;
+    if (cxl_bandwidth_mbps > 0.0 && env.node_count > 1) env.nodes[1].bandwidth_mbps = cxl_bandwidth_mbps;
+
+    nf_json_t *root = nf_json_new_obj();
+    nf_json_t *cj = nf_json_new_obj();
+    nf_json_obj_set(cj, "source", nf_json_new_str("real_placement_trace"));
+    nf_json_obj_set(cj, "nodes", nf_json_new_num((double)env.node_count));
+    nf_json_obj_set(cj, "cxl_latency_ns", nf_json_new_num(cxl_latency_ns));
+    nf_json_obj_set(cj, "cxl_bandwidth_mbps", nf_json_new_num(cxl_bandwidth_mbps));
+    nf_json_obj_set(root, "config", cj);
+
+    nf_json_t *tj = nf_json_new_arr();
+    for (int i = 0; i < env.node_count; i++) {
+        nf_json_t *node = nf_json_new_obj();
+        nf_json_obj_set(node, "name", nf_json_new_str(env.nodes[i].name));
+        nf_json_obj_set(node, "latency_ns", nf_json_new_num(env.nodes[i].latency_ns));
+        nf_json_obj_set(node, "bandwidth_mbps", nf_json_new_num(env.nodes[i].bandwidth_mbps));
+        nf_json_arr_push(tj, node);
+    }
+    nf_json_obj_set(root, "topology", tj);
+
+    nf_json_t *mj = nf_json_new_arr();
+    int rc = 0;
+    for (int i = 0; i < trace_count; i++) {
+        replay_result_t r;
+        if (replay_trace_file(trace_paths[i], &env, &r) != 0) { rc = 1; continue; }
+        nf_json_arr_push(mj, replay_result_to_json(trace_names[i], &r, env.node_count));
+    }
+    nf_json_obj_set(root, "migration", mj);
+    for (int i = 0; i < trace_count; i++) free((void *)trace_names[i]);
+    nf_numa_env_destroy(&env);
+
+    if (rc != 0) { nf_json_free(root); return 1; }
+
+    char *js = nf_json_serialize(root);
+    if (out) { rc = write_file(out, js); if (rc == 0) printf("wrote %s\n", out); }
+    else printf("%s\n", js);
+    free(js); nf_json_free(root);
+    return rc;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) { usage(); return 1; }
     const char *cmd = argv[1];
@@ -229,6 +417,7 @@ int main(int argc, char **argv) {
         return cmd_dump_ops(argv[2]);
     }
     if (strcmp(cmd, "eval") == 0) return cmd_eval(argc - 1, argv + 1);
+    if (strcmp(cmd, "replay") == 0) return cmd_replay(argc - 1, argv + 1);
     usage();
     return 1;
 }

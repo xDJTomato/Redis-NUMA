@@ -5,6 +5,31 @@
 All notable changes to this fork are documented here, in the style of
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — 相对性能基准：真实放置轨迹 x 标定代价模型（ADR-12）
+
+### Added
+
+- `numaflow replay --trace <name>=<file.json> ...`（`numaflow/src/nf_cli.c`）：
+  新 CLI 子命令，把一份真实放置轨迹（`{key,size,access_count,origin_node,
+  final_node}` 的 JSON 数组）喂进 NUMAflow 已有的纯函数代价模型
+  （`nf_numa_access_cost`/`nf_numa_migrate_cost`），支持和 `eval` 相同的
+  `--cxl-latency-ns`/`--cxl-bandwidth-mbps` 标定，输出和
+  `bench_<workload>.json` 的 `migration` 数组同构的 JSON——`numaflow/eval/
+  report.py`、`tests/report/generate_full_report.py` 不需要改一行代码即可
+  多画一张对比面板。
+- `tests/vm/collect_relative_trace.sh`（guest 内运行）+
+  `tests/vm/relative_perf_bench.sh`（开发机上运行）：在真实双节点 QEMU
+  guest 里对 noop/composite_lru/tinylfu/caat 四个策略采集真实放置轨迹
+  （fill 后即时快照 + 手动触发 `NUMA FLOW RUN default` 若干次 + 最终快照），
+  取回后跑 `numaflow replay` 产出 `results/bench_relative_perf.json` /
+  `bench_relative_perf_cxlcal.json`，并打印"这是建模投影不是实测延迟"的
+  双语免责声明。
+- 详见 ADR-12（`docs/new/09-architecture-decisions.md`），包括实现过程中
+  发现并修正的两个方法论错误：(1) 假设所有 key 起始节点是 0（实际上
+  `local_first` 分配策略下起始节点取决于分配调用发生时线程被调度到哪个
+  vCPU），(2) `local_hit_ratio` 一开始按 `final_node==origin_node` 算，导致
+  任何从不迁移的策略都结构性地恒为 100%，与实际放置质量无关。
+
 ## [Unreleased] — 迁移路径在真实双 NUMA 节点上的首次验证（ADR-11）
 
 在 QEMU 双 NUMA 节点 guest（`tests/vm/boot_numa_vm.sh`）里第一次真正执行迁移路径，

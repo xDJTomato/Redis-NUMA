@@ -479,3 +479,105 @@ promote 和 demote 的策略）在真实硬件上首次得到独立验证，而�
 长得一样，但含义完全不同。这也解释了为什么这两个 bug 能在一次消费了 ADR-08/09/10
 全部修复的干净代码上，仍然是首次出现：它们只在"迁移真的会发生"时才会被触发，而
 "迁移真的会发生"本身需要 ≥2 个 NUMA 节点这个此前从未满足过的前提条件。
+
+## ADR-12：相对性能基准——把真实放置轨迹喂进标定过的代价模型
+
+**问题**：ADR-11 之后，`placement_quality.sh` 能在真实双节点 guest 上测到真实的
+放置决策了；但用户明确说了"我现在手上没有双路机器了"——近期不可能在真实硬件上
+测 ns 级延迟收益。已有的两条对比路径都到了头：
+`tests/ycsb/run_algorithm_comparison.sh` 在 1 节点开发机上只能测到策略自身的
+记账开销（配对 A/B 测试已经把表面上 ~11% 的 CAAT "劣势"还原成噪声主导下的
+~3.4% 真实开销，且这个数字结构性地不可能显示出收益）；`placement_quality.sh`
+测得到放置质量，但 QEMU 的两个 `-numa node` 背后是同一块宿主机 DRAM，没有真实
+延迟差，测不出性能收益。此前调研 QEMU CXL 设备模拟（`cxl-type3`，CFMW 8 字节
+粒度 trap）和 CXLMemSim 的"legacy" PMU/ptrace 延迟注入路径均确认在这台机器上不
+可行——没有 PEBS（`max_precise=0`）、没有 resctrl、单插槽桌面 CPU 上没有真实的
+多节点内存域。那还有没有第三条路：既不需要真实多路硬件、又不是纯粹瞎猜的
+"相对性能"数字？
+
+**发现**：有。NUMAflow 的代价模型——`numaflow/src/numa_shim.c` 的
+`nf_numa_access_cost()`/`nf_numa_migrate_cost()`——是纯函数，只依赖
+`(from_node, to_node, bytes)` 加静态的 `env.nodes[].latency_ns`/
+`bandwidth_mbps` 常量，不依赖任何内部模拟状态。这套模型已经在
+`numaflow/src/nf_bench.c` 里给**合成**访问轨迹算 ns 级代价（`results/
+bench_<workload>.json`），也已经能通过 `numaflow eval --cxl-latency-ns/
+--cxl-bandwidth-mbps` 用一次真实 CXLMemSim device-link 检查测得的数字
+（125ns / 25000MB/s，`run_full_validation.sh` 已经在用）标定这两个常量。
+唯一缺失的一环：这套代价模型从未吃过一份**真实**轨迹——真的经过 Redis+
+NUMAflow 桥接产生的、真实的 key 热度和真实的最终落点，而不是 `nf_bench.c`
+自己从零生成的合成分布。把这两者接起来只需要一个新的、只读的 CLI 子命令，
+不用碰任何已有代码路径。
+
+**决策**：新增 `numaflow replay --trace <name>=<file.json> ...`
+（`numaflow/src/nf_cli.c`）：读入一份或多份轨迹（每条记录
+`{key, size, access_count, origin_node, final_node}`），对每条记录调用
+与 `eval` 完全相同的 `nf_numa_access_cost`/`nf_numa_migrate_cost`，输出和
+`bench_<workload>.json` 里 `migration` 数组同构的 JSON，`numaflow/eval/
+report.py` 和 `tests/report/generate_full_report.py` 不用改一行代码就能
+多画一张"relative_perf"面板（它们本来就是通配 `results/bench_*.json`）。
+配套新增两个脚本：
+- `tests/vm/collect_relative_trace.sh`（guest 内运行）：用比
+  `placement_quality.sh`（400 key/40 热点）更贴近真实评测规模的负载
+  （2000 key，两层重叠的随机窗口近似冷热分层——这台机器的
+  `redis-benchmark` 没有 `--distribution=zipf`），采两次快照：fill 之后
+  立刻采一次"起始节点"，灌完访问负载、手动跑几次 `NUMA FLOW RUN default`
+  之后再采一次"最终节点 + 访问次数"。
+- `tests/vm/relative_perf_bench.sh`（开发机上运行）：起停 guest 内的四个
+  策略、取回四份轨迹、调 `numaflow replay` 标定/不标定各跑一次，产出
+  `results/bench_relative_perf.json` 和 `results/bench_relative_perf_cxlcal.json`，
+  末尾打印双语免责声明。
+
+**实现过程中发现并修正的两个方法论错误**（都是"写完立刻手算/单元验证"抓出来
+的，不是事后复盘）：
+1. 第一版 `collect_relative_trace.sh` 把每个 key 的 `origin_node` 硬编码成
+   0，假设"所有 key 都是在本地节点分配的"。这个假设是错的：这台 guest 上
+   默认的分配策略是 `local_first`，但"local"是相对于*当前执行分配调用的
+   CPU*而言的，而 Redis 单线程的主线程会被 guest 内核在 4 个 vCPU（分属
+   两个节点）之间调度——所以哪怕一个 key 从未被迁移过，它落在哪个节点也
+   不保证是 0。这个 bug 被 `noop`（DAG 是空图，不可能迁移任何东西）自己的
+   结果测出来了：第一次跑出"`noop` 也有 1116/2000 个 key 的 `final_node !=
+   0`"，也就是把"本来就分配在别处"错记成了"被迁移过去"。修复：改成真的
+   在 fill 之后立刻采一次快照记录真实的起始节点，而不是假设。
+2. 第一版 `nf_cli.c` 的 `replay_trace_file()` 把 `local_hit_ratio` 算成
+   "`final_node == origin_node` 的访问占比"。这个指标对任何从不迁移的策略
+   都会**结构性地恒等于 100%**（没动过，`final` 必然等于 `origin`），跟这个
+   策略实际把数据放得好不好完全无关——用这个指标画图会让 `noop` 看起来
+   "本地命中率最高"，正是本次会话前半段已经吃过一次亏的那种"把噪声/伪信号
+   当真实信号"。修复：改成 `final_node == env->local_cpu_node`（即"数据现在
+   是否坐在快速/本地节点上"，`nf_bench.c` 里 `local_hit_ratio` 的真实语义），
+   和 `origin_node` 完全解耦——`origin_node` 只用于判断"是否发生过迁移"和算
+   迁移代价，不参与"是否命中本地"的判断。修复后重新跑通全流程，`noop` 的
+   `local_hit_ratio` 变成有意义的 62.4%（低于三个真实策略的 89.9%-94.2%），
+   `net_cost` 也远高于其它三者——这才是这个指标该有的样子。
+
+**验证**：手写 3-4 条记录的最小轨迹，手算期望的 `access_cost`/
+`migration_cost`/`local_hit_ratio`/`node_bytes`，与 `numaflow replay` 的实际
+输出逐位核对一致（两轮，第二轮专门构造 `origin_node != final_node` 且
+`final_node != 0` 的记录来验证上面第 2 个修复）。用会话里此前已经跑通的
+QEMU 双节点 guest（`tests/vm/boot_numa_vm.sh --keep`）跑通了完整链路：四个
+策略的真实轨迹采集 → `numaflow replay`（标定/不标定各一次）→
+`results/bench_relative_perf*.json` → `python3 numaflow/eval/report.py`
+成功多画出两张面板，无需改动 `report.py`。`numaflow` 自身 `make test` 复测
+全部通过。跑通后的真实结果（标定版，125ns/25000MB/s）：
+
+```
+noop           local_hit_ratio= 62.4%  net_cost=15,560,715  migrations=0
+composite_lru  local_hit_ratio= 94.2%  net_cost= 6,788,904  migrations=165
+tinylfu        local_hit_ratio= 94.1%  net_cost= 6,396,492  migrations=159
+caat           local_hit_ratio= 89.9%  net_cost= 8,477,464  migrations=1087
+```
+
+CAAT 在这次跑里 `net_cost` 反而比 composite_lru/tinylfu 高，不是回归：这台
+guest 只有 2000 个 4KB key（~8MB），DRAM 容量（1GB/节点）完全没有压力，CAAT
+比另外两者多做的几百次额外迁移全是"降级"（demote，composite_lru/tinylfu 在
+这套引擎里只做促升，见 ADR-11），在没有容量压力时这些降级不会换回任何访问
+收益，只白白多付迁移代价——这正是 ADR-09 追加发现里"CAAT 的优势依赖 budget/
+keyspace 比例"那条结论在真实放置决策上的再次印证，不是矛盾。
+
+**局限（必须每次和这个数字一起说清楚）**：这是"真实放置决策 × 标定/合成硬件
+参数"算出来的建模投影，不是在真实硬件上实测到的延迟；标定常数本身来自一次
+CXLMemSim 简化设备模型的检查，不是硅片实测；这次给出的 2000 key/无容量压力的
+参数化本身也是一个具体场景，换一个 budget/keyspace 比例的场景，CAAT vs
+composite_lru/tinylfu 的相对排序完全可能反过来（正如上面那条结果所示）。
+`tests/vm/relative_perf_bench.sh` 在结尾会打印这条声明，避免它被截图出去时
+和真实吞吐/延迟数字混在一起看。

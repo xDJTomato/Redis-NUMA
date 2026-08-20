@@ -157,6 +157,24 @@ cd tests/ycsb
 | `comparison_report_latency.png` | 5 组按阶段的平均延迟柱状图 |
 | `summary.txt` | 5 组每阶段吞吐量/延迟文本摘要 |
 
+### 这张图能不能代表迁移收益？—— 三层对比工具的分工
+
+`run_algorithm_comparison.sh` 只在**一个 NUMA 节点**的机器上跑的话，
+`NUMA MIGRATE STATS` 的迁移次数恒为 0（决策了但没有第二个节点可搬），这张图
+测到的从来不是迁移收益，只是策略自身的记账开销——本仓库做过一次配对 A/B
+测试，把表面上 ~11% 的 CAAT "劣势"还原成了噪声主导下的 ~3.4% 真实开销
+（见 `docs/new/09-architecture-decisions.md` ADR-09 的追加发现）。真正测
+"迁移有没有用"需要另外两层工具，三者分工如下：
+
+| 工具 | 跑在哪 | 测的是什么 | 测不到什么 |
+|------|--------|-----------|-----------|
+| `run_algorithm_comparison.sh`（本文件） | 1 节点开发机 | 吞吐/延迟，噪声主导 | 任何迁移收益（migrations 恒为 0） |
+| `tests/vm/placement_quality.sh` | 2 节点 QEMU guest | 真实放置质量（热 key 是否留在本地、冷 key 是否被挪走） | 性能收益（QEMU 两个 `-numa node` 背后是同一块宿主机 DRAM，没有真实延迟差） |
+| `tests/vm/relative_perf_bench.sh` | 2 节点 QEMU guest 采集 + 开发机建模 | 把真实放置决策喂进 NUMAflow 标定过的代价模型，算出建模的相对 ns 级性能 | 真实硬件延迟（是"真实决策 x 标定/合成硬件参数"的建模投影，不是实测；见 ADR-12） |
+
+后两者需要先用 `tests/vm/boot_numa_vm.sh --keep --timeout 600` 起一个双节点
+QEMU guest。三者互补，不是谁取代谁。
+
 ### 依赖
 
 同 `run_bw_benchmark_vanilla.sh`：需要预先生成同版本的原版 Redis 7.2.6 对比基线

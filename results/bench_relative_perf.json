@@ -1,0 +1,74 @@
+{
+  "config": {
+    "source": "real_placement_trace",
+    "nodes": 2,
+    "cxl_latency_ns": 0,
+    "cxl_bandwidth_mbps": 0
+  },
+  "topology": [
+    {
+      "name": "dram0",
+      "latency_ns": 60,
+      "bandwidth_mbps": 20000
+    },
+    {
+      "name": "cxl1",
+      "latency_ns": 300,
+      "bandwidth_mbps": 8000
+    }
+  ],
+  "migration": [
+    {
+      "strategy": "tinylfu",
+      "local_hit_ratio": 0.94104134762633995,
+      "access_cost": 7685811.1999996109,
+      "migration_cost": 272971.1999999992,
+      "net_cost": 7958782.3999996101,
+      "migrations": 159,
+      "feedback": 0,
+      "node_bytes": [
+        5668864,
+        2523136
+      ]
+    },
+    {
+      "strategy": "noop",
+      "local_hit_ratio": 0.62408000949667619,
+      "access_cost": 31054483.200001493,
+      "migration_cost": 0,
+      "net_cost": 31054483.200001493,
+      "migrations": 0,
+      "feedback": 0,
+      "node_bytes": [
+        5087232,
+        3104768
+      ]
+    },
+    {
+      "strategy": "composite_lru",
+      "local_hit_ratio": 0.94227656896241685,
+      "access_cost": 8133615.9999996144,
+      "migration_cost": 283271.99999999913,
+      "net_cost": 8416887.9999996144,
+      "migrations": 165,
+      "feedback": 0,
+      "node_bytes": [
+        5562368,
+        2629632
+      ]
+    },
+    {
+      "strategy": "caat",
+      "local_hit_ratio": 0.89899540888222196,
+      "access_cost": 9707613.5999999661,
+      "migration_cost": 1866161.6000000339,
+      "net_cost": 11573775.199999999,
+      "migrations": 1087,
+      "feedback": 0,
+      "node_bytes": [
+        1724416,
+        6467584
+      ]
+    }
+  ]
+}
