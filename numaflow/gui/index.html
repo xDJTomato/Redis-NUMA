@@ -1,254 +1,207 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>NUMAflow - DAG Strategy Editor</title>
-<style>
-:root { --bg:#f4f5f7; --panel:#fff; --border:#e5e7eb; --accent:#2a9d8f; }
-* { box-sizing:border-box; }
-body { margin:0; font-family:"Segoe UI",Arial,sans-serif; background:var(--bg); color:#222; height:100vh; display:flex; flex-direction:column; }
-header { height:52px; background:#1f2937; color:#fff; display:flex; align-items:center; gap:10px; padding:0 16px; }
-header h1 { font-size:16px; margin:0; font-weight:600; flex:1; }
-header button { background:#374151; color:#fff; border:1px solid #4b5563; border-radius:6px; padding:6px 12px; font-size:13px; cursor:pointer; }
-header button:hover { background:#4b5563; }
-header button.primary { background:var(--accent); border-color:var(--accent); }
-#main { flex:1; display:flex; overflow:hidden; }
-#palette { width:220px; background:var(--panel); border-right:1px solid var(--border); overflow-y:auto; padding:8px; }
-#palette .cat { font-size:11px; text-transform:uppercase; color:#6b7280; margin:10px 0 4px; font-weight:600; }
-#palette .op { padding:6px 8px; margin:2px 0; border:1px solid var(--border); border-radius:6px; font-size:12px; cursor:pointer; background:#fafafa; }
-#palette .op:hover { background:#eef6f5; border-color:var(--accent); }
-#canvas-wrap { flex:1; position:relative; overflow:hidden; }
-#canvas { width:100%; height:100%; background:#fbfbfb; cursor:default; }
-#inspector { width:300px; background:var(--panel); border-left:1px solid var(--border); overflow-y:auto; padding:12px; font-size:13px; }
-#inspector h3 { font-size:14px; margin:0 0 8px; }
-#inspector .row { margin:6px 0; }
-#inspector input { width:100%; padding:6px; border:1px solid var(--border); border-radius:6px; font-size:12px; }
-#inspector .add { background:#eef6f5; border:1px dashed var(--accent); color:var(--accent); padding:4px 8px; border-radius:6px; cursor:pointer; font-size:12px; }
-#result { white-space:pre-wrap; background:#0f172a; color:#a5f3fc; padding:10px; border-radius:8px; font-family:monospace; font-size:12px; margin-top:8px; min-height:40px; }
-.node { cursor:grab; }
-.node text { pointer-events:none; user-select:none; font-family:"Segoe UI",Arial,sans-serif; }
-.port { cursor:crosshair; }
-.edge { fill:none; stroke:#94a3b8; stroke-width:2; }
-</style>
-</head>
-<body>
-<header>
-  <h1>NUMAflow - DAG Strategy Editor</h1>
-  <button onclick="newWorkflow()">New</button>
-  <select id="tmpl" style="background:#374151;color:#fff;border:1px solid #4b5563;border-radius:6px;padding:6px;font-size:12px;max-width:280px"></select>
-  <button onclick="loadTemplate()">Load Template</button>
-  <button onclick="loadFile()">Import JSON</button>
-  <button onclick="download()">Export JSON</button>
-  <button class="primary" onclick="runWorkflow()">Run</button>
-</header>
-<div id="main">
-  <div id="palette"></div>
-  <div id="canvas-wrap">
-    <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
-  </div>
-  <div id="inspector">
-    <h3>Inspector</h3>
-    <div id="node-info">Select a node.</div>
-    <div id="params"></div>
-    <h3 style="margin-top:16px">Run result</h3>
-    <div id="result">(nothing yet)</div>
-    <h3 style="margin-top:16px">Workflow JSON</h3>
-    <textarea id="json" rows="14" style="width:100%;font-family:monospace;font-size:11px;border:1px solid #e5e7eb;border-radius:6px"></textarea>
-  </div>
-</div>
-<input type="file" id="file" style="display:none" onchange="onFile(event)">
-
-<script>
-var OPS = [];
-var nodes = [];
-var edges = [];
-var nextId = 1;
-var selectedId = null;
-var connecting = null;
-var dragging = null;
-var dragOff = null;
-var CATCOLORS = {alloc:"#dbeafe", score:"#fef3c7", filter:"#fce7f3", rank:"#dcfce7", decide:"#ede9fe", emit:"#fee2e2", track:"#cffafe"};
-
-function $(s){ return document.querySelector(s); }
-
-function loadOps(){
-  fetch("/api/ops").then(function(r){return r.json();}).then(function(list){OPS=list;renderPalette();})
-  .catch(function(){ fetch("ops.json").then(function(r){return r.json();}).then(function(list){OPS=list;renderPalette();}); });
-}
-
-function renderPalette(){
-  var cats = {};
-  OPS.forEach(function(o){ (cats[o.category]=cats[o.category]||[]).push(o); });
-  var html = "";
-  Object.keys(cats).sort().forEach(function(cat){
-    html += "<div class=cat>"+cat+"</div>";
-    cats[cat].forEach(function(o){
-      html += "<div class=op data-op="+o.name+" title="+o.description+">"+o.name+"</div>";
-    });
-  });
-  $("#palette").innerHTML = html;
-  Array.prototype.forEach.call(document.querySelectorAll(".op"), function(el){
-    el.onclick = function(){ addNode(el.getAttribute("data-op")); };
-  });
-}
-
-function findNode(id){ for(var i=0;i<nodes.length;i++) if(nodes[i].id===id) return nodes[i]; return null; }
-function nodeColor(op){ var d=null; for(var i=0;i<OPS.length;i++) if(OPS[i].name===op) d=OPS[i]; var c = d && CATCOLORS[d.category] ? CATCOLORS[d.category] : "#e2e8f0"; return c; }
-
-function addNode(op){
-  var title = op; var desc = "";
-  for(var i=0;i<OPS.length;i++) if(OPS[i].name===op){ title=OPS[i].title; desc=OPS[i].description; }
-  var n = {id:"n"+(nextId++), op:op, title:title, x:100+Math.random()*320, y:100+Math.random()*220, params:{}};
-  nodes.push(n);
-  selectedId = n.id;
-  render();
-}
-
-function nodeBox(n){ return {x:n.x, y:n.y, w:170, h:44}; }
-
-function render(){
-  var svg = $("#canvas");
-  var s = "";
-  // edges
-  edges.forEach(function(e){
-    var a = findNode(e.from), b = findNode(e.to);
-    if(!a||!b) return;
-    var x1 = a.x+170, y1 = a.y+22;
-    var x2 = b.x, y2 = b.y+22;
-    var dx = Math.max(40, Math.abs(x2-x1)*0.5);
-    s += "<path class=edge d='M"+x1+","+y1+" C"+(x1+dx)+","+y1+" "+(x2-dx)+","+y2+" "+x2+","+y2+"'></path>";
-  });
-  // nodes
-  nodes.forEach(function(n){
-    var b = nodeBox(n);
-    var col = nodeColor(n.op);
-    var sel = (n.id===selectedId) ? " stroke:#2a9d8f stroke-width:2" : " stroke:#cbd5e1 stroke-width:1";
-    s += "<g class=node data-id="+n.id+">";
-    s += "<rect x="+b.x+" y="+b.y+" width="+b.w+" height="+b.h+" rx=8 fill="+col+sel+"></rect>";
-    s += "<circle class=port data-port=in data-node="+n.id+" cx="+b.x+" cy="+(b.y+22)+" r=7 fill=#64748b></circle>";
-    s += "<circle class=port data-port=out data-node="+n.id+" cx="+(b.x+b.w)+" cy="+(b.y+22)+" r=7 fill=#64748b></circle>";
-    s += "<text x="+(b.x+16)+" y="+(b.y+16)+" font-size=11 font-weight=600 fill=#111>"+escapeHtml(n.title)+"</text>";
-    s += "<text x="+(b.x+16)+" y="+(b.y+32)+" font-size=10 fill=#475569>"+escapeHtml(n.id)+"</text>";
-    s += "</g>";
-  });
-  svg.innerHTML = s;
-  // wire events
-  Array.prototype.forEach.call(document.querySelectorAll(".node"), function(g){
-    var id = g.getAttribute("data-id");
-    g.onmousedown = function(ev){ startDrag(id, ev); };
-    g.onmouseup = function(){ select(id); };
-  });
-  Array.prototype.forEach.call(document.querySelectorAll(".port"), function(p){
-    p.onmousedown = function(ev){ ev.stopPropagation(); var id=p.getAttribute("data-node"); var port=p.getAttribute("data-port");
-      if(port==="out"){ connecting=id; }
-      else if(connecting && connecting!==id){ edges.push({from:connecting,to:id}); connecting=null; }
-      else { connecting=null; }
-      render();
-    };
-  });
-}
-
-function escapeHtml(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-
-function startDrag(id, ev){
-  dragging = id; var n = findNode(id);
-  var rect = $("#canvas").getBoundingClientRect();
-  dragOff = {x: ev.clientX - n.x, y: ev.clientY - n.y};
-  ev.preventDefault();
-}
-document.addEventListener("mousemove", function(ev){
-  if(!dragging) return;
-  var n = findNode(dragging); if(!n) return;
-  n.x = ev.clientX - dragOff.x; n.y = ev.clientY - dragOff.y;
-  render();
-});
-document.addEventListener("mouseup", function(){ dragging=null; });
-document.addEventListener("keydown", function(ev){
-  if(ev.key==="Delete" && selectedId){
-    var id = selectedId;
-    nodes = nodes.filter(function(n){return n.id!==id;});
-    edges = edges.filter(function(e){return e.from!==id && e.to!==id;});
-    selectedId=null; render();
-  }
-});
-
-function select(id){ selectedId=id; render(); renderInspector(); }
-function renderInspector(){
-  var n = findNode(selectedId);
-  if(!n){ $("#node-info").innerHTML="Select a node."; $("#params").innerHTML=""; return; }
-  var d=null; for(var i=0;i<OPS.length;i++) if(OPS[i].name===n.op) d=OPS[i];
-  $("#node-info").innerHTML = "<b>"+escapeHtml(n.title)+"</b><br><span style=color:#6b7280>"+escapeHtml(n.id)+" &middot; "+escapeHtml(n.op)+"</span>"+(d?"<br><span style=color:#6b7280;font-size:12px>"+escapeHtml(d.description)+"</span>":"");
-  var html = "<div class=row><button class=add onclick=addParam()>+ add param</button></div>";
-  Object.keys(n.params).forEach(function(k){
-    html += "<div class=row><label>"+escapeHtml(k)+"</label><input value="+escapeHtml(n.params[k])+" onchange=setParam('"+k+"',this.value)></div>";
-  });
-  html += "<div class=row><button style='background:#fee2e2;border:1px solid #fca5a5;border-radius:6px;padding:4px 8px;cursor:pointer' onclick=removeNode()>Delete node</button></div>";
-  $("#params").innerHTML = html;
-}
-function addParam(){
-  var n = findNode(selectedId); if(!n) return;
-  var k = prompt("param key"); if(!k) return;
-  n.params[k] = ""; renderInspector();
-}
-function setParam(k, v){ var n=findNode(selectedId); if(n) n.params[k]=v; }
-function removeNode(){ if(selectedId){ var id=selectedId; nodes=nodes.filter(function(n){return n.id!==id;}); edges=edges.filter(function(e){return e.from!==id&&e.to!==id;}); selectedId=null; render(); renderInspector(); } }
-
-function toWorkflow(){
-  return {
-    name:"custom_workflow", description:"Built in the NUMAflow DAG editor",
-    nodes: nodes.map(function(n){ var o={id:n.id,op:n.op}; if(Object.keys(n.params).length) o.params=n.params; return o; }),
-    edges: edges.map(function(e){ return {from:e.from,to:e.to}; })
-  };
-}
-function refreshJson(){ $("#json").value = JSON.stringify(toWorkflow(), null, 2); }
-
-function newWorkflow(){ nodes=[]; edges=[]; selectedId=null; render(); renderInspector(); refreshJson(); }
-function download(){ refreshJson(); var blob = new Blob([$("#json").value], {type:"application/json"}); var a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="workflow.json"; a.click(); }
-function loadFile(){ $("#file").click(); }
-function loadWorkflowObject(w){
-  nodes = []; edges = []; nextId = 1;
-  (w.nodes||[]).forEach(function(n){
-    nodes.push({id:n.id, op:n.op, title:n.op, x:100+Math.random()*300, y:100+Math.random()*200, params:n.params||{}});
-    var num = parseInt(n.id.replace(/[^0-9]/g,"")); if(!isNaN(num) && num>=nextId) nextId=num+1;
-  });
-  (w.edges||[]).forEach(function(e){ edges.push({from:e.from,to:e.to}); });
-  selectedId=null; render(); renderInspector(); refreshJson();
-}
-function loadTemplates(){
-  fetch("/api/templates").then(function(r){return r.json();}).then(function(list){
-    var s = document.getElementById("tmpl"); if(!s) return;
-    var html = "<option value=''>pick a template...</option>";
-    var cat = "";
-    list.forEach(function(t){
-      if(t.category!==cat){ html += "<option disabled>-- "+t.category+" --</option>"; cat=t.category; }
-      html += "<option value="+t.name+">"+t.name+": "+t.description+"</option>";
-    });
-    s.innerHTML = html;
-  }).catch(function(){});
-}
-function loadTemplate(){
-  var s = document.getElementById("tmpl"); if(!s || !s.value) return;
-  fetch("/api/template/"+s.value).then(function(r){return r.json();}).then(function(w){ loadWorkflowObject(w); }).catch(function(){ document.getElementById("result").textContent = "template load failed (is the server running?)"; });
-}
-function onFile(ev){
-  var f = ev.target.files[0]; if(!f) return;
-  var r = new FileReader();
-  r.onload = function(){ loadWorkflowObject(JSON.parse(r.result)); };
-  r.readAsText(f);
-}
-function runWorkflow(){
-  refreshJson();
-  $("#result").textContent = "running...";
-  fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"}, body: $("#json").value})
-  .then(function(r){return r.text();})
-  .then(function(t){ $("#result").textContent = t; })
-  .catch(function(){ $("#result").textContent = "server not running: start python gui/server.py"; });
-}
-
-loadOps();
-loadTemplates();
-render();
-</script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#f7f8fb" />
+    <title>NUMAflow — Workflow studio</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="rail" aria-label="Workspace navigation">
+        <div class="brand-mark" title="NUMAflow">N<span>·</span></div>
+        <div class="rail-divider"></div>
+        <button
+          class="rail-button active"
+          title="Workflow editor"
+          aria-label="Workflow editor"
+        >
+          ▦
+        </button>
+        <a
+          class="rail-button rail-bottom"
+          href="https://github.com/xDJTomato/Redis-NUMA"
+          target="_blank"
+          rel="noopener"
+          title="Project repository"
+          aria-label="Project repository"
+          >↗</a
+        >
+      </aside>
+      <div class="workspace">
+        <header class="topbar">
+          <div class="identity">
+            <span class="product">NUMAflow</span><span class="slash">/</span
+            ><span class="crumb">Workflow studio</span>
+          </div>
+          <div class="top-actions">
+            <button
+              id="newBtn"
+              class="button subtle"
+              title="Start a blank workflow"
+            >
+              New
+            </button>
+            <button id="importBtn" class="button subtle">Import</button>
+            <button id="exportBtn" class="button outline">
+              Export JSON <span aria-hidden="true">↗</span>
+            </button>
+            <button id="runBtn" class="button primary">
+              <span aria-hidden="true">▶</span> Run workflow
+            </button>
+          </div>
+        </header>
+        <div class="editor-heading">
+          <div class="heading-main">
+            <div class="eyebrow">
+              <span class="live-dot"></span> WORKFLOW EDITOR
+              <span class="eyebrow-divider">/</span> LOCAL STUDIO
+            </div>
+            <input
+              id="workflowName"
+              aria-label="Workflow name"
+              value="Adaptive tiering"
+              spellcheck="false"
+              maxlength="80"
+            />
+            <div class="heading-subtitle">
+              Build a memory-placement strategy by connecting actions from left
+              to right.
+            </div>
+          </div>
+          <div class="template-picker">
+            <label for="templateSelect">START FROM A TEMPLATE</label
+            ><select id="templateSelect" aria-label="Choose a template">
+              <option value="">Choose a template…</option></select
+            ><button id="loadTemplateBtn" class="button outline" disabled>
+              Load
+            </button>
+          </div>
+        </div>
+        <main class="editor">
+          <aside class="palette" id="palettePanel" aria-label="Action library">
+            <div class="panel-title">
+              <div>
+                <span class="kicker">01 / BUILD</span>
+                <h2>Actions</h2>
+              </div>
+              <span class="count">7</span>
+            </div>
+            <p class="panel-intro">
+              One action per step. Choose its behavior in the settings panel.
+            </p>
+            <label class="search-wrap"
+              ><span aria-hidden="true">⌕</span
+              ><input
+                id="actionSearch"
+                type="search"
+                placeholder="Find an action…"
+                aria-label="Search actions"
+            /></label>
+            <div class="library-label">ACTION LIBRARY</div>
+            <div id="actionList"></div>
+            <div class="palette-hint">
+              <span class="hint-icon">✳</span>
+              <div>
+                <strong>Build your flow</strong><br />Click an action to add it.
+                Drag a connector between nodes to define the order.
+              </div>
+            </div>
+          </aside>
+          <section class="canvas-area" aria-label="Workflow canvas">
+            <div class="canvas-toolbar">
+              <div class="canvas-caption">
+                <span class="canvas-icon">▦</span><span>Canvas</span
+                ><span id="flowCount" class="flow-count"
+                  >0 actions · 0 connections</span
+                >
+              </div>
+              <div class="canvas-tools">
+                <button id="fitBtn" title="Fit workflow to canvas">
+                  Fit view</button
+                ><span class="tool-divider"></span
+                ><button id="zoomOut" title="Zoom out" aria-label="Zoom out">
+                  −</button
+                ><span id="zoomLabel">100%</span
+                ><button id="zoomIn" title="Zoom in" aria-label="Zoom in">
+                  +
+                </button>
+              </div>
+            </div>
+            <div id="canvasWrap" class="canvas-wrap">
+              <svg id="canvas" role="img" aria-label="Editable workflow graph">
+                <defs>
+                  <marker
+                    id="arrow"
+                    viewBox="0 0 10 10"
+                    refX="9"
+                    refY="5"
+                    markerWidth="7"
+                    markerHeight="7"
+                    orient="auto"
+                  >
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#a2b2c5" />
+                  </marker>
+                </defs>
+                <g id="stage"></g>
+              </svg>
+              <div id="emptyState" class="empty-state" hidden>
+                <div class="empty-glyph">✳</div>
+                <h3>Your canvas is ready</h3>
+                <p>
+                  Add an action from the library, or load a template to get
+                  started.
+                </p>
+                <button id="emptyAdd" class="button primary">
+                  + Add first action
+                </button>
+              </div>
+              <div class="canvas-tip">
+                Drag nodes · Drag connectors to link · Drag background to pan
+              </div>
+            </div>
+            <div class="statusbar">
+              <span id="statusText"
+                ><span class="status-dot"></span> Ready to build</span
+              ><span>NUMA / CXL STRATEGY WORKSPACE</span>
+            </div>
+          </section>
+          <aside class="inspector" aria-label="Action settings">
+            <div class="panel-title">
+              <div>
+                <span class="kicker">02 / CONFIGURE</span>
+                <h2>Settings</h2>
+              </div>
+              <span class="settings-icon">⚙</span>
+            </div>
+            <div id="inspectorBody"></div>
+          </aside>
+        </main>
+        <div class="output-bar">
+          <div class="output-label">
+            <span class="output-light"></span> EXECUTION OUTPUT
+            <span class="output-help"
+              >Run against a five-item synthetic workload</span
+            >
+          </div>
+          <button
+            id="toggleOutput"
+            aria-expanded="false"
+            aria-controls="outputPanel"
+          >
+            Show output <span>⌄</span>
+          </button>
+        </div>
+        <div id="outputPanel" class="output-panel" hidden>
+          <div id="outputText" role="status" aria-live="polite">
+            No run yet. Select Run workflow to test this DAG.
+          </div>
+        </div>
+      </div>
+    </div>
+    <input type="file" id="fileInput" accept="application/json,.json" hidden />
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
 </html>

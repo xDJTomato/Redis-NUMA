@@ -63,15 +63,19 @@ $(BUILD)/test_alloc$(EXE): $(CORE_OBJS) tests/test_alloc.c | $(BUILD)
 $(BUILD)/test_template$(EXE): $(CORE_OBJS) tests/test_template.c | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) tests/test_template.c $(CORE_OBJS) -o $@ $(LDLIBS)
 
+$(BUILD)/test_actions$(EXE): $(CORE_OBJS) tests/test_actions.c | $(BUILD)
+	$(CC) $(CFLAGS) $(INC) tests/test_actions.c $(CORE_OBJS) -o $@ $(LDLIBS)
+
 $(BUILD)/nf_tui$(EXE): $(OBJS) tui/nf_tui.c | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) tui/nf_tui.c $(OBJS) -o $@ $(LDLIBS)
 
-test: $(BUILD)/test_all$(EXE) $(BUILD)/test_smoke$(EXE) $(BUILD)/test_adapt$(EXE) $(BUILD)/test_alloc$(EXE) $(BUILD)/test_template$(EXE) $(BUILD)/nf_tui$(EXE)
+test: $(BUILD)/test_all$(EXE) $(BUILD)/test_smoke$(EXE) $(BUILD)/test_adapt$(EXE) $(BUILD)/test_alloc$(EXE) $(BUILD)/test_template$(EXE) $(BUILD)/test_actions$(EXE) $(BUILD)/nf_tui$(EXE)
 	$(BUILD)/test_all$(EXE)
 	$(BUILD)/test_smoke$(EXE)
 	$(BUILD)/test_adapt$(EXE)
 	$(BUILD)/test_alloc$(EXE)
 	$(BUILD)/test_template$(EXE)
+	$(BUILD)/test_actions$(EXE)
 
 ops: $(BIN)
 	$(BIN) ops

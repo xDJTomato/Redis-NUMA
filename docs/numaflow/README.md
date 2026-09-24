@@ -45,7 +45,22 @@ numaflow/
 
 ## 2. 策略的原子化拆解
 
-`nf_ops.c` 注册了 **36 个原子操作**，按类别划分，并逐一对应到已有策略：
+`nf_ops.c` 面向新工作流提供 **7 个可配置动作**。每个动作通过 `params.mode` 选择
+行为；`move_items` 的 `demote`/`balance` 模式会在一个动作内完成标记和迁移。
+已有的 36 个底层操作 ID 仍可执行（旧 `demote_cold`/`balance_nodes` 仍只负责标记），
+因此旧模板和导出的 JSON 无须迁移：
+
+| 动作 | 用途 | 示例 `mode` |
+| --- | --- | --- |
+| `place_items` | 新对象的 NUMA 放置 | `adaptive`, `local`, `latency` |
+| `score_items` | 计算热度 / 频率 / 收益 | `hotness`, `frequency`, `benefit` |
+| `filter_items` | 筛选候选对象 | `hot`, `cold`, `remote`, `size_min` |
+| `rank_items` | 按信号排序 | `recent`, `hotness`, `blend` |
+| `route_items` | 选目标节点或应用预算 | `destination`, `budget` |
+| `move_items` | 执行迁移 / 降级冷数据 / 平衡 | `migrate`, `demote`, `balance` |
+| `track_items` | 访问跟踪 / CMS 更新 | `access`, `observe`, `decay` |
+
+下面列出保留的底层操作，供阅读旧模板和策略实现时参考：
 
 | 类别 | 原子操作 | 对应已有策略语义 |
 | --- | --- | --- |
@@ -351,9 +366,12 @@ guest 内四个策略、取回四份轨迹、跑两次 `replay`（标定/不标�
 - **TUI**（`make` 后运行 `./build/nf_tui`）：列出原子操作/策略、以原子操作组合自定义
   工作流、保存/加载 JSON、运行评测、创建**周期性的内存调度任务**并逐 tick 打印追踪
   反馈分。
-- **GUI**（`python gui/server.py` 后打开 http://127.0.0.1:8090）：N8N 风格可视化编辑器，
-  拖拽原子操作节点、连线成 DAG、编辑参数、导入/导出/运行工作流；后端通过 HTTP 调用
-  编译好的 C11 `numaflow` 二进制执行。
+- **GUI**（`python3 gui/server.py` 后打开 http://127.0.0.1:8090）：画布只展示
+  7 个动作，点选动作并在右侧设置行为和参数；拖动端口连线、拖动节点调整布局，画布
+  空白处拖动可平移。支持模板、搜索、缩放、JSON 导入/导出和模拟执行。旧模板仍按原样
+  显示及执行，不会自动改写 ID。执行使用五个合成对象，**并不是实机迁移结果**。
+  对于大量节点的模板，默认以可阅读的缩放显示起始节点；「Fit view」可概览全图。
+  后端通过 HTTP 调用编译好的 C11 `numaflow` 二进制。
 
 ## 5. 轻量缓存行为追踪框架
 
@@ -370,15 +388,23 @@ guest 内四个策略、取回四份轨迹、跑两次 `replay`（标定/不标�
 ```bash
 cd numaflow
 make            # 构建 numaflow CLI + TUI（GNU make 或 mingw32-make 均可）
-make test       # 编译并运行单元 + 集成测试
+make test       # 编译并运行单元 + 集成测试（含 36 个新旧模式等价检查）
 make report     # 生成评测 JSON + results/report.html
-./build/numaflow ops        # 列出 36 个原子操作
+./build/numaflow ops        # 列出 7 个新工作流动作
+./build/numaflow ops --all  # 同时列出 36 个兼容旧操作
 ./build/numaflow strategies # 列出 13 个内置策略
 ./build/numaflow eval --workload zipf --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
                              # 合成轨迹公平评测，可选标定（见 3 节）
 ./build/numaflow replay --trace caat=trace_caat.json [--trace ...] \
                          --cxl-latency-ns 125 --cxl-bandwidth-mbps 25000
                              # 真实放置轨迹 + 标定代价模型（见 3.1 节，ADR-12）
+```
+
+可选浏览器视觉/交互测试（需 Firefox、geckodriver、Python Selenium）：
+
+```bash
+python3 gui/test_ui.py    # 自动启动本地 HTTP 服务、截图并检查布局、连线、执行与响应式视图
+# 可通过 NF_SCREENSHOT_DIR 指定截图目录
 ```
 
 在 Linux + 真实 libnuma 环境下，本子系统同样可编译运行（Makefile 自动选择后缀）；

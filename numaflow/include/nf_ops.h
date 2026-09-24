@@ -63,7 +63,7 @@ int  nf_ops_register(const nf_op_t *op);
 const nf_op_t *nf_ops_find(const char *name);
 int  nf_ops_count(void);
 const nf_op_t *nf_ops_get(int index);   /* index [0, count) */
-void nf_ops_register_all(void);         /* register every built-in op */
+void nf_ops_register_all(void);         /* seven public actions + legacy IDs for saved DAGs */
 void nf_ops_clear(void);                /* clear registry (testing) */
 
 /* Helper: clamp node id into [0, topo_count-1] (or 0). */

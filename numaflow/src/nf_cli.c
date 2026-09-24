@@ -16,13 +16,13 @@ static void usage(void) {
     printf("NUMAflow - N8N-style memory-scheduling strategy engine\n\n");
     printf("usage: numaflow <command> [options]\n\n");
     printf("commands:\n");
-    printf("  ops                     list atomic operations\n");
+    printf("  ops [--all]             list the seven actions (or legacy ops too)\n");
     printf("  strategies              list built-in strategies\n");
     printf("  templates               list beginner templates (grouped)\n");
     printf("  template <name> [file]  export a template's DAG as JSON\n");
     printf("  workflow <name> <file>  export a strategy's DAG as JSON\n");
     printf("  run <file>             execute a workflow DAG (validate)\n");
-    printf("  dump-ops <file>         export the op catalog as JSON (for GUI)\n");
+    printf("  dump-ops <file> [--all] export actions as JSON (optional legacy metadata)\n");
     printf("  dump-templates <file>   export the template catalog as JSON (for GUI)\n");
     printf("  eval [opts]             run the fair benchmark, print JSON\n");
     printf("    --workload <w>  zipf|uniform|hotspot|temporal\n");
@@ -52,13 +52,14 @@ static const char *argval(int argc, char **argv, int *i, const char *flag) {
 
 static int write_file(const char *path, const char *data);
 
-static int cmd_ops(void) {
+static int cmd_ops(int all) {
     nf_ops_register_all();
     for (int i = 0; i < nf_ops_count(); i++) {
         const nf_op_t *o = nf_ops_get(i);
+        if (!all && i >= 7) break;
         printf("%-24s [%-6s] %s\n", o->name, o->category, o->title);
     }
-    printf("\n%d atomic operations registered\n", nf_ops_count());
+    printf("\n%d actions%s\n", all ? nf_ops_count() : 7, all ? " (including legacy operations)" : "");
     return 0;
 }
 
@@ -131,11 +132,12 @@ static int cmd_dump_templates(const char *path) {
     return rc;
 }
 
-static int cmd_dump_ops(const char *path) {
+static int cmd_dump_ops(const char *path, int all) {
     nf_ops_register_all();
     nf_json_t *arr = nf_json_new_arr();
     for (int i = 0; i < nf_ops_count(); i++) {
         const nf_op_t *o = nf_ops_get(i);
+        if (!all && i >= 7) break;
         nf_json_t *j = nf_json_new_obj();
         nf_json_obj_set(j, "name", nf_json_new_str(o->name));
         nf_json_obj_set(j, "title", nf_json_new_str(o->title));
@@ -393,7 +395,7 @@ static int cmd_replay(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc < 2) { usage(); return 1; }
     const char *cmd = argv[1];
-    if (strcmp(cmd, "ops") == 0) return cmd_ops();
+    if (strcmp(cmd, "ops") == 0) return cmd_ops(argc > 2 && strcmp(argv[2], "--all") == 0);
     if (strcmp(cmd, "strategies") == 0) return cmd_strategies();
     if (strcmp(cmd, "templates") == 0) return cmd_templates();
     if (strcmp(cmd, "template") == 0) {
@@ -414,7 +416,7 @@ int main(int argc, char **argv) {
     }
     if (strcmp(cmd, "dump-ops") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: dump-ops <file>\n"); return 1; }
-        return cmd_dump_ops(argv[2]);
+        return cmd_dump_ops(argv[2], argc > 3 && strcmp(argv[3], "--all") == 0);
     }
     if (strcmp(cmd, "eval") == 0) return cmd_eval(argc - 1, argv + 1);
     if (strcmp(cmd, "replay") == 0) return cmd_replay(argc - 1, argv + 1);

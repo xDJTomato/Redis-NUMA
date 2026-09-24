@@ -1,9 +1,8 @@
 /* nf_ops.c - atomic operation registry + all decomposed strategy operations.
  *
- * Every existing Redis-NUMA strategy (Composite LRU, TinyLFU and the 9
- * allocation policies) is decomposed here into small composable ops that can
- * be re-arranged as a N8N-style DAG.  The new default strategy (cost-aware
- * adaptive tiering) is also expressed entirely with these ops.
+ * Seven mode-based actions are exposed for new DAGs. Legacy policy IDs from
+ * Redis-NUMA strategies remain registered so existing DAGs and templates run
+ * unchanged. The default cost-aware adaptive strategy is also a DAG.
  *
  * Pure C11, no Redis/libnuma dependency.
  */
@@ -400,6 +399,73 @@ static int op_track_access(const nf_op_t *op, nf_ctx_t *ctx, const nf_items_t *i
     return NF_OK;
 }
 
+/* The public workflow vocabulary is intentionally small. Legacy operations remain
+ * registered below so saved DAGs and strategy templates continue to execute. Each
+ * mode delegates to the legacy implementation. Demote/balance also apply the
+ * resulting moves in one step; old policy IDs keep their original semantics. */
+typedef struct { const char *mode; nf_op_run_fn run; } mode_t;
+static int dispatch_mode(nf_ctx_t *ctx, const nf_items_t *in, nf_items_t *out,
+                         const mode_t *modes, size_t count, const char *fallback) {
+    const char *mode = ctx && ctx->params ? nf_params_get(ctx->params, "mode") : NULL;
+    if (!mode || !*mode) mode = fallback;
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(mode, modes[i].mode) == 0) return modes[i].run(NULL, ctx, in, out);
+    return NF_EINVAL; /* never silently run a different policy */
+}
+#define MODE(name, fn) {name, op_##fn}
+#define DISPATCH(name, default_mode, ...) \
+static int op_##name(const nf_op_t *op, nf_ctx_t *ctx, const nf_items_t *in, nf_items_t *out) { \
+    (void)op; static const mode_t modes[] = { __VA_ARGS__ }; \
+    return dispatch_mode(ctx, in, out, modes, sizeof(modes)/sizeof(modes[0]), default_mode); \
+}
+DISPATCH(place_items, "adaptive",
+    MODE("local", alloc_local_first), MODE("interleave", alloc_interleave),
+    MODE("round_robin", alloc_round_robin), MODE("weighted", alloc_weighted),
+    MODE("pressure", alloc_pressure_aware), MODE("cxl", alloc_cxl_optimized),
+    MODE("weighted_pressure", alloc_weighted_interleave), MODE("adaptive", alloc_adaptive),
+    MODE("latency", alloc_latency_aware))
+DISPATCH(score_items, "hotness",
+    MODE("hotness", score_hotness), MODE("frequency", cms_estimate),
+    MODE("blend", score_ewma), MODE("benefit", score_cost_benefit),
+    MODE("decay_hotness", decay_hotness))
+DISPATCH(filter_items, "hot",
+    MODE("hot", filter_hot), MODE("frequent", filter_freq),
+    MODE("cold", filter_cold), MODE("remote", filter_remote),
+    MODE("local", filter_local), MODE("size_min", filter_size_min),
+    MODE("size_max", filter_size_max), MODE("benefit", filter_benefit))
+DISPATCH(rank_items, "hotness",
+    MODE("recent", rank_lru), MODE("frequency", rank_frequency),
+    MODE("hotness", rank_hotness), MODE("benefit", rank_cost),
+    MODE("blend", rank_ewma), MODE("size", rank_size))
+DISPATCH(route_items, "destination",
+    MODE("destination", select_dest_node), MODE("budget", budget_limit))
+/* Demotion and rebalancing are useful as single user-facing actions: mark
+ * targets using the old policy, then commit those migrations in this node. */
+static int move_and_apply(nf_op_run_fn select, nf_ctx_t *ctx,
+                          const nf_items_t *in, nf_items_t *out) {
+    nf_items_t marked; nf_items_init(&marked);
+    int rc = select(NULL, ctx, in, &marked);
+    if (rc == NF_OK) rc = op_emit_migrate(NULL, ctx, &marked, out);
+    nf_items_free(&marked);
+    return rc;
+}
+static int op_move_demote(const nf_op_t *op, nf_ctx_t *ctx,
+                          const nf_items_t *in, nf_items_t *out) {
+    (void)op; return move_and_apply(op_demote_cold, ctx, in, out);
+}
+static int op_move_balance(const nf_op_t *op, nf_ctx_t *ctx,
+                           const nf_items_t *in, nf_items_t *out) {
+    (void)op; return move_and_apply(op_balance_nodes, ctx, in, out);
+}
+DISPATCH(move_items, "migrate",
+    MODE("migrate", emit_migrate), MODE("demote", move_demote),
+    MODE("balance", move_balance))
+DISPATCH(track_items, "access",
+    MODE("access", track_access), MODE("observe", cms_observe),
+    MODE("decay", global_decay))
+#undef DISPATCH
+#undef MODE
+
 /* ===========================================================================
  * registration
  * ======================================================================== */
@@ -407,6 +473,15 @@ static int op_track_access(const nf_op_t *op, nf_ctx_t *ctx, const nf_items_t *i
 
 void nf_ops_register_all(void) {
     static const nf_op_t ops[] = {
+        /* Seven composable actions; mode selects the policy, not a new node type. */
+        OP(place_items, "Place items", "Choose a NUMA node for incoming items.", "alloc"),
+        OP(score_items, "Score items", "Compute hotness, frequency or migration value.", "score"),
+        OP(filter_items, "Filter items", "Keep only items matching a condition.", "filter"),
+        OP(rank_items, "Rank items", "Sort candidates by a chosen signal.", "rank"),
+        OP(route_items, "Choose destination", "Select migration destinations or apply a budget.", "decide"),
+        OP(move_items, "Move items", "Apply migrations, demote cold items or rebalance nodes.", "emit"),
+        OP(track_items, "Track activity", "Record accesses or update frequency tracking.", "track"),
+        /* Legacy IDs are required by templates and previously exported workflows. */
         /* allocation */
         OP(alloc_local_first,        "Alloc: Local First",        "Always place on the local DRAM node (or a chosen node).", "alloc"),
         OP(alloc_interleave,         "Alloc: Interleave",         "Place on a uniformly random node.", "alloc"),

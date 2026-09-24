@@ -26,7 +26,7 @@ static int read_line(char *buf, int n) {
 
 static void print_ops(void) {
     nf_ops_register_all();
-    for (int i = 0; i < nf_ops_count(); i++) {
+    for (int i = 0; i < 7; i++) {
         const nf_op_t *o = nf_ops_get(i);
         printf("  %-26s [%-6s] %s\n", o->name, o->category, o->title);
     }
@@ -39,19 +39,43 @@ static void print_strategies(void) {
     }
 }
 
+/* Legacy IDs still work when typed, but only seven actions appear in the menu. */
+static const char *action_modes(const char *op) {
+    if (strcmp(op, "place_items") == 0) return "adaptive local interleave round_robin weighted pressure cxl weighted_pressure latency";
+    if (strcmp(op, "score_items") == 0) return "hotness frequency blend benefit decay_hotness";
+    if (strcmp(op, "filter_items") == 0) return "hot frequent cold remote local size_min size_max benefit";
+    if (strcmp(op, "rank_items") == 0) return "hotness recent frequency benefit blend size";
+    if (strcmp(op, "route_items") == 0) return "destination budget";
+    if (strcmp(op, "move_items") == 0) return "migrate demote balance";
+    if (strcmp(op, "track_items") == 0) return "access observe decay";
+    return NULL;
+}
+
 /* build a linear chain of ops chosen by the user */
 static void build_chain(nf_graph_t *g) {
     char buf[NF_OP_MAX];
     nf_ops_register_all();
-    printf("Compose a chain of atomic ops (one per line, blank to finish):\n");
+    printf("Compose a chain of actions (one per line, blank to finish):\n");
     print_ops();
-    int n = 0; char prev[8] = "";
+    int n = 0; char prev[32] = "";
     while (1) {
         printf("op> "); fflush(stdout);
         if (!read_line(buf, sizeof(buf)) || buf[0] == '\0') break;
         if (!nf_ops_find(buf)) { printf("unknown op '%s'\n", buf); continue; }
-        char id[8]; snprintf(id, sizeof(id), "n%d", ++n);
+        char id[32]; snprintf(id, sizeof(id), "n%d", ++n);
         nf_graph_add_node(g, id, buf);
+        const char *modes = action_modes(buf);
+        if (modes) {
+            char mode[64];
+            printf("  modes: %s\nmode [%s]> ", modes, strchr(modes, ' ') ? "first listed" : modes);
+            fflush(stdout);
+            if (read_line(mode, sizeof(mode)) && mode[0]) {
+                char allowed[256]; snprintf(allowed, sizeof(allowed), " %s ", modes);
+                char needle[68]; snprintf(needle, sizeof(needle), " %s ", mode);
+                if (strstr(allowed, needle)) nf_graph_node_set_param(g, id, "mode", mode);
+                else printf("unknown mode '%s' (using default)\n", mode);
+            }
+        }
         if (n > 1) nf_graph_add_edge(g, prev, id);
         snprintf(prev, sizeof(prev), "%s", id);
     }
@@ -116,7 +140,7 @@ int main(void) {
     while (1) {
         clear();
         printf("=== NUMAflow TUI ===\n\n");
-        printf("  1. List atomic operations\n");
+        printf("  1. List workflow actions\n");
         printf("  2. List built-in strategies\n");
         printf("  3. Compose a custom workflow (chain of ops)\n");
         printf("  4. Show current workflow (JSON)\n");

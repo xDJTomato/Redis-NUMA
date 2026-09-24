@@ -8,8 +8,8 @@ per-key heat tracking, and cross-node cold/hot data migration, while
 preserving full Redis API compatibility.
 
 A separate pure-C11 subsystem, **NUMAflow** (`numaflow/`), decomposes every
-NUMA scheduling strategy into 36 composable atomic operations executable as
-N8N-style DAG workflows, and adds a new default strategy (CAAT), a QEMU-free
+NUMA scheduling strategy into seven configurable workflow actions (with legacy
+operation IDs retained for existing DAGs), and adds a new default strategy (CAAT), a QEMU-free
 fair evaluation harness, a TUI, a web GUI, and a lightweight cache-behavior
 feedback loop.
 
