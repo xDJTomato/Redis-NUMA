@@ -64,6 +64,18 @@ const LOCALES = {
         "Select an action on the canvas to configure its behavior, or add one from the library.",
       actionSettings: "ACTION SETTINGS",
       legacyAction: "LEGACY ACTION",
+      presetLibrary: "PROVEN ALGORITHM PRESETS",
+      presetHint:
+        "Each preset is a new action with its original policy and defaults fixed. Unlock it to customize.",
+      presetBadge: "Fixed legacy preset",
+      presetLocked:
+        "Runs {op} with a fixed mode and its saved parameter values (or original defaults). Unlock to edit.",
+      presetRuntimeLocal: "Current CPU node (runtime)",
+      presetRuntimeBudget: "Run budget (runtime)",
+      customizePreset: "Customize this preset",
+      convertPreset: "Use as fixed action preset",
+      presetInvalid: "Preset metadata does not match its action and mode.",
+      presetDesc: "Original policy: {op}",
       importedAction: "Imported workflow action",
       behavior: "BEHAVIOR",
       operation: "Operation",
@@ -246,6 +258,10 @@ const LOCALES = {
             "Mark cold items on the DRAM node for CXL and immediately apply the migrations.",
           balance:
             "Mark items on overly pressured nodes for the least-pressured node and immediately migrate them.",
+          demote_mark:
+            "Preserve the original demote_cold step: mark cold DRAM items for CXL, but do not migrate yet. Follow with Move items → Apply migrations.",
+          balance_mark:
+            "Preserve the original balance_nodes step: mark items on pressured nodes, but do not migrate yet. Follow with Move items → Apply migrations.",
         },
       },
       track_items: {
@@ -321,6 +337,18 @@ const LOCALES = {
       nothingHint: "点击画布上的节点进行配置，或从左侧动作库添加节点。",
       actionSettings: "动作设置",
       legacyAction: "兼容旧节点",
+      presetLibrary: "经典算法预设",
+      presetHint:
+        "旧算法以新动作的固定模式和原始默认参数提供；需要调整时可解锁。",
+      presetBadge: "固定的经典算法预设",
+      presetLocked:
+        "按原版 {op} 算法运行；固定模式及已保存的参数值（未设置时使用原始默认值）。可解锁后修改。",
+      presetRuntimeLocal: "运行时当前 CPU 节点",
+      presetRuntimeBudget: "运行时迁移预算",
+      customizePreset: "解锁并自定义",
+      convertPreset: "转换为固定动作预设",
+      presetInvalid: "预设标记与节点类型或模式不一致。",
+      presetDesc: "原版算法：{op}",
       importedAction: "导入的工作流节点",
       behavior: "运行方式",
       operation: "模式",
@@ -455,6 +483,12 @@ const LOCALES = {
         "最大候选对象数",
         "仅保留前 N 个候选对象。",
       ],
+      "move_items.demote_mark.threshold": [
+        "最高频率",
+        "低于此值的 DRAM 对象会被标记为待迁移。",
+      ],
+      "move_items.demote_mark.dram_node": ["DRAM 节点", "迁出节点编号。"],
+      "move_items.demote_mark.cxl_node": ["CXL 节点", "标记的目标节点。"],
       "move_items.demote.threshold": [
         "最高频率",
         "将低于此值的 DRAM 对象降级到 CXL。",
@@ -596,11 +630,17 @@ const LOCALES = {
           migrate: "执行已标记的迁移",
           demote: "降级冷对象",
           balance: "节点再平衡",
+          demote_mark: "标记冷对象（旧版）",
+          balance_mark: "标记再平衡（旧版）",
         },
         modes: {
           migrate: "执行“选择目标节点”或旧版操作此前标记的迁移。",
           demote: "将 DRAM 中的冷对象标记为迁往 CXL，并立即执行。",
           balance: "将压力过高节点上的对象标记为迁往压力最小节点，并立即执行。",
+          demote_mark:
+            "保留原版 demote_cold 语义：只标记冷 DRAM 对象，随后连接“迁移对象 → 执行已标记的迁移”。",
+          balance_mark:
+            "保留原版 balance_nodes 语义：只标记压力过高的对象，随后连接“迁移对象 → 执行已标记的迁移”。",
         },
       },
       track_items: {
@@ -660,7 +700,7 @@ const LEGACY_MODES = {
   select_dest_node: ["route_items", "destination"],
   budget_limit: ["route_items", "budget"],
   emit_migrate: ["move_items", "migrate"],
-  demote_cold: ["move_items", "demote"],
-  balance_nodes: ["move_items", "balance"],
+  demote_cold: ["move_items", "demote_mark"],
+  balance_nodes: ["move_items", "balance_mark"],
   track_access: ["track_items", "access"],
 };

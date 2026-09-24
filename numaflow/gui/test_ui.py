@@ -64,7 +64,9 @@ try:
     driver.get(BASE)
     wait = WebDriverWait(driver, 15)
     wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '.node')) == 3)
-    assert len(driver.find_elements(By.CSS_SELECTOR, '.action-card')) == 7
+    assert len(driver.find_elements(By.CSS_SELECTOR, '#actionList .action-card')) == 7
+    assert len(driver.find_elements(By.CSS_SELECTOR, '#legacyActionList .legacy-card')) == 36
+    assert not driver.find_element(By.ID, 'legacyLibrary').get_attribute('open')
     assert len(driver.find_elements(By.CSS_SELECTOR, '.edge')) == 2
     assert driver.find_element(By.CSS_SELECTOR, '.node').rect['width'] >= 160, 'starter nodes must be legible'
     canvas = driver.find_element(By.ID, 'canvas').rect
@@ -77,7 +79,7 @@ try:
     Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('zh')
     assert driver.find_element(By.TAG_NAME, 'html').get_attribute('lang') == 'zh-CN'
     assert driver.find_element(By.CSS_SELECTOR, '.crumb').text == '工作流工作台'
-    assert driver.find_element(By.CSS_SELECTOR, '.action-card').get_attribute('aria-label').startswith('添加')
+    assert driver.find_element(By.CSS_SELECTOR, '#actionList .action-card').get_attribute('aria-label').startswith('添加')
     assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent') == '计算评分'
     after = driver.execute_script('return toWorkflow()')
     assert before['nodes'] == after['nodes'] and before['edges'] == after['edges'], 'language must not change the DAG'
@@ -94,9 +96,9 @@ try:
     assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent') == 'Score items'
     search = driver.find_element(By.ID, 'actionSearch')
     search.send_keys('CXL')
-    assert len(driver.find_elements(By.CSS_SELECTOR, '.action-card')) == 1
+    assert len(driver.find_elements(By.CSS_SELECTOR, '#actionList .action-card')) == 1
     search.send_keys(Keys.CONTROL, 'a', Keys.BACKSPACE)
-    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '.action-card')) == 7)
+    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '#actionList .action-card')) == 7)
 
     # A cycle is blocked; a new cross-connection is accepted.
     def drag_port(src, dst):
@@ -119,7 +121,7 @@ try:
     wait.until(lambda d: d.find_element(By.ID, 'modeSelect'))
     Select(driver.find_element(By.ID, 'modeSelect')).select_by_value('benefit')
     assert driver.find_element(By.CSS_SELECTOR, '.node[data-id="n1"] .node-subtitle').text == 'Migration benefit'
-    driver.find_element(By.CSS_SELECTOR, '.action-card[aria-label="Add Track activity"]').click()
+    driver.find_element(By.CSS_SELECTOR, '#actionList .action-card[aria-label="Add Track activity"]').click()
     assert len(driver.find_elements(By.CSS_SELECTOR, '.node')) == 4
     assert len(driver.find_elements(By.CSS_SELECTOR, '.edge')) == 3, 'adding after selection should connect it'
     driver.find_element(By.CSS_SELECTOR, '.danger').click()
@@ -159,6 +161,7 @@ try:
     assert driver.execute_script('return document.documentElement.scrollWidth <= window.innerWidth + 2'), 'mobile page must not overflow horizontally'
     assert driver.find_element(By.ID, 'canvas').rect['height'] >= 170
     assert driver.find_element(By.ID, 'canvas').rect['width'] >= 300, 'mobile canvas must not collapse'
+    assert driver.find_element(By.ID, 'actionSearch').is_displayed(), 'legacy presets must be searchable on mobile'
     assert driver.save_screenshot(str(shots/'numaflow-mobile.png'))
     assert (shots/'numaflow-mobile.png').stat().st_size > 20_000, 'mobile screenshot must contain rendered UI'
     Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('zh')
@@ -190,7 +193,78 @@ try:
     wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '.node')) == 3)
     assert Select(driver.find_element(By.ID, 'languageSelect')).first_selected_option.get_attribute('value') == 'zh'
     assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent') == '计算评分'
-    print('GUI browser/visual checks passed (EN + 简体中文); screenshots: ' + str(shots))
+    driver.set_window_size(1440, 900)
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('en')
+    driver.find_element(By.ID, 'newBtn').click()
+    driver.switch_to.alert.accept()
+    search = driver.find_element(By.ID, 'actionSearch')
+    search.send_keys('demote_cold')
+    assert driver.find_element(By.ID, 'legacyLibrary').get_attribute('open')
+    assert len(driver.find_elements(By.CSS_SELECTOR, '#legacyActionList .legacy-card')) == 1
+    driver.find_element(By.CSS_SELECTOR, '.legacy-card[data-preset="demote_cold"]').click()
+    wf = driver.execute_script('return toWorkflow()')
+    assert wf['nodes'][0]['op'] == 'move_items' and wf['nodes'][0]['params']['mode'] == 'demote_mark'
+    assert wf['nodes'][0]['preset'] == 'demote_cold'
+    assert not driver.find_element(By.ID, 'modeSelect').is_enabled()
+    assert not driver.find_element(By.ID, 'field-threshold').is_enabled()
+    assert 'does not migrate items' in driver.find_element(By.CSS_SELECTOR, '.node-guide').text
+    driver.find_element(By.ID, 'runBtn').click()
+    wait.until(lambda d: 'execution=OK' in d.find_element(By.ID, 'outputText').text)
+    # An exported preset stays fixed after file import; the engine ignores the
+    # optional UI-only marker but still executes its canonical op/mode pair.
+    import_file = shots/'numaflow-fixed-preset.json'
+    import_file.write_text(json.dumps(wf), encoding='utf-8')
+    driver.find_element(By.ID, 'fileInput').send_keys(str(import_file))
+    wait.until(lambda d: d.find_element(By.CSS_SELECTOR, '.node.preset'))
+    driver.find_element(By.CSS_SELECTOR, '.node .node-card').click()
+    assert not driver.find_element(By.ID, 'modeSelect').is_enabled()
+    driver.find_element(By.CSS_SELECTOR, '.preset-banner .secondary-action').click()
+    assert 'preset' not in driver.execute_script('return toWorkflow()')['nodes'][0]
+    assert driver.find_element(By.ID, 'modeSelect').is_enabled()
+    import_file.unlink()
+    # Runtime-dependent defaults must not be frozen to the test machine's node
+    # or budget merely because the UI displays a fixed preset.
+    driver.find_element(By.ID, 'newBtn').click()
+    driver.switch_to.alert.accept()
+    search = driver.find_element(By.ID, 'actionSearch')
+    search.send_keys(Keys.CONTROL, 'a', Keys.BACKSPACE)
+    search.send_keys('filter_remote')
+    driver.find_element(By.CSS_SELECTOR, '.legacy-card[data-preset="filter_remote"]').click()
+    assert 'runtime' in driver.find_element(By.ID, 'field-node').get_attribute('value').lower()
+    assert 'node' not in driver.execute_script('return toWorkflow()')['nodes'][0]['params']
+    search.send_keys(Keys.CONTROL, 'a', Keys.BACKSPACE)
+    search.send_keys('budget_limit')
+    driver.find_element(By.CSS_SELECTOR, '.legacy-card[data-preset="budget_limit"]').click()
+    assert 'runtime' in driver.find_element(By.ID, 'field-budget').get_attribute('value').lower()
+    assert 'budget' not in driver.execute_script('return toWorkflow()')['nodes'][1]['params']
+    # Convert an imported old operation in place, keeping edges and threshold.
+    Select(driver.find_element(By.ID, 'templateSelect')).select_by_value('tier_demote_cold')
+    driver.find_element(By.ID, 'loadTemplateBtn').click()
+    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '.node')) == 3)
+    driver.find_element(By.CSS_SELECTOR, '.node[data-id="n2"] .node-card').click()
+    before = driver.execute_script('return toWorkflow()')
+    driver.find_element(By.ID, 'runBtn').click()
+    wait.until(lambda d: 'execution=OK' in d.find_element(By.ID, 'outputText').text)
+    original_output = driver.find_element(By.ID, 'outputText').text
+    driver.find_element(By.CSS_SELECTOR, '#inspectorBody .secondary-action').click()
+    after = driver.execute_script('return toWorkflow()')
+    assert after['edges'] == before['edges']
+    assert after['nodes'][1]['op'] == 'move_items'
+    assert after['nodes'][1]['params'] == {**before['nodes'][1]['params'], 'mode':'demote_mark'}
+    assert after['nodes'][1]['preset'] == 'demote_cold'
+    driver.find_element(By.ID, 'runBtn').click()
+    wait.until(lambda d: 'execution=OK' in d.find_element(By.ID, 'outputText').text)
+    assert driver.find_element(By.ID, 'outputText').text == original_output, 'conversion must preserve execution results'
+    # Malformed preset metadata must be rejected instead of displaying a
+    # misleading locked badge or changing a previously imported workflow.
+    bad = shots/'numaflow-invalid-preset.json'
+    corrupted = json.loads(json.dumps(after))
+    corrupted['nodes'][1]['preset'] = 'balance_nodes'
+    bad.write_text(json.dumps(corrupted), encoding='utf-8')
+    driver.find_element(By.ID, 'fileInput').send_keys(str(bad))
+    assert driver.execute_script('return toWorkflow()') == after
+    bad.unlink()
+    print('GUI browser/visual checks passed (EN + 简体中文 + legacy presets); screenshots: ' + str(shots))
 finally:
     if driver:
         driver.quit()

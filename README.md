@@ -47,7 +47,64 @@ python3 numaflow/gui/server.py   # open http://127.0.0.1:8090/
 
 Use the **English / 简体中文** menu to switch languages. Selecting an action explains its
 input, output, mode and place in a workflow; existing template operation IDs are
-still supported. The Run button tests against a synthetic workload, not live Redis.
+still supported. Expand **Proven algorithm presets** to add any of the 36 original
+policies as a fixed-mode new action; unlock a preset to customize it. Old
+mark-only demotion/balance steps stay mark-only when converted. The Run button
+tests against a synthetic workload, not live Redis.
+
+### Full NUMAflow benchmark — September 24, 2026
+
+The **complete synthetic strategy matrix** was rerun on an 8-vCPU VMware guest
+with **one physical NUMA node** (15 GiB RAM): four workloads × two modeled
+memory-tier profiles. Each run replays the **same 200,000-access trace** for
+4 migration strategies and 9 allocation policies (20,000 keys, epoch 5,000,
+migration budget 64, seed 20240517, **two simulated nodes**). This is a
+**cost-model evaluation, not Redis throughput or measured CXL hardware latency**.
+The table gives *total modeled net cost in millions of nanoseconds* (access +
+migration; **lower is better**); the JSON files also contain every strategy's
+hit ratio, migration count, feedback and node placement.
+
+| Model | Workload (raw JSON) | Noop | Composite LRU | TinyLFU | CAAT | CAAT local hits | CAAT migrations |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default | [zipf](docs/benchmarks/2026-09-24/bench_zipf_default.json) | 504.9 | 238.3 | 228.1 | 183.7 | 84.5% | 13,521 |
+| Default | [uniform](docs/benchmarks/2026-09-24/bench_uniform_default.json) | 467.7 | 408.8 | 424.4 | 388.5 | 18.0% | 4,117 |
+| Default | [hotspot](docs/benchmarks/2026-09-24/bench_hotspot_default.json) | 456.1 | 250.6 | 326.9 | 185.4 | 76.1% | 10,321 |
+| Default | [temporal](docs/benchmarks/2026-09-24/bench_temporal_default.json) | 480.5 | 394.0 | 407.4 | 307.8 | 48.9% | 9,613 |
+| CXL scenario | [zipf](docs/benchmarks/2026-09-24/bench_zipf_cxlcal.json) | 190.6 | 126.2 | 124.0 | 121.6 | 79.5% | 15,426 |
+| CXL scenario | [uniform](docs/benchmarks/2026-09-24/bench_uniform_cxlcal.json) | 178.7 | 166.8 | 168.9 | 146.2 | 46.9% | 18,125 |
+| CXL scenario | [hotspot](docs/benchmarks/2026-09-24/bench_hotspot_cxlcal.json) | 174.9 | 120.9 | 139.8 | 111.5 | 74.6% | 16,570 |
+| CXL scenario | [temporal](docs/benchmarks/2026-09-24/bench_temporal_cxlcal.json) | 182.7 | 161.9 | 166.8 | 132.1 | 63.7% | 17,620 |
+
+- **Default:** modeled DRAM/CXL latency **60/300 ns**, bandwidth
+  **20,000/8,000 MB/s**.
+- **CXL scenario:** same DRAM, modeled tier-1 latency **125 ns**, bandwidth
+  **25,000 MB/s**. These are **parameters**, not measurements taken on this host.
+- The allocation policies start from initial placement; migration policies
+  start with all items on tier 1. **Do not compare allocation costs directly
+  with migration costs**. The allocation model can put all items on DRAM even
+  though the migration benchmark constrains DRAM capacity to ~50%.
+- CAAT has the lowest modeled cost in these eight runs, but these results do
+  **not** establish a universal win; rankings depend on trace, capacity and
+  tier assumptions. A second, repository-standard **3,000-key / 120,000-access**
+  rerun confirms the counterexample: on *uniform*, Composite LRU costs **127.0M**
+  modeled ns and CAAT **166.5M** (+31.1%); on *temporal*, LRU costs **148.7M**
+  versus CAAT **153.6M**. The original algorithms remain valuable. See the
+  [reference charts](docs/benchmarks/2026-09-24/reference/report.html) and
+  [zipf](docs/benchmarks/2026-09-24/reference/bench_zipf.json) ·
+  [uniform](docs/benchmarks/2026-09-24/reference/bench_uniform.json) ·
+  [hotspot](docs/benchmarks/2026-09-24/reference/bench_hotspot.json) ·
+  [temporal](docs/benchmarks/2026-09-24/reference/bench_temporal.json) results.
+
+[Self-contained charts](docs/benchmarks/2026-09-24/report.html) ·
+[Run script](docs/benchmarks/2026-09-24/run.sh) ·
+[Data validator](docs/benchmarks/2026-09-24/validate.py) ·
+[Run manifest](docs/benchmarks/2026-09-24/manifest.json).
+
+Reproduce with `bash docs/benchmarks/2026-09-24/run.sh` after building the
+C toolchain. The full Redis build, 96 Redis test files, browser/UI checks and NUMAflow unit
+suite passed. Hardware multi-NUMA/CXL and live YCSB throughput were **not
+measured** in this VM; `run_full_validation.sh --quick` intentionally skips
+those hardware-dependent/stress stages.
 
 ### Full validation in one command
 

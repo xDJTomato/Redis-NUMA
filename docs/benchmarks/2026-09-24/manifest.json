@@ -1,0 +1,96 @@
+{
+  "run_date_local": "2026-09-24",
+  "timezone": "Asia/Shanghai",
+  "environment": {
+    "guest": "VMware x86_64 VM",
+    "cpu_model": "Intel(R) Core(TM) Ultra 7 265",
+    "vcpus": 8,
+    "physical_numa_nodes": 1,
+    "ram_gib_approx": 15,
+    "kernel": "6.8.0-138-generic"
+  },
+  "method": "deterministic pure-C11 NUMAflow synthetic cost model; no physical CXL device or 2-node host measured",
+  "matrix": {
+    "workloads": [
+      "zipf",
+      "uniform",
+      "hotspot",
+      "temporal"
+    ],
+    "profiles": {
+      "default": {
+        "dram_latency_ns": 60,
+        "dram_bandwidth_mbps": 20000,
+        "tier1_latency_ns": 300,
+        "tier1_bandwidth_mbps": 8000
+      },
+      "cxlcal": {
+        "dram_latency_ns": 60,
+        "dram_bandwidth_mbps": 20000,
+        "tier1_latency_ns": 125,
+        "tier1_bandwidth_mbps": 25000
+      }
+    },
+    "keys": 20000,
+    "accesses": 200000,
+    "epoch": 5000,
+    "budget": 64,
+    "simulated_nodes": 2,
+    "seed": 20240517,
+    "migration_strategies": [
+      "noop",
+      "composite_lru",
+      "tinylfu",
+      "caat"
+    ],
+    "allocation_policies": 9
+  },
+  "source_sha256": {
+    "numaflow/src/nf_bench.c": "b70f422ec1a7b28ea58b4b94fd5c1315c66b6a3c389b38408b57d25e249f02a3",
+    "numaflow/src/nf_strategy.c": "c6908a1dc4ce4c97fc3cac5579053ca32c34dd6fd066b0fe7a506fa62413d5c4",
+    "numaflow/src/nf_ops.c": "f3d043278ea30a43a723feb1b1342b905daff35d06e9287efd68230a7936dbf1",
+    "numaflow/eval/report.py": "ee32f6ab251559a88d41cc96bd21ff52b6ee311c4791498004f2420d550869b1"
+  },
+  "output_sha256": {
+    "bench_hotspot_cxlcal.json": "93ee1ac04547c1d964e99dca411d3c9942d79baae00b0f576783071c3c8f31b3",
+    "bench_hotspot_default.json": "49809b3fab87c128f46c7eedf183d2a4acd4a27ba3d85dec8b1d5b9fe554dc33",
+    "bench_temporal_cxlcal.json": "0ab49fae9f4b85b3cb4c8d6c1045415c653914874be6b01d557802db43babb47",
+    "bench_temporal_default.json": "dfbe817af478c07f3edc8efcd25d18e8e0a6aff986b1f4727fe2abfd279eabc9",
+    "bench_uniform_cxlcal.json": "83c61d75489b74efc20a4e2fa130571595839f659a9d70467812ab7d87080a2b",
+    "bench_uniform_default.json": "2c7ad718c570bfdc2b4d90faa95fc6681e8f2a005c03ad59dd6a477f13193014",
+    "bench_zipf_cxlcal.json": "f7351421353d5a2573a6fc5535167beeee3f0694467add901b56383d488677da",
+    "bench_zipf_default.json": "1afa24e5cbfcae485d64a59f8f17ac66ffa0407bfdd0a6b7a8ecd6b90238e365",
+    "reference/bench_hotspot.json": "50644a32b6b007939ecd4f4508778de1b298c5588ab59dbce5208f375f301324",
+    "reference/bench_temporal.json": "661fb5dfb8ad55bdf3a0c8c406d9d521d06a20df2acfc6389ef4fcbee28c13fd",
+    "reference/bench_uniform.json": "a255f4654c937d990216a396c75fb55f39f8bdc88e47eb83dc08b16f412a9a29",
+    "reference/bench_zipf.json": "a72120ffe20cda81b44f9770c109d0819c43272ba5899c2cfc964bc245928a69",
+    "report.html": "89b90c5fa4701ed7cb2a0c30c109b5ebb4de83b9d1c418072a664c9812878541",
+    "reference/report.html": "92a6e63d4d2cebb5b7a4ad8fc75b48accfa1762175345fcbcdb24f4b58313b4f"
+  },
+  "validation": "python3 docs/benchmarks/2026-09-24/validate.py",
+  "standard_reference": {
+    "workloads": [
+      "zipf",
+      "uniform",
+      "hotspot",
+      "temporal"
+    ],
+    "keys": 3000,
+    "accesses": 120000,
+    "epoch": 3000,
+    "budget": 256,
+    "simulated_nodes": 2,
+    "seed": 20240517,
+    "topology": "default"
+  },
+  "integration_validation": {
+    "command": "./run_full_validation.sh --quick",
+    "result": "passed",
+    "redis_build": "passed (13 warnings)",
+    "redis_test_files": 96,
+    "numaflow_benchmark": "passed",
+    "ycsb": "skipped by --quick",
+    "qemu_vm": "skipped by --quick",
+    "cxlmemsim": "skipped by --quick"
+  }
+}

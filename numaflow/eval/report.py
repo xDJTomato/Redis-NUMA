@@ -83,8 +83,9 @@ def main():
         caat = net_data[wl][3]
         best_base = min(net_data[wl][0], net_data[wl][1], net_data[wl][2])
         best_base_name = LABELS[STRATEGIES[[0,1,2][net_data[wl][:3].index(best_base)]]]
-        imp = (best_base - caat) / best_base * 100
-        rows.append(f'<tr><td>{wl}</td><td>{caat:,.1f}</td><td>{best_base:,.1f}</td><td>{best_base_name}</td><td style="color:#2a9d8f;font-weight:600">-{imp:.1f}%</td></tr>')
+        delta = (caat - best_base) / best_base * 100
+        color = "#c2413b" if delta > 0 else "#2a9d8f"
+        rows.append(f'<tr><td>{wl}</td><td>{caat:,.1f}</td><td>{best_base:,.1f}</td><td>{best_base_name}</td><td style="color:{color};font-weight:600">{delta:+.1f}%</td></tr>')
 
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -101,11 +102,12 @@ th:first-child,td:first-child{{text-align:left}}th{{background:#f9fafb}}
 .muted{{color:#6b7280;font-size:13px}}
 </style></head><body><div class="wrap">
 <h1>NUMAflow &mdash; Memory Scheduling Strategy Benchmark</h1>
-<p class="muted">Fair, QEMU-free evaluation over an emulated NUMA topology (DRAM + CXL). 
+<p class="muted">Fair, QEMU-free evaluation over an emulated NUMA topology (DRAM + CXL).
 Every strategy replays the identical access trace with the same seed, budget and capacity.</p>
 <div class="card">{charts}</div>
-<h2>CAAT net-cost improvement vs. best baseline</h2>
-<div class="card"><table><thead><tr><th>Workload</th><th>CAAT net cost</th><th>Best baseline</th><th>Baseline</th><th>Improvement</th></tr></thead><tbody>
+<h2>CAAT net-cost change vs. best baseline</h2>
+<p class="muted">Negative means lower modeled cost; positive means higher cost (worse).</p>
+<div class="card"><table><thead><tr><th>Workload</th><th>CAAT net cost</th><th>Best baseline</th><th>Baseline</th><th>Change</th></tr></thead><tbody>
 {"".join(rows)}</tbody></table></div>
 <h2>Methodology</h2>
 <div class="card"><p class="muted">

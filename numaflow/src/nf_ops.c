@@ -401,11 +401,12 @@ static int op_track_access(const nf_op_t *op, nf_ctx_t *ctx, const nf_items_t *i
 
 /* The public workflow vocabulary is intentionally small. Legacy operations remain
  * registered below so saved DAGs and strategy templates continue to execute. Each
- * mode delegates to the legacy implementation. Demote/balance also apply the
- * resulting moves in one step; old policy IDs keep their original semantics. */
-typedef struct { const char *mode; nf_op_run_fn run; } mode_t;
+ * mode delegates to the legacy implementation. Demote/balance apply the
+ * resulting moves in one step; demote_mark/balance_mark preserve the original
+ * mark-only behavior, so converted legacy nodes remain bit-for-bit equivalent. */
+typedef struct { const char *mode; nf_op_run_fn run; } nf_mode_entry_t;
 static int dispatch_mode(nf_ctx_t *ctx, const nf_items_t *in, nf_items_t *out,
-                         const mode_t *modes, size_t count, const char *fallback) {
+                         const nf_mode_entry_t *modes, size_t count, const char *fallback) {
     const char *mode = ctx && ctx->params ? nf_params_get(ctx->params, "mode") : NULL;
     if (!mode || !*mode) mode = fallback;
     for (size_t i = 0; i < count; i++)
@@ -415,7 +416,7 @@ static int dispatch_mode(nf_ctx_t *ctx, const nf_items_t *in, nf_items_t *out,
 #define MODE(name, fn) {name, op_##fn}
 #define DISPATCH(name, default_mode, ...) \
 static int op_##name(const nf_op_t *op, nf_ctx_t *ctx, const nf_items_t *in, nf_items_t *out) { \
-    (void)op; static const mode_t modes[] = { __VA_ARGS__ }; \
+    (void)op; static const nf_mode_entry_t modes[] = { __VA_ARGS__ }; \
     return dispatch_mode(ctx, in, out, modes, sizeof(modes)/sizeof(modes[0]), default_mode); \
 }
 DISPATCH(place_items, "adaptive",
@@ -459,7 +460,9 @@ static int op_move_balance(const nf_op_t *op, nf_ctx_t *ctx,
 }
 DISPATCH(move_items, "migrate",
     MODE("migrate", emit_migrate), MODE("demote", move_demote),
-    MODE("balance", move_balance))
+    MODE("balance", move_balance),
+    /* Legacy mark-only steps, for lossless conversion to the seven-action DAG. */
+    MODE("demote_mark", demote_cold), MODE("balance_mark", balance_nodes))
 DISPATCH(track_items, "access",
     MODE("access", track_access), MODE("observe", cms_observe),
     MODE("decay", global_decay))

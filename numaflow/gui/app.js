@@ -168,8 +168,20 @@ const ACTIONS = [
       migrate: "Apply migrations",
       demote: "Demote cold items",
       balance: "Rebalance nodes",
+      demote_mark: "Mark cold items (legacy)",
+      balance_mark: "Mark for balance (legacy)",
     },
     fields: {
+      demote_mark: [
+        [
+          "threshold",
+          "Maximum frequency",
+          "1",
+          "Mark lower-frequency DRAM items for CXL.",
+        ],
+        ["dram_node", "DRAM node", "0", "Source node."],
+        ["cxl_node", "CXL node", "1", "Destination node."],
+      ],
       demote: [
         [
           "threshold",
@@ -253,7 +265,16 @@ function displayAction(a) {
 function legacyMode(op) {
   return LEGACY_MODES[op];
 }
+function presetLabel(op) {
+  const mapping = legacyMode(op);
+  const guide = LOCALES[state.lang].guides[mapping[0]];
+  return state.lang === "zh"
+    ? guide.names[mapping[1]]
+    : state.ops.find((item) => item.name === op)?.title ||
+        op.replaceAll("_", " ");
+}
 function label(n) {
+  if (n.preset) return presetLabel(n.preset);
   const a = action(n.op);
   if (a) return displayAction(a).title;
   const mapping = legacyMode(n.op);
@@ -266,6 +287,7 @@ function label(n) {
   );
 }
 function modeLabel(n) {
+  if (n.preset) return tr("presetBadge");
   const a = action(n.op);
   if (a)
     return (
@@ -412,7 +434,52 @@ function refreshPalette() {
     b.addEventListener("click", () => addNode(source.id));
     list.append(b);
   }
-  if (!list.children.length) {
+  const presets = $("#legacyActionList");
+  presets.replaceChildren();
+  let group = "";
+  let matches = 0;
+  for (const base of ACTIONS) {
+    for (const [id, mapping] of Object.entries(LEGACY_MODES)) {
+      if (mapping[0] !== base.id) continue;
+      const meta = state.ops.find((item) => item.name === id);
+      const title = presetLabel(id);
+      const detail =
+        id === "demote_cold" || id === "balance_nodes"
+          ? tr("legacyPurpose")
+          : LOCALES[state.lang].guides[base.id].modes[mapping[1]];
+      const searchable = [
+        id,
+        title,
+        meta?.title,
+        meta?.description,
+        detail,
+        displayAction(base).title,
+        base.title,
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (!searchable.includes(q)) continue;
+      if (group !== base.id) {
+        group = base.id;
+        const heading = document.createElement("div");
+        heading.className = "legacy-group";
+        heading.textContent = displayAction(base).title;
+        presets.append(heading);
+      }
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "action-card legacy-card";
+      button.dataset.preset = id;
+      button.setAttribute("aria-label", tr("addAction", { name: title }));
+      button.title = detail;
+      button.innerHTML = `<span class="action-icon" style="background:${base.color};color:${base.ink}">${base.icon}</span><span class="action-copy"><strong>${h(title)}</strong><small>${h(id)}</small></span><span class="action-plus">+</span>`;
+      button.onclick = () => addNode(base.id, id);
+      presets.append(button);
+      matches++;
+    }
+  }
+  if (q && matches) $("#legacyLibrary").open = true;
+  if (!list.children.length && !matches) {
     const p = document.createElement("p");
     p.className = "panel-intro";
     p.textContent = tr("noMatches");
@@ -433,14 +500,18 @@ function screenCenter() {
     y: (r.height / 2 - state.pan.y) / state.zoom,
   };
 }
-function addNode(op) {
+function addNode(op, preset = null) {
   const a = action(op);
+  const mapping = preset ? legacyMode(preset) : null;
+  if (preset && (!mapping || mapping[0] !== op)) return;
+  const mode = mapping ? mapping[1] : Object.keys(a.modes)[0];
   const prev = node(state.selected);
   const center = screenCenter();
   const n = {
     id: "n" + state.nextId++,
     op,
-    params: { mode: Object.keys(a.modes)[0] },
+    params: { mode },
+    ...(preset ? { preset } : {}),
     x: prev ? prev.x + W + 80 : center.x - W / 2,
     y: prev ? prev.y : center.y - H / 2,
   };
@@ -461,7 +532,9 @@ function addNode(op) {
   render();
   renderInspector();
   toast(
-    tr(prev ? "addedConnected" : "added", { name: displayAction(a).title }),
+    tr(prev ? "addedConnected" : "added", {
+      name: preset ? presetLabel(preset) : displayAction(a).title,
+    }),
   );
 }
 function reveal(n) {
@@ -519,7 +592,7 @@ function render() {
         emit: ACTIONS[5],
         track: ACTIONS[6],
       }[category] || { icon: "◇", color: "#edf1f6", ink: "#728099" };
-    html += `<g class="node${n.id === state.selected ? " selected" : ""}" data-id="${h(n.id)}"><rect class="node-shadow" x="${n.x}" y="${n.y + 5}" width="${W}" height="${H}" rx="12"/><rect class="node-card" x="${n.x}" y="${n.y}" width="${W}" height="${H}" rx="12"/><rect x="${n.x + 13}" y="${n.y + 16}" width="38" height="38" rx="10" fill="${a.color}"/><text x="${n.x + 32}" y="${n.y + 42}" text-anchor="middle" font-size="20" fill="${a.ink}" pointer-events="none">${h(a.icon)}</text><text class="node-title" x="${n.x + 62}" y="${n.y + 29}">${h(label(n).slice(0, 20))}</text><text class="node-subtitle" x="${n.x + 62}" y="${n.y + 49}">${h(modeLabel(n).slice(0, 24))}</text><circle class="port input" data-port="in" data-id="${h(n.id)}" cx="${n.x}" cy="${n.y + H / 2}" r="7"/><circle class="port output" data-port="out" data-id="${h(n.id)}" cx="${n.x + W}" cy="${n.y + H / 2}" r="8"/></g>`;
+    html += `<g class="node${n.id === state.selected ? " selected" : ""}${n.preset ? " preset" : ""}" data-id="${h(n.id)}"><rect class="node-shadow" x="${n.x}" y="${n.y + 5}" width="${W}" height="${H}" rx="12"/><rect class="node-card" x="${n.x}" y="${n.y}" width="${W}" height="${H}" rx="12"/><rect x="${n.x + 13}" y="${n.y + 16}" width="38" height="38" rx="10" fill="${a.color}"/><text x="${n.x + 32}" y="${n.y + 42}" text-anchor="middle" font-size="20" fill="${a.ink}" pointer-events="none">${h(a.icon)}</text><text class="node-title" x="${n.x + 62}" y="${n.y + 29}">${h(label(n).slice(0, 20))}</text><text class="node-subtitle" x="${n.x + 62}" y="${n.y + 49}">${h(modeLabel(n).slice(0, 24))}</text><circle class="port input" data-port="in" data-id="${h(n.id)}" cx="${n.x}" cy="${n.y + H / 2}" r="7"/><circle class="port output" data-port="out" data-id="${h(n.id)}" cx="${n.x + W}" cy="${n.y + H / 2}" r="8"/></g>`;
   });
   stage.innerHTML = html;
   $("#flowCount").textContent = tr("actionCount", {
@@ -712,11 +785,20 @@ function toWorkflow() {
       id: n.id,
       op: n.op,
       ...(Object.keys(n.params).length ? { params: n.params } : {}),
+      ...(n.preset ? { preset: n.preset } : {}),
     })),
     edges: state.edges.map((e) => ({ from: e.from, to: e.to })),
   };
 }
-function field(key, title, value, help, onChange, type = "text") {
+function field(
+  key,
+  title,
+  value,
+  help,
+  onChange,
+  type = "text",
+  fixed = false,
+) {
   const div = document.createElement("div");
   div.className = "field";
   const id = "field-" + key;
@@ -725,6 +807,7 @@ function field(key, title, value, help, onChange, type = "text") {
   label.textContent = title;
   const input = document.createElement(type === "boolean" ? "select" : "input");
   input.id = id;
+  input.disabled = fixed;
   if (type === "boolean") {
     for (const [value, caption] of [
       ["false", "No"],
@@ -789,15 +872,53 @@ function renderInspector() {
   const mapping = legacyMode(n.op);
   const guideId = a?.id || mapping?.[0];
   const guide = guideId ? LOCALES[state.lang].guides[guideId] : null;
-  const legacyMarkOnly = n.op === "demote_cold" || n.op === "balance_nodes";
+  const legacyMarkOnly =
+    n.op === "demote_cold" ||
+    n.op === "balance_nodes" ||
+    (n.op === "move_items" &&
+      ["demote_mark", "balance_mark"].includes(n.params.mode));
   const desc = a
-    ? displayAction(a).desc
+    ? n.preset
+      ? guide.modes[n.params.mode]
+      : displayAction(a).desc
     : legacyMarkOnly
       ? tr("legacyPurpose")
       : state.lang === "zh" && guide
         ? guide.modes[mapping[1]]
         : legacy?.description || tr("importedAction");
   root.innerHTML = `<div class="inspector-type">${h(tr(a ? "actionSettings" : "legacyAction"))}</div><div class="inspector-heading"><span class="action-icon" style="background:${a?.color || "#edf1f6"};color:${a?.ink || "#728099"}">${a?.icon || "◇"}</span><div><h3>${h(label(n))}</h3><small>${h(n.id)}${a ? "" : " · " + h(n.op)}</small></div></div><p class="inspector-desc">${h(desc)}</p><div class="field-group-title">${h(tr("behavior"))}</div>`;
+  if (n.preset) {
+    const banner = document.createElement("div");
+    banner.className = "preset-banner";
+    banner.innerHTML = `<strong>${h(tr("presetBadge"))}</strong> · <code>${h(n.preset)}</code><br>${h(tr("presetLocked", { op: n.preset }))}`;
+    const unlock = document.createElement("button");
+    unlock.type = "button";
+    unlock.className = "secondary-action";
+    unlock.textContent = tr("customizePreset");
+    unlock.onclick = () => {
+      delete n.preset;
+      state.isStarter = false;
+      render();
+      renderInspector();
+    };
+    banner.append(unlock);
+    root.append(banner);
+  } else if (!a && mapping) {
+    const convert = document.createElement("button");
+    convert.type = "button";
+    convert.className = "secondary-action";
+    convert.textContent = tr("convertPreset");
+    convert.onclick = () => {
+      const original = n.op;
+      n.op = mapping[0];
+      n.params = { ...n.params, mode: mapping[1] };
+      n.preset = original;
+      state.isStarter = false;
+      render();
+      renderInspector();
+    };
+    root.append(convert);
+  }
   if (a) {
     const d = document.createElement("div");
     d.className = "field";
@@ -806,6 +927,7 @@ function renderInspector() {
     lbl.textContent = tr("operation");
     const select = document.createElement("select");
     select.id = "modeSelect";
+    select.disabled = !!n.preset;
     Object.entries(displayAction(a).modes).forEach(([id, title]) => {
       const opt = document.createElement("option");
       opt.value = id;
@@ -831,20 +953,29 @@ function renderInspector() {
       <div class="guide-mode"><strong>${h(tr("modeDetail"))} · ${h(a ? displayAction(a).modes[mode] || mode : guide.names?.[mode] || action(guideId).modes[mode])}</strong><p>${h(note || "")}</p></div>
       <div class="guide-caption">${h(tr("input"))}</div><p>${h(guide.input)}</p>
       <div class="guide-caption">${h(tr("result"))}</div><p>${h(legacyMarkOnly ? tr("legacyOutput") : guide.output)}</p>
-      <div class="guide-tip"><strong>${h(tr("tip"))}</strong><br>${h(guide.tip)}</div>`;
+      <div class="guide-tip"><strong>${h(tr("tip"))}</strong><br>${h(legacyMarkOnly ? tr("legacyMark") : guide.tip)}</div>`;
     root.append(panel);
   }
   if (a) {
     for (const [key, title, def, help] of a.fields?.[
       n.params.mode || Object.keys(a.modes)[0]
-    ] || [])
+    ] || []) {
+      const runtimeDefault =
+        n.preset && n.params[key] === undefined
+          ? ["filter_remote", "filter_local"].includes(n.preset) &&
+            key === "node"
+            ? tr("presetRuntimeLocal")
+            : n.preset === "budget_limit" && key === "budget"
+              ? tr("presetRuntimeBudget")
+              : null
+          : null;
       root.append(
         field(
           key,
           LOCALES[state.lang].fields?.[
             `${a.id}.${n.params.mode || Object.keys(a.modes)[0]}.${key}`
           ]?.[0] || title,
-          n.params[key] ?? def,
+          runtimeDefault ?? n.params[key] ?? def,
           LOCALES[state.lang].fields?.[
             `${a.id}.${n.params.mode || Object.keys(a.modes)[0]}.${key}`
           ]?.[1] || help,
@@ -855,16 +986,30 @@ function renderInspector() {
             state.isStarter = false;
             render();
           },
-          key === "require_benefit" ? "boolean" : "number",
+          runtimeDefault
+            ? "text"
+            : key === "require_benefit"
+              ? "boolean"
+              : "number",
+          !!n.preset,
         ),
       );
+    }
   }
   const extra = document.createElement("div");
   extra.className = "field-group-title";
   extra.textContent = tr(a ? "advanced" : "parameters");
-  root.append(extra);
+  const standardFields = new Set([
+    "mode",
+    ...(a?.fields?.[n.params.mode || Object.keys(a.modes)[0]] || []).map(
+      (f) => f[0],
+    ),
+  ]);
+  const showAdvanced =
+    !n.preset || Object.keys(n.params).some((key) => !standardFields.has(key));
+  if (showAdvanced) root.append(extra);
   const custom = document.createElement("div");
-  root.append(custom);
+  if (showAdvanced) root.append(custom);
   function drawCustom() {
     custom.replaceChildren();
     const standard = new Set([
@@ -878,9 +1023,11 @@ function renderInspector() {
       row.className = "kv-row";
       const k = document.createElement("input");
       k.value = key;
+      k.disabled = !!n.preset;
       k.setAttribute("aria-label", tr("paramName"));
       const v = document.createElement("input");
       v.value = n.params[key];
+      v.disabled = !!n.preset;
       v.setAttribute("aria-label", tr("paramValue"));
       v.oninput = () => {
         n.params[key] = v.value;
@@ -894,7 +1041,6 @@ function renderInspector() {
           return;
         }
         n.params[newKey] = n.params[key];
-        state.isStarter = false;
         delete n.params[key];
         state.isStarter = false;
         drawCustom();
@@ -909,7 +1055,8 @@ function renderInspector() {
         drawCustom();
         render();
       };
-      row.append(k, v, del);
+      row.append(k, v);
+      if (!n.preset) row.append(del);
       custom.append(row);
     }
   }
@@ -926,7 +1073,7 @@ function renderInspector() {
     drawCustom();
     custom.lastElementChild?.querySelector("input")?.focus();
   };
-  root.append(add);
+  if (!n.preset) root.append(add);
   const footer = document.createElement("div");
   footer.className = "inspector-footer";
   const remove = document.createElement("button");
@@ -1019,12 +1166,20 @@ function loadWorkflow(w) {
         Array.isArray(n.params))
     )
       throw Error(tr("invalidParams"));
+    const params = Object.fromEntries(
+      Object.entries(n.params || {}).map(([k, v]) => [k, String(v)]),
+    );
+    if (n.preset !== undefined) {
+      const mapping =
+        typeof n.preset === "string" ? legacyMode(n.preset) : null;
+      if (!mapping || mapping[0] !== n.op || mapping[1] !== params.mode)
+        throw Error(tr("presetInvalid"));
+    }
     return {
       id: n.id,
       op: n.op,
-      params: Object.fromEntries(
-        Object.entries(n.params || {}).map(([k, v]) => [k, String(v)]),
-      ),
+      params,
+      ...(n.preset ? { preset: n.preset } : {}),
       x: 0,
       y: 0,
     };
@@ -1243,6 +1398,7 @@ function init() {
     .then((r) => r.json())
     .then((ops) => {
       state.ops = Array.isArray(ops) ? ops : [];
+      refreshPalette();
       render();
       renderInspector();
     })

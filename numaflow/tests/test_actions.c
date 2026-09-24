@@ -26,6 +26,8 @@ static const case_t cases[] = {
     {"route_items","destination","select_dest_node"}, {"route_items","budget","budget_limit"},
     {"move_items","migrate","emit_migrate"}, {"move_items","demote","demote_cold"},
     {"move_items","balance","balance_nodes"},
+    {"move_items","demote_mark","demote_cold"},
+    {"move_items","balance_mark","balance_nodes"},
     {"track_items","access","track_access"}, {"track_items","observe","cms_observe"},
     {"track_items","decay","global_decay"}
 };
@@ -64,7 +66,8 @@ int main(void) {
         nf_items_t actual, expected; nf_items_init(&actual); nf_items_init(&expected);
         int a=execute(cases[i].action,cases[i].mode,NULL,&actual);
         const char *apply=(strcmp(cases[i].action,"move_items")==0 &&
-                            strcmp(cases[i].mode,"migrate")!=0) ? "emit_migrate" : NULL;
+                            (strcmp(cases[i].mode,"demote")==0 || strcmp(cases[i].mode,"balance")==0))
+            ? "emit_migrate" : NULL;
         int b=execute(cases[i].legacy,NULL,apply,&expected);
         if (a!=b || actual.count!=expected.count ||
             (a==NF_OK && memcmp(actual.items,expected.items,actual.count*sizeof(nf_item_t))!=0)) {
@@ -76,5 +79,5 @@ int main(void) {
     CHECK(execute("filter_items","not-a-mode",NULL,&out)==NF_EINVAL,"invalid mode rejected");
     nf_items_free(&out);
     if(failures)return 1;
-    printf("ALL 36 ACTION MODES MATCH LEGACY POLICIES/PIPELINES\n");return 0;
+    printf("ALL 38 ACTION MODES MATCH LEGACY POLICIES/PIPELINES\n");return 0;
 }

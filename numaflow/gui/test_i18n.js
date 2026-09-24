@@ -42,8 +42,28 @@ for (const action of context.actions) {
         failures.push(`${action.id}.${mode}.${key}`);
   }
 }
-for (const [op, [action, mode]] of Object.entries(LEGACY_MODES))
-  if (!LOCALES.zh.guides[action]?.modes[mode]) failures.push(`legacy: ${op}`);
+const equivalence = fs.readFileSync(
+  path.join(dir, "..", "tests", "test_actions.c"),
+  "utf8",
+);
+const proven = new Set(
+  [...equivalence.matchAll(/\{"([^"]+)","([^"]+)","([^"]+)"\}/g)].map(
+    ([, action, mode, legacy]) => JSON.stringify([action, mode, legacy]),
+  ),
+);
+for (const [op, [action, mode]] of Object.entries(LEGACY_MODES)) {
+  if (
+    !LOCALES.zh.guides[action]?.modes[mode] ||
+    !context.actions.find((a) => a.id === action)?.modes[mode] ||
+    !proven.has(JSON.stringify([action, mode, op]))
+  )
+    failures.push(`unproven legacy mapping: ${op}`);
+}
+if (
+  LEGACY_MODES.demote_cold?.[1] !== "demote_mark" ||
+  LEGACY_MODES.balance_nodes?.[1] !== "balance_mark"
+)
+  failures.push("mark-only legacy semantics lost");
 const html = fs.readFileSync(path.join(dir, "index.html"), "utf8");
 for (const [, key] of html.matchAll(
   /data-i18n(?:-title|-aria|-placeholder)?="([^"]+)"/g,
@@ -62,5 +82,5 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(
-  "EN / 中文 copy complete for 7 actions, 36 modes, 36 legacy IDs and 23 templates",
+  "EN / 中文 copy complete for 7 actions, 38 modes, 36 fixed legacy presets and 23 templates",
 );

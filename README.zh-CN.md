@@ -33,6 +33,51 @@ cd src && make clean && make -j$(nproc)
 ./redis-cli numa strategy list
 ```
 
+### NUMAflow 完整基准矩阵（2026 年 9 月 24 日）
+
+在 **8 vCPU、15 GiB 内存、仅 1 个真实 NUMA 节点**的 VMware 虚拟机上，
+完成了 4 种合成负载 × 2 组建模分层参数的全部测试。每组对 **4 个迁移策略及
+9 个分配策略**重放同一条 20 万次访问轨迹（2 万个键、epoch 5000、迁移预算 64、
+固定种子 20240517、**模拟的**两个 NUMA 节点）。下表为**建模总净代价**，
+单位百万纳秒（访问 + 迁移，**越低越好**），并非真实 Redis 吞吐量。
+每格负载名称链接到包含完整命中率、迁移次数、反馈和节点放置的 JSON。
+
+| 模型 | 负载（原始 JSON） | Noop | Composite LRU | TinyLFU | CAAT | CAAT 本地命中 | CAAT 迁移次数 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 默认拓扑 | [zipf](docs/benchmarks/2026-09-24/bench_zipf_default.json) | 504.9 | 238.3 | 228.1 | 183.7 | 84.5% | 13,521 |
+| 默认拓扑 | [uniform](docs/benchmarks/2026-09-24/bench_uniform_default.json) | 467.7 | 408.8 | 424.4 | 388.5 | 18.0% | 4,117 |
+| 默认拓扑 | [hotspot](docs/benchmarks/2026-09-24/bench_hotspot_default.json) | 456.1 | 250.6 | 326.9 | 185.4 | 76.1% | 10,321 |
+| 默认拓扑 | [temporal](docs/benchmarks/2026-09-24/bench_temporal_default.json) | 480.5 | 394.0 | 407.4 | 307.8 | 48.9% | 9,613 |
+| CXL 参数情景 | [zipf](docs/benchmarks/2026-09-24/bench_zipf_cxlcal.json) | 190.6 | 126.2 | 124.0 | 121.6 | 79.5% | 15,426 |
+| CXL 参数情景 | [uniform](docs/benchmarks/2026-09-24/bench_uniform_cxlcal.json) | 178.7 | 166.8 | 168.9 | 146.2 | 46.9% | 18,125 |
+| CXL 参数情景 | [hotspot](docs/benchmarks/2026-09-24/bench_hotspot_cxlcal.json) | 174.9 | 120.9 | 139.8 | 111.5 | 74.6% | 16,570 |
+| CXL 参数情景 | [temporal](docs/benchmarks/2026-09-24/bench_temporal_cxlcal.json) | 182.7 | 161.9 | 166.8 | 132.1 | 63.7% | 17,620 |
+
+- 默认拓扑：建模 DRAM/CXL 延迟 **60/300 ns**、带宽 **20,000/8,000 MB/s**；
+  CXL 参数情景：模拟 CXL 延迟 **125 ns**、带宽 **25,000 MB/s**。
+  **本次没有实测 CXL 设备**，后一组数值只是模型输入。
+- 分配策略是初始放置，迁移策略是从所有对象位于慢层开始；**不能直接比较两类
+  策略的净代价**。分配模型可将所有对象放在 DRAM，而迁移模型限制 DRAM 容量
+  约为工作集的一半。
+- CAAT 在这八组模型配置下净代价最低，但**不能据此宣称普遍优于旧算法**。
+  同日按仓库标准的 **3,000 键 / 120,000 访问**复测：*uniform* 上 Composite LRU
+  为 **127.0M** 建模纳秒，CAAT 为 **166.5M**（多 31.1%）；*temporal* 上分别为
+  **148.7M** 和 **153.6M**。旧算法依然重要。查看[标准配置图表](docs/benchmarks/2026-09-24/reference/report.html)
+  和 [zipf](docs/benchmarks/2026-09-24/reference/bench_zipf.json) ·
+  [uniform](docs/benchmarks/2026-09-24/reference/bench_uniform.json) ·
+  [hotspot](docs/benchmarks/2026-09-24/reference/bench_hotspot.json) ·
+  [temporal](docs/benchmarks/2026-09-24/reference/bench_temporal.json) 原始数据。
+
+[完整图表](docs/benchmarks/2026-09-24/report.html) ·
+[复现脚本](docs/benchmarks/2026-09-24/run.sh) ·
+[数据校验](docs/benchmarks/2026-09-24/validate.py) ·
+[运行环境记录](docs/benchmarks/2026-09-24/manifest.json)。
+
+编译工具链后执行 `bash docs/benchmarks/2026-09-24/run.sh` 可复现。完整 Redis
+编译、96 个 Redis 测试文件、NUMAflow 单元测试及浏览器交互测试均通过。本虚拟机
+**未实测**真实多节点/CXL 设备或 YCSB 吞吐量；`run_full_validation.sh --quick`
+按设计跳过这些阶段。
+
 ### 一条命令完成全部验证
 
 ```bash
@@ -53,7 +98,9 @@ python3 numaflow/gui/server.py   # 打开 http://127.0.0.1:8090/
 ```
 
 在右上角选择 **English / 简体中文**；点击节点可查看作用、输入、输出、各模式说明
-及编排建议。旧模板节点仍保持兼容。运行按钮使用合成对象模拟测试，不会操作实机 Redis。
+及编排建议。展开「经典算法预设」可将 36 个原版算法作为新动作的固定模式节点使用；
+如需改动，点击「解锁并自定义」。旧版降级/平衡节点的“仅标记”行为不会被改变。
+运行按钮使用合成对象模拟测试，不会操作实机 Redis。
 
 ## 编译
 

@@ -376,6 +376,12 @@ guest 内四个策略、取回四份轨迹、跑两次 `replay`（标定/不标�
   节点；旧版 `demote_cold` / `balance_nodes` 仅标记目标，不会被误写为“一步迁移”。
   切换语言只改变显示文案，不会改写节点的 `op`、`mode`、参数或连线；工作流名称与描述
   属于工作流数据，加载已有文件时保留原文。执行结果的中文摘要仍保留原始引擎输出。
+  左侧折叠的 **经典算法预设** 保留了全部 36 个旧操作：点击后创建七类新动作之一，
+  `params.mode` 固定为对应的原版算法，原始默认值和运行时动态默认值保持不变。
+  模板中导入的旧节点可在右侧点击「转换为固定动作预设」；节点 ID、连线、阈值及
+  `demote_cold` / `balance_nodes` 的**只标记、不迁移**行为都保持不变；要修改
+  模式或参数须点击「解锁并自定义」。固定预设额外导出顶层 `preset` 字段，仅供
+  WebUI 保留锁定标记；C/Redis 引擎只依据 `op` 与 `params` 执行，忽略该字段。
   后端通过 HTTP 调用编译好的 C11 `numaflow` 二进制。
 
 ## 5. 轻量缓存行为追踪框架
@@ -393,7 +399,7 @@ guest 内四个策略、取回四份轨迹、跑两次 `replay`（标定/不标�
 ```bash
 cd numaflow
 make            # 构建 numaflow CLI + TUI（GNU make 或 mingw32-make 均可）
-make test       # 编译并运行单元 + 集成测试（含 36 个新旧模式等价检查）
+make test       # 编译并运行单元 + 集成测试（含 38 个新旧模式/组合等价检查）
 make report     # 生成评测 JSON + results/report.html
 ./build/numaflow ops        # 列出 7 个新工作流动作
 ./build/numaflow ops --all  # 同时列出 36 个兼容旧操作
@@ -409,7 +415,7 @@ make report     # 生成评测 JSON + results/report.html
 
 ```bash
 python3 gui/test_ui.py    # 自动启动本地服务，检查中英文切换、节点说明、导入、连线和响应式布局
-node gui/test_i18n.js   # 可选：无依赖地检查 7 动作 / 36 模式 / 36 旧版 ID / 23 模板翻译覆盖率
+node gui/test_i18n.js   # 可选：无依赖地检查 7 动作 / 38 模式 / 36 经典预设 / 23 模板翻译覆盖率
 # 可通过 NF_SCREENSHOT_DIR 指定截图目录
 ```
 
