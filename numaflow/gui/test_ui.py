@@ -71,6 +71,27 @@ try:
     assert canvas['width'] >= 500 and canvas['height'] >= 300, 'editor canvas must have usable space'
     assert driver.save_screenshot(str(shots/'numaflow-desktop.png'))
     assert (shots/'numaflow-desktop.png').stat().st_size > 30_000, 'desktop screenshot must contain rendered UI'
+    # Localization covers static UI, modes, detailed node guidance and templates
+    # without changing the graph's language-neutral op/mode IDs.
+    before = driver.execute_script('return toWorkflow()')
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('zh')
+    assert driver.find_element(By.TAG_NAME, 'html').get_attribute('lang') == 'zh-CN'
+    assert driver.find_element(By.CSS_SELECTOR, '.crumb').text == '工作流工作台'
+    assert driver.find_element(By.CSS_SELECTOR, '.action-card').get_attribute('aria-label').startswith('添加')
+    assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent') == '计算评分'
+    after = driver.execute_script('return toWorkflow()')
+    assert before['nodes'] == after['nodes'] and before['edges'] == after['edges'], 'language must not change the DAG'
+    driver.find_element(By.CSS_SELECTOR, '.node[data-id="n1"] .node-card').click()
+    assert '节点作用' in driver.find_element(By.CSS_SELECTOR, '.node-guide').text
+    assert '阶梯衰减' in driver.find_element(By.CSS_SELECTOR, '.guide-mode').text
+    assert Select(driver.find_element(By.ID, 'modeSelect')).first_selected_option.text == '热度'
+    assert driver.save_screenshot(str(shots/'numaflow-zh-desktop.png'))
+    assert (shots/'numaflow-zh-desktop.png').stat().st_size > 30_000
+    driver.find_element(By.ID, 'runBtn').click()
+    wait.until(lambda d: '执行成功：输出对象' in d.find_element(By.ID, 'outputText').text)
+    assert 'execution=OK' in driver.find_element(By.ID, 'outputText').text  # original engine output retained
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('en')
+    assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent') == 'Score items'
     search = driver.find_element(By.ID, 'actionSearch')
     search.send_keys('CXL')
     assert len(driver.find_elements(By.CSS_SELECTOR, '.action-card')) == 1
@@ -110,8 +131,22 @@ try:
     wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '.node')) > 3)
     assert driver.find_element(By.CSS_SELECTOR, '.node-title').text, 'legacy nodes must have labels'
     assert driver.find_element(By.CSS_SELECTOR, '.node').rect['width'] >= 170, 'long templates should open at readable scale'
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('zh')
+    assert driver.find_elements(By.CSS_SELECTOR, '#templateSelect optgroup[label="内存分层"]')
+    assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent').startswith('旧版')
+    driver.find_element(By.CSS_SELECTOR, '.node .node-card').click()
+    assert driver.find_element(By.CSS_SELECTOR, '.node-guide').text
+    # Compatibility operations keep their original mark-only semantics, and
+    # their Chinese descriptions must not suggest they migrate immediately.
+    Select(driver.find_element(By.ID, 'templateSelect')).select_by_value('tier_demote_cold')
+    driver.find_element(By.ID, 'loadTemplateBtn').click()
+    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '.node')) == 3)
+    driver.find_element(By.CSS_SELECTOR, '.node[data-id="n2"] .node-card').click()
+    assert '只标记' in driver.find_element(By.CSS_SELECTOR, '.node-guide').text
+    assert '当前节点不会改变' in driver.find_element(By.CSS_SELECTOR, '.node-guide').text
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('en')
     driver.find_element(By.ID, 'fitBtn').click()
-    assert len(driver.find_elements(By.CSS_SELECTOR, '.node')) > 3, 'fit must preserve template nodes'
+    assert len(driver.find_elements(By.CSS_SELECTOR, '.node')) == 3, 'fit must preserve template nodes'
 
     driver.find_element(By.ID, 'newBtn').click()
     driver.switch_to.alert.accept()
@@ -126,6 +161,11 @@ try:
     assert driver.find_element(By.ID, 'canvas').rect['width'] >= 300, 'mobile canvas must not collapse'
     assert driver.save_screenshot(str(shots/'numaflow-mobile.png'))
     assert (shots/'numaflow-mobile.png').stat().st_size > 20_000, 'mobile screenshot must contain rendered UI'
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('zh')
+    assert driver.find_element(By.ID, 'canvas').rect['width'] >= 300
+    assert driver.save_screenshot(str(shots/'numaflow-zh-mobile.png'))
+    assert (shots/'numaflow-zh-mobile.png').stat().st_size > 20_000
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('en')
     # Real file import: legacy IDs remain executable, bad graphs leave the
     # current flow unchanged rather than overwriting it with partial data.
     import_file = shots/'numaflow-import-test.json'
@@ -143,7 +183,14 @@ try:
     driver.find_element(By.ID, 'fileInput').send_keys(str(import_file))
     assert driver.find_element(By.ID, 'workflowName').get_attribute('value') == 'Imported legacy'
     import_file.unlink()
-    print('GUI browser/visual checks passed; screenshots: ' + str(shots))
+    # Saved language survives reload; imported workflows are not retranslated.
+    Select(driver.find_element(By.ID, 'languageSelect')).select_by_value('zh')
+    assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent').startswith('旧版')
+    driver.refresh()
+    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, '.node')) == 3)
+    assert Select(driver.find_element(By.ID, 'languageSelect')).first_selected_option.get_attribute('value') == 'zh'
+    assert driver.find_element(By.CSS_SELECTOR, '.node-title').get_attribute('textContent') == '计算评分'
+    print('GUI browser/visual checks passed (EN + 简体中文); screenshots: ' + str(shots))
 finally:
     if driver:
         driver.quit()

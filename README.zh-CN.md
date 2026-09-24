@@ -45,6 +45,16 @@ cd src && make clean && make -j$(nproc)
 有 JDK 导致 YCSB 跑不了、没有 `/dev/kvm` 导致 QEMU 跑不了、CXLMemSim 没编译）都
 会被标记为**已跳过（skipped）**并注明原因——绝不伪造一个“通过”的假象。
 
+### NUMAflow 工作流工作台
+
+```bash
+make -C numaflow
+python3 numaflow/gui/server.py   # 打开 http://127.0.0.1:8090/
+```
+
+在右上角选择 **English / 简体中文**；点击节点可查看作用、输入、输出、各模式说明
+及编排建议。旧模板节点仍保持兼容。运行按钮使用合成对象模拟测试，不会操作实机 Redis。
+
 ## 编译
 
 ```bash

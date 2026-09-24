@@ -109,7 +109,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with open(p, "rb") as f:
                     self._send(200, f.read(), "text/html; charset=utf-8")
                 return
-        if self.path in ("/style.css", "/app.js"):
+        if self.path in ("/style.css", "/app.js", "/i18n.js"):
             path = os.path.join(HERE, self.path[1:])
             with open(path, "rb") as f:
                 self._send(200, f.read(), "text/css; charset=utf-8" if self.path.endswith(".css") else "text/javascript; charset=utf-8")

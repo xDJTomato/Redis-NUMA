@@ -196,6 +196,15 @@ const ACTIONS = [
     },
   },
 ];
+function initialLanguage() {
+  try {
+    const saved = localStorage.getItem("numaflow-language");
+    if (saved === "en" || saved === "zh") return saved;
+  } catch {
+    /* storage may be disabled */
+  }
+  return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
 const $ = (s) => document.querySelector(s);
 const state = {
   nodes: [],
@@ -208,7 +217,12 @@ const state = {
   gesture: null,
   draft: null,
   ops: [],
-  name: "Adaptive tiering",
+  lang: initialLanguage(),
+  status: "ready",
+  outputState: "idle",
+  outputRaw: "",
+  templates: [],
+  isStarter: false,
   description: "Built in NUMAflow workflow studio",
 };
 const W = 216,
@@ -223,13 +237,140 @@ const h = (text) =>
         c
       ],
   );
-const label = (n) =>
-  action(n.op)?.title ||
-  state.ops.find((a) => a.name === n.op)?.title ||
-  n.op.replaceAll("_", " ");
-const modeLabel = (n) =>
-  action(n.op)?.modes[n.params.mode || Object.keys(action(n.op).modes)[0]] ||
-  "Legacy · " + (state.ops.find((a) => a.name === n.op)?.category || "action");
+function tr(key, args = {}) {
+  const template = LOCALES[state.lang].ui[key] || LOCALES.en.ui[key] || key;
+  return template.replace(/\{(\w+)\}/g, (_, name) => String(args[name] ?? ""));
+}
+function displayAction(a) {
+  const translated = LOCALES[state.lang].guides[a.id];
+  return {
+    ...a,
+    title: translated.title || a.title,
+    desc: translated.desc || a.desc,
+    modes: { ...a.modes, ...translated.names },
+  };
+}
+function legacyMode(op) {
+  return LEGACY_MODES[op];
+}
+function label(n) {
+  const a = action(n.op);
+  if (a) return displayAction(a).title;
+  const mapping = legacyMode(n.op);
+  if (state.lang === "zh" && mapping) {
+    const guide = LOCALES.zh.guides[mapping[0]];
+    return tr("legacyPrefix") + guide.names[mapping[1]];
+  }
+  return (
+    state.ops.find((o) => o.name === n.op)?.title || n.op.replaceAll("_", " ")
+  );
+}
+function modeLabel(n) {
+  const a = action(n.op);
+  if (a)
+    return (
+      displayAction(a).modes[n.params.mode || Object.keys(a.modes)[0]] ||
+      n.params.mode
+    );
+  return state.lang === "zh"
+    ? tr("legacyAction")
+    : "Legacy · " +
+        (state.ops.find((o) => o.name === n.op)?.category || "action");
+}
+function renderTemplates() {
+  const select = $("#templateSelect");
+  const chosen = select.value;
+  select.replaceChildren();
+  const first = document.createElement("option");
+  first.value = "";
+  first.textContent = tr("chooseTemplate");
+  select.append(first);
+  const groups = new Map();
+  for (const t of state.templates) {
+    if (!t.name || !t.category) continue;
+    let group = groups.get(t.category);
+    if (!group) {
+      group = document.createElement("optgroup");
+      group.label = LOCALES[state.lang].categories?.[t.category] || t.category;
+      groups.set(t.category, group);
+      select.append(group);
+    }
+    const option = document.createElement("option");
+    option.value = t.name;
+    option.textContent =
+      LOCALES[state.lang].templates?.[t.name] || t.description || t.name;
+    option.title = `${t.name} — ${option.textContent}`;
+    group.append(option);
+  }
+  select.value = chosen;
+  $("#loadTemplateBtn").disabled = !select.value;
+}
+function renderOutput() {
+  let out = tr("noRun");
+  if (state.outputState === "running") out = tr("running");
+  if (state.outputState === "offline") out = tr("serverOffline");
+  if (["done", "failed"].includes(state.outputState)) {
+    out = state.outputRaw || tr("engineEmpty");
+    if (state.lang === "zh") {
+      const match = out.match(
+        /^workflow=(.*?) nodes=(\d+) edges=(\d+)\s+execution=OK result_items=(\d+) migrations=(\d+)/,
+      );
+      out = match
+        ? tr("runSummary", {
+            name: match[1],
+            nodes: match[2],
+            edges: match[3],
+            items: match[4],
+            migrations: match[5],
+          }) +
+          "\n\n" +
+          tr("rawOutput") +
+          ":\n" +
+          out
+        : tr(state.outputState === "done" ? "runDone" : "runFailed") +
+          "\n" +
+          out;
+    }
+  }
+  $("#outputText").textContent = out;
+  $("#toggleOutput").innerHTML =
+    h(tr($("#outputPanel").hidden ? "showOutput" : "hideOutput")) +
+    " <span>" +
+    ($("#outputPanel").hidden ? "⌄" : "⌃") +
+    "</span>";
+}
+function setLanguage(lang) {
+  const formerName = LOCALES[state.lang].ui.starterName;
+  state.lang = lang === "zh" ? "zh" : "en";
+  try {
+    localStorage.setItem("numaflow-language", state.lang);
+  } catch {
+    /* optional */
+  }
+  $("#languageSelect").value = state.lang;
+  document.documentElement.lang = state.lang === "zh" ? "zh-CN" : "en";
+  document.title = tr("pageTitle");
+  if (state.isStarter && $("#workflowName").value === formerName)
+    $("#workflowName").value = tr("starterName");
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = tr(el.dataset.i18n);
+  });
+  for (const [attr, property] of [
+    ["data-i18n-title", "title"],
+    ["data-i18n-aria", "aria-label"],
+    ["data-i18n-placeholder", "placeholder"],
+  ]) {
+    document
+      .querySelectorAll(`[${attr}]`)
+      .forEach((el) => el.setAttribute(property, tr(el.getAttribute(attr))));
+  }
+  renderTemplates();
+  refreshPalette();
+  render();
+  renderInspector();
+  renderOutput();
+  setStatus(state.status);
+}
 let toastTimer;
 function toast(message, error = false) {
   const el = $("#toast");
@@ -239,30 +380,42 @@ function toast(message, error = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("show"), 3500);
 }
-function setStatus(text) {
-  $("#statusText").innerHTML = '<span class="status-dot"></span> ' + h(text);
+function setStatus(key) {
+  state.status = key;
+  $("#statusText").innerHTML = '<span class="status-dot"></span> ' + h(tr(key));
 }
 function refreshPalette() {
   const q = $("#actionSearch").value.trim().toLowerCase();
   const list = $("#actionList");
   list.replaceChildren();
-  for (const a of ACTIONS.filter((a) =>
-    (a.title + " " + a.desc + " " + Object.values(a.modes).join(" "))
+  for (const source of ACTIONS.filter((a) => {
+    const translated = displayAction(a);
+    return [
+      a.title,
+      a.desc,
+      ...Object.values(a.modes),
+      translated.title,
+      translated.desc,
+      ...Object.values(translated.modes),
+    ]
+      .join(" ")
       .toLowerCase()
-      .includes(q),
-  )) {
+      .includes(q);
+  })) {
+    const a = displayAction(source);
     const b = document.createElement("button");
     b.type = "button";
     b.className = "action-card";
-    b.setAttribute("aria-label", "Add " + a.title);
+    b.setAttribute("aria-label", tr("addAction", { name: a.title }));
+    b.title = LOCALES[state.lang].guides[a.id].purpose;
     b.innerHTML = `<span class="action-icon" style="background:${a.color};color:${a.ink}">${a.icon}</span><span class="action-copy"><strong>${a.title}</strong><small>${a.desc}</small></span><span class="action-plus">+</span>`;
-    b.addEventListener("click", () => addNode(a.id));
+    b.addEventListener("click", () => addNode(source.id));
     list.append(b);
   }
   if (!list.children.length) {
     const p = document.createElement("p");
     p.className = "panel-intro";
-    p.textContent = "No actions match your search.";
+    p.textContent = tr("noMatches");
     list.append(p);
   }
 }
@@ -299,6 +452,7 @@ function addNode(op) {
     }
   }
   state.nodes.push(n);
+  state.isStarter = false;
   if (prev && !state.edges.some((e) => e.from === prev.id && e.to === n.id))
     state.edges.push({ from: prev.id, to: n.id });
   state.selected = n.id;
@@ -306,7 +460,9 @@ function addNode(op) {
   reveal(n);
   render();
   renderInspector();
-  toast(prev ? "Added and connected " + a.title : "Added " + a.title);
+  toast(
+    tr(prev ? "addedConnected" : "added", { name: displayAction(a).title }),
+  );
 }
 function reveal(n) {
   const r = $("#canvas").getBoundingClientRect();
@@ -366,8 +522,12 @@ function render() {
     html += `<g class="node${n.id === state.selected ? " selected" : ""}" data-id="${h(n.id)}"><rect class="node-shadow" x="${n.x}" y="${n.y + 5}" width="${W}" height="${H}" rx="12"/><rect class="node-card" x="${n.x}" y="${n.y}" width="${W}" height="${H}" rx="12"/><rect x="${n.x + 13}" y="${n.y + 16}" width="38" height="38" rx="10" fill="${a.color}"/><text x="${n.x + 32}" y="${n.y + 42}" text-anchor="middle" font-size="20" fill="${a.ink}" pointer-events="none">${h(a.icon)}</text><text class="node-title" x="${n.x + 62}" y="${n.y + 29}">${h(label(n).slice(0, 20))}</text><text class="node-subtitle" x="${n.x + 62}" y="${n.y + 49}">${h(modeLabel(n).slice(0, 24))}</text><circle class="port input" data-port="in" data-id="${h(n.id)}" cx="${n.x}" cy="${n.y + H / 2}" r="7"/><circle class="port output" data-port="out" data-id="${h(n.id)}" cx="${n.x + W}" cy="${n.y + H / 2}" r="8"/></g>`;
   });
   stage.innerHTML = html;
-  $("#flowCount").textContent =
-    `${state.nodes.length} action${state.nodes.length === 1 ? "" : "s"} · ${state.edges.length} connection${state.edges.length === 1 ? "" : "s"}`;
+  $("#flowCount").textContent = tr("actionCount", {
+    nodes: state.nodes.length,
+    edges: state.edges.length,
+    pluralNodes: state.nodes.length === 1 ? "" : "s",
+    pluralEdges: state.edges.length === 1 ? "" : "s",
+  });
   $("#emptyState").hidden = state.nodes.length > 0;
   $("#zoomLabel").textContent = Math.round(state.zoom * 100) + "%";
   const details = $(".json-details");
@@ -390,23 +550,24 @@ function wouldCycle(from, to) {
 }
 function connect(from, to) {
   if (from === to) {
-    toast("An action cannot connect to itself.", true);
+    toast(tr("selfLink"), true);
     return;
   }
   if (state.edges.some((e) => e.from === from && e.to === to)) {
-    toast("These actions are already connected.", true);
+    toast(tr("duplicateLink"), true);
     return;
   }
   if (wouldCycle(from, to)) {
-    toast("That connection would create a cycle.", true);
+    toast(tr("cycleLink"), true);
     return;
   }
   state.edges.push({ from, to });
+  state.isStarter = false;
   state.selected = to;
   state.selectedEdge = null;
   render();
   renderInspector();
-  toast("Actions connected");
+  toast(tr("linked"));
 }
 function pointerDown(e) {
   if (e.button !== 0 && e.button !== 1) return;
@@ -494,7 +655,7 @@ function pointerUp(e) {
     if (port) connect(g.from, port.dataset.id);
     else {
       render();
-      toast("Drop on an input connector to link actions");
+      toast(tr("dropPort"));
     }
   } else render();
 }
@@ -571,7 +732,7 @@ function field(key, title, value, help, onChange, type = "text") {
     ]) {
       const option = document.createElement("option");
       option.value = value;
-      option.textContent = caption;
+      option.textContent = tr(caption === "Yes" ? "yes" : "no");
       input.append(option);
     }
   } else {
@@ -602,15 +763,16 @@ function renderInspector() {
     }
     const h3 = document.createElement("h3");
     h3.className = "inspector-type";
-    h3.textContent = "CONNECTION";
+    h3.textContent = tr("connection");
     const p = document.createElement("p");
     p.className = "inspector-desc";
     p.textContent = `${label(node(e.from))} → ${label(node(e.to))}`;
     const btn = document.createElement("button");
     btn.className = "danger";
-    btn.textContent = "Remove connection";
+    btn.textContent = tr("removeConnection");
     btn.onclick = () => {
       state.edges.splice(state.selectedEdge, 1);
+      state.isStarter = false;
       state.selectedEdge = null;
       render();
       renderInspector();
@@ -619,23 +781,32 @@ function renderInspector() {
     return;
   }
   if (!n) {
-    root.innerHTML =
-      '<div class="inspector-blank"><div class="blank-symbol">⚙</div><h3>Nothing selected yet</h3><p>Select an action on the canvas to configure its behavior, or add one from the library.</p></div>';
+    root.innerHTML = `<div class="inspector-blank"><div class="blank-symbol">⚙</div><h3>${h(tr("nothingTitle"))}</h3><p>${h(tr("nothingHint"))}</p></div>`;
     return;
   }
   const a = action(n.op),
     legacy = state.ops.find((o) => o.name === n.op);
-  const title = a?.title || legacy?.title || n.op;
-  root.innerHTML = `<div class="inspector-type">${a ? "ACTION SETTINGS" : "LEGACY ACTION"}</div><div class="inspector-heading"><span class="action-icon" style="background:${a?.color || "#edf1f6"};color:${a?.ink || "#728099"}">${a?.icon || "◇"}</span><div><h3>${h(title)}</h3><small>${h(n.id)}</small></div></div><p class="inspector-desc">${h(a?.desc || legacy?.description || "Imported workflow action")}</p><div class="field-group-title">BEHAVIOR</div>`;
+  const mapping = legacyMode(n.op);
+  const guideId = a?.id || mapping?.[0];
+  const guide = guideId ? LOCALES[state.lang].guides[guideId] : null;
+  const legacyMarkOnly = n.op === "demote_cold" || n.op === "balance_nodes";
+  const desc = a
+    ? displayAction(a).desc
+    : legacyMarkOnly
+      ? tr("legacyPurpose")
+      : state.lang === "zh" && guide
+        ? guide.modes[mapping[1]]
+        : legacy?.description || tr("importedAction");
+  root.innerHTML = `<div class="inspector-type">${h(tr(a ? "actionSettings" : "legacyAction"))}</div><div class="inspector-heading"><span class="action-icon" style="background:${a?.color || "#edf1f6"};color:${a?.ink || "#728099"}">${a?.icon || "◇"}</span><div><h3>${h(label(n))}</h3><small>${h(n.id)}${a ? "" : " · " + h(n.op)}</small></div></div><p class="inspector-desc">${h(desc)}</p><div class="field-group-title">${h(tr("behavior"))}</div>`;
   if (a) {
     const d = document.createElement("div");
     d.className = "field";
     const lbl = document.createElement("label");
     lbl.htmlFor = "modeSelect";
-    lbl.textContent = "Operation";
+    lbl.textContent = tr("operation");
     const select = document.createElement("select");
     select.id = "modeSelect";
-    Object.entries(a.modes).forEach(([id, title]) => {
+    Object.entries(displayAction(a).modes).forEach(([id, title]) => {
       const opt = document.createElement("option");
       opt.value = id;
       opt.textContent = title;
@@ -644,22 +815,44 @@ function renderInspector() {
     select.value = n.params.mode || Object.keys(a.modes)[0];
     select.onchange = () => {
       n.params = { mode: select.value };
+      state.isStarter = false;
       render();
       renderInspector();
     };
     d.append(lbl, select);
     root.append(d);
-    for (const [key, title, def, help] of a.fields?.[select.value] || [])
+  }
+  if (guide) {
+    const mode = a ? n.params.mode || Object.keys(a.modes)[0] : mapping[1];
+    const note = legacyMarkOnly ? tr("legacyMark") : guide.modes[mode];
+    const panel = document.createElement("section");
+    panel.className = "node-guide";
+    panel.innerHTML = `<div class="guide-caption">${h(tr("purpose"))}</div><p>${h(legacyMarkOnly ? tr("legacyPurpose") : guide.purpose)}</p>
+      <div class="guide-mode"><strong>${h(tr("modeDetail"))} · ${h(a ? displayAction(a).modes[mode] || mode : guide.names?.[mode] || action(guideId).modes[mode])}</strong><p>${h(note || "")}</p></div>
+      <div class="guide-caption">${h(tr("input"))}</div><p>${h(guide.input)}</p>
+      <div class="guide-caption">${h(tr("result"))}</div><p>${h(legacyMarkOnly ? tr("legacyOutput") : guide.output)}</p>
+      <div class="guide-tip"><strong>${h(tr("tip"))}</strong><br>${h(guide.tip)}</div>`;
+    root.append(panel);
+  }
+  if (a) {
+    for (const [key, title, def, help] of a.fields?.[
+      n.params.mode || Object.keys(a.modes)[0]
+    ] || [])
       root.append(
         field(
           key,
-          title,
+          LOCALES[state.lang].fields?.[
+            `${a.id}.${n.params.mode || Object.keys(a.modes)[0]}.${key}`
+          ]?.[0] || title,
           n.params[key] ?? def,
-          help,
+          LOCALES[state.lang].fields?.[
+            `${a.id}.${n.params.mode || Object.keys(a.modes)[0]}.${key}`
+          ]?.[1] || help,
           (v) => {
             if (v === "")
               delete n.params[key]; // empty fields use the engine default
             else n.params[key] = v;
+            state.isStarter = false;
             render();
           },
           key === "require_benefit" ? "boolean" : "number",
@@ -668,7 +861,7 @@ function renderInspector() {
   }
   const extra = document.createElement("div");
   extra.className = "field-group-title";
-  extra.textContent = a ? "ADVANCED PARAMETERS" : "PARAMETERS";
+  extra.textContent = tr(a ? "advanced" : "parameters");
   root.append(extra);
   const custom = document.createElement("div");
   root.append(custom);
@@ -685,12 +878,13 @@ function renderInspector() {
       row.className = "kv-row";
       const k = document.createElement("input");
       k.value = key;
-      k.setAttribute("aria-label", "Parameter name");
+      k.setAttribute("aria-label", tr("paramName"));
       const v = document.createElement("input");
       v.value = n.params[key];
-      v.setAttribute("aria-label", "Parameter value");
+      v.setAttribute("aria-label", tr("paramValue"));
       v.oninput = () => {
         n.params[key] = v.value;
+        state.isStarter = false;
         render();
       };
       k.onchange = () => {
@@ -700,15 +894,18 @@ function renderInspector() {
           return;
         }
         n.params[newKey] = n.params[key];
+        state.isStarter = false;
         delete n.params[key];
+        state.isStarter = false;
         drawCustom();
         render();
       };
       const del = document.createElement("button");
       del.textContent = "×";
-      del.setAttribute("aria-label", "Remove " + key);
+      del.setAttribute("aria-label", tr("removeParam", { name: key }));
       del.onclick = () => {
         delete n.params[key];
+        state.isStarter = false;
         drawCustom();
         render();
       };
@@ -719,12 +916,13 @@ function renderInspector() {
   drawCustom();
   const add = document.createElement("button");
   add.className = "secondary-action";
-  add.textContent = "+ Add parameter";
+  add.textContent = tr("addParam");
   add.onclick = () => {
     let k = "parameter",
       i = 1;
     while (k in n.params) k = "parameter_" + i++;
     n.params[k] = "";
+    state.isStarter = false;
     drawCustom();
     custom.lastElementChild?.querySelector("input")?.focus();
   };
@@ -733,13 +931,13 @@ function renderInspector() {
   footer.className = "inspector-footer";
   const remove = document.createElement("button");
   remove.className = "danger";
-  remove.textContent = "Remove action";
+  remove.textContent = tr("removeAction");
   remove.onclick = deleteSelection;
   footer.append(remove);
   root.append(footer);
   const details = document.createElement("details");
   details.className = "json-details";
-  details.innerHTML = "<summary>View workflow JSON</summary><pre></pre>";
+  details.innerHTML = `<summary>${h(tr("viewJson"))}</summary><pre></pre>`;
   details.addEventListener("toggle", () => {
     if (details.open)
       details.querySelector("pre").textContent = JSON.stringify(
@@ -753,8 +951,10 @@ function renderInspector() {
 function deleteSelection() {
   if (state.selectedEdge !== null) {
     state.edges.splice(state.selectedEdge, 1);
+    state.isStarter = false;
     state.selectedEdge = null;
   } else if (state.selected) {
+    state.isStarter = false;
     state.nodes = state.nodes.filter((n) => n.id !== state.selected);
     state.edges = state.edges.filter(
       (e) => e.from !== state.selected && e.to !== state.selected,
@@ -763,7 +963,7 @@ function deleteSelection() {
   } else return;
   render();
   renderInspector();
-  setStatus("Workflow updated");
+  setStatus("updated");
 }
 function layout() {
   const levels = new Map();
@@ -800,7 +1000,7 @@ function layout() {
 }
 function loadWorkflow(w) {
   if (!w || !Array.isArray(w.nodes) || !Array.isArray(w.edges))
-    throw Error("Expected a workflow with nodes and edges arrays.");
+    throw Error(tr("invalidGraph"));
   const ids = new Set();
   const nodes = w.nodes.map((n) => {
     if (
@@ -810,7 +1010,7 @@ function loadWorkflow(w) {
       typeof n.op !== "string" ||
       !n.op
     )
-      throw Error("Each action needs a unique ID and operation.");
+      throw Error(tr("invalidNode"));
     ids.add(n.id);
     if (
       n.params !== undefined &&
@@ -818,7 +1018,7 @@ function loadWorkflow(w) {
         typeof n.params !== "object" ||
         Array.isArray(n.params))
     )
-      throw Error("Invalid action parameters.");
+      throw Error(tr("invalidParams"));
     return {
       id: n.id,
       op: n.op,
@@ -831,13 +1031,13 @@ function loadWorkflow(w) {
   });
   const edges = w.edges.map((e) => {
     if (!ids.has(e.from) || !ids.has(e.to) || e.from === e.to)
-      throw Error("A connection points to a missing action or itself.");
+      throw Error(tr("invalidEdge"));
     return { from: e.from, to: e.to };
   });
   const pairs = new Set();
   for (const e of edges) {
     const k = JSON.stringify([e.from, e.to]);
-    if (pairs.has(k)) throw Error("Duplicate connections are not allowed.");
+    if (pairs.has(k)) throw Error(tr("duplicateEdge"));
     pairs.add(k);
   }
   const remaining = new Set(ids);
@@ -848,12 +1048,12 @@ function loadWorkflow(w) {
     if (!ready.length) break;
     ready.forEach((id) => remaining.delete(id));
   }
-  if (remaining.size)
-    throw Error("Workflow connections must not contain a cycle.");
+  if (remaining.size) throw Error(tr("invalidCycle"));
   const next =
     1 +
     Math.max(0, ...nodes.map((n) => Number(n.id.match(/^n(\d+)$/)?.[1] || 0)));
   state.nodes = nodes;
+  state.isStarter = false;
   state.edges = edges;
   state.nextId = next;
   state.selected = null;
@@ -863,13 +1063,12 @@ function loadWorkflow(w) {
   layout();
   fitView();
   renderInspector();
-  setStatus("Workflow loaded");
+  setStatus("loaded");
 }
 function starter() {
   loadWorkflow({
-    name: "Adaptive tiering",
-    description:
-      "Score activity, choose the best NUMA tier and apply migrations.",
+    name: tr("starterName"),
+    description: tr("starterDescription"),
     nodes: [
       { id: "n1", op: "score_items", params: { mode: "hotness" } },
       { id: "n2", op: "route_items", params: { mode: "destination" } },
@@ -880,24 +1079,26 @@ function starter() {
       { from: "n2", to: "n3" },
     ],
   });
+  state.isStarter = true;
+  setStatus("ready");
 }
 async function api(url, options) {
   const r = await fetch(url, options);
-  if (!r.ok) throw Error(`Request failed (${r.status})`);
+  if (!r.ok) throw Error(tr("requestFailed", { status: r.status }));
   return r;
 }
 async function run() {
   if (!state.nodes.length) {
-    toast("Add at least one action before running.", true);
+    toast(tr("emptyRun"), true);
     return;
   }
   const btn = $("#runBtn");
   btn.disabled = true;
   $("#outputPanel").hidden = false;
   $("#toggleOutput").setAttribute("aria-expanded", "true");
-  $("#toggleOutput").innerHTML = "Hide output <span>⌃</span>";
-  $("#outputText").textContent = "Running workflow…";
-  setStatus("Running workflow");
+  state.outputState = "running";
+  renderOutput();
+  setStatus("running");
   try {
     const r = await fetch("/api/run", {
       method: "POST",
@@ -905,13 +1106,15 @@ async function run() {
       body: JSON.stringify(toWorkflow()),
     });
     const text = await r.text();
-    $("#outputText").textContent = text || "No output from engine.";
-    setStatus(r.ok ? "Run completed" : "Run failed");
-    if (!r.ok) toast("Workflow failed. See execution output.", true);
+    state.outputRaw = text;
+    state.outputState = r.ok ? "done" : "failed";
+    renderOutput();
+    setStatus(r.ok ? "runDone" : "runFailed");
+    if (!r.ok) toast(tr("runError"), true);
   } catch (err) {
-    $("#outputText").textContent =
-      "Could not reach the NUMAflow server. Start it with python3 gui/server.py";
-    setStatus("Server unavailable");
+    state.outputState = "offline";
+    renderOutput();
+    setStatus("offline");
     toast(err.message, true);
   } finally {
     btn.disabled = false;
@@ -919,33 +1122,15 @@ async function run() {
 }
 async function fetchTemplates() {
   try {
-    const list = await (await api("/api/templates")).json();
-    const select = $("#templateSelect");
-    const groups = new Map();
-    for (const t of list) {
-      if (!t.name || !t.category) continue;
-      let g = groups.get(t.category);
-      if (!g) {
-        g = document.createElement("optgroup");
-        g.label = t.category;
-        groups.set(t.category, g);
-        select.append(g);
-      }
-      const opt = document.createElement("option");
-      opt.value = t.name;
-      opt.textContent = t.description || t.name;
-      opt.title = t.name + " — " + (t.use_case || t.description || "");
-      g.append(opt);
-    }
+    state.templates = await (await api("/api/templates")).json();
+    renderTemplates();
   } catch {
-    toast(
-      "Templates unavailable. Build the binary with make -C numaflow.",
-      true,
-    );
+    toast(tr("templatesOffline"), true);
   }
 }
 function init() {
-  refreshPalette();
+  setLanguage(state.lang);
+  $("#languageSelect").onchange = (event) => setLanguage(event.target.value);
   starter();
   requestAnimationFrame(fitView);
   $("#canvas").addEventListener("pointerdown", pointerDown);
@@ -970,18 +1155,14 @@ function init() {
   $("#actionSearch").oninput = refreshPalette;
   $("#emptyAdd").onclick = () => addNode("place_items");
   $("#newBtn").onclick = () => {
-    if (
-      state.nodes.length &&
-      !confirm("Start a new workflow? Your unsaved changes will be lost.")
-    )
-      return;
+    if (state.nodes.length && !confirm(tr("confirmNew"))) return;
     loadWorkflow({
-      name: "Untitled workflow",
-      description: "Built in NUMAflow workflow studio",
+      name: tr("newName"),
+      description: tr("newDescription"),
       nodes: [],
       edges: [],
     });
-    toast("New workflow ready");
+    toast(tr("newReady"));
   };
   $("#exportBtn").onclick = () => {
     const blob = new Blob([JSON.stringify(toWorkflow(), null, 2) + "\n"], {
@@ -998,7 +1179,7 @@ function init() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    toast("Workflow exported");
+    toast(tr("exported"));
   };
   $("#importBtn").onclick = () => $("#fileInput").click();
   $("#fileInput").onchange = async (e) => {
@@ -1006,9 +1187,9 @@ function init() {
     if (!file) return;
     try {
       loadWorkflow(JSON.parse(await file.text()));
-      toast("Workflow imported");
+      toast(tr("imported"));
     } catch (err) {
-      toast("Import failed: " + err.message, true);
+      toast(tr("importError", { error: err.message }), true);
     }
     e.target.value = "";
   };
@@ -1022,9 +1203,13 @@ function init() {
         await api("/api/template/" + encodeURIComponent(name))
       ).json();
       loadWorkflow(w);
-      toast("Template loaded: " + name);
+      toast(
+        tr("templateLoaded", {
+          name: LOCALES[state.lang].templates?.[name] || name,
+        }),
+      );
     } catch (err) {
-      toast("Could not load template: " + err.message, true);
+      toast(tr("templateError", { error: err.message }), true);
     }
   };
   $("#runBtn").onclick = run;
@@ -1032,11 +1217,7 @@ function init() {
     const p = $("#outputPanel");
     p.hidden = !p.hidden;
     $("#toggleOutput").setAttribute("aria-expanded", String(!p.hidden));
-    $("#toggleOutput").innerHTML =
-      (p.hidden ? "Show" : "Hide") +
-      " output <span>" +
-      (p.hidden ? "⌄" : "⌃") +
-      "</span>";
+    renderOutput();
   };
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
@@ -1065,8 +1246,6 @@ function init() {
       render();
       renderInspector();
     })
-    .catch(() =>
-      toast("Engine unavailable. Build with make -C numaflow.", true),
-    );
+    .catch(() => toast(tr("engineOffline"), true));
 }
 document.addEventListener("DOMContentLoaded", init);

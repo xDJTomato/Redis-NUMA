@@ -6,17 +6,24 @@
     <meta name="theme-color" content="#f7f8fb" />
     <title>NUMAflow — Workflow studio</title>
     <link rel="stylesheet" href="/style.css" />
+    <script src="/i18n.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
     <div class="app">
-      <aside class="rail" aria-label="Workspace navigation">
+      <aside
+        class="rail"
+        aria-label="Workspace navigation"
+        data-i18n-aria="navigation"
+      >
         <div class="brand-mark" title="NUMAflow">N<span>·</span></div>
         <div class="rail-divider"></div>
         <button
           class="rail-button active"
           title="Workflow editor"
+          data-i18n-title="editor"
           aria-label="Workflow editor"
+          data-i18n-aria="editor"
         >
           ▦
         </button>
@@ -26,7 +33,9 @@
           target="_blank"
           rel="noopener"
           title="Project repository"
+          data-i18n-title="repository"
           aria-label="Project repository"
+          data-i18n-aria="repository"
           >↗</a
         >
       </aside>
@@ -34,62 +43,93 @@
         <header class="topbar">
           <div class="identity">
             <span class="product">NUMAflow</span><span class="slash">/</span
-            ><span class="crumb">Workflow studio</span>
+            ><span class="crumb" data-i18n="studio">Workflow studio</span>
           </div>
           <div class="top-actions">
+            <label class="language-control" for="languageSelect"
+              ><span data-i18n="language">Language</span>
+              <select
+                id="languageSelect"
+                aria-label="Language"
+                data-i18n-aria="language"
+              >
+                <option value="en">English</option>
+                <option value="zh">简体中文</option>
+              </select>
+            </label>
             <button
               id="newBtn"
               class="button subtle"
               title="Start a blank workflow"
+              data-i18n-title="newHint"
             >
-              New
+              <span data-i18n="new">New</span>
             </button>
-            <button id="importBtn" class="button subtle">Import</button>
+            <button id="importBtn" class="button subtle" data-i18n="import">
+              Import
+            </button>
             <button id="exportBtn" class="button outline">
-              Export JSON <span aria-hidden="true">↗</span>
+              <span data-i18n="export">Export JSON</span>
+              <span aria-hidden="true">↗</span>
             </button>
             <button id="runBtn" class="button primary">
-              <span aria-hidden="true">▶</span> Run workflow
+              <span aria-hidden="true">▶</span>
+              <span data-i18n="run">Run workflow</span>
             </button>
           </div>
         </header>
         <div class="editor-heading">
           <div class="heading-main">
             <div class="eyebrow">
-              <span class="live-dot"></span> WORKFLOW EDITOR
-              <span class="eyebrow-divider">/</span> LOCAL STUDIO
+              <span class="live-dot"></span>
+              <span data-i18n="eyebrow">WORKFLOW EDITOR</span>
+              <span class="eyebrow-divider">/</span>
+              <span data-i18n="localStudio">LOCAL STUDIO</span>
             </div>
             <input
               id="workflowName"
               aria-label="Workflow name"
+              data-i18n-aria="workflowName"
               value="Adaptive tiering"
               spellcheck="false"
               maxlength="80"
             />
-            <div class="heading-subtitle">
+            <div class="heading-subtitle" data-i18n="subtitle">
               Build a memory-placement strategy by connecting actions from left
               to right.
             </div>
           </div>
           <div class="template-picker">
-            <label for="templateSelect">START FROM A TEMPLATE</label
-            ><select id="templateSelect" aria-label="Choose a template">
-              <option value="">Choose a template…</option></select
+            <label for="templateSelect" data-i18n="startTemplate"
+              >START FROM A TEMPLATE</label
+            ><select
+              id="templateSelect"
+              aria-label="Choose a template"
+              data-i18n-aria="chooseTemplate"
+            >
+              <option value="" data-i18n="chooseTemplate">
+                Choose a template…
+              </option></select
             ><button id="loadTemplateBtn" class="button outline" disabled>
-              Load
+              <span data-i18n="load">Load</span>
             </button>
           </div>
         </div>
         <main class="editor">
-          <aside class="palette" id="palettePanel" aria-label="Action library">
+          <aside
+            class="palette"
+            id="palettePanel"
+            aria-label="Action library"
+            data-i18n-aria="actionLibrary"
+          >
             <div class="panel-title">
               <div>
-                <span class="kicker">01 / BUILD</span>
-                <h2>Actions</h2>
+                <span class="kicker" data-i18n="build">01 / BUILD</span>
+                <h2 data-i18n="actions">Actions</h2>
               </div>
               <span class="count">7</span>
             </div>
-            <p class="panel-intro">
+            <p class="panel-intro" data-i18n="paletteIntro">
               One action per step. Choose its behavior in the settings panel.
             </p>
             <label class="search-wrap"
@@ -98,40 +138,71 @@
                 id="actionSearch"
                 type="search"
                 placeholder="Find an action…"
-                aria-label="Search actions"
+                data-i18n-placeholder="findAction"
+                aria-label="Find an action…"
+                data-i18n-aria="findAction"
             /></label>
-            <div class="library-label">ACTION LIBRARY</div>
+            <div class="library-label" data-i18n="library">ACTION LIBRARY</div>
             <div id="actionList"></div>
             <div class="palette-hint">
               <span class="hint-icon">✳</span>
               <div>
-                <strong>Build your flow</strong><br />Click an action to add it.
-                Drag a connector between nodes to define the order.
+                <strong data-i18n="buildFlow">Build your flow</strong
+                ><br /><span data-i18n="buildHint"
+                  >Click an action to add it. Drag a connector between nodes to
+                  define the order.</span
+                >
               </div>
             </div>
           </aside>
-          <section class="canvas-area" aria-label="Workflow canvas">
+          <section
+            class="canvas-area"
+            aria-label="Workflow canvas"
+            data-i18n-aria="canvasRegion"
+          >
             <div class="canvas-toolbar">
               <div class="canvas-caption">
-                <span class="canvas-icon">▦</span><span>Canvas</span
+                <span class="canvas-icon">▦</span
+                ><span data-i18n="canvas">Canvas</span
                 ><span id="flowCount" class="flow-count"
                   >0 actions · 0 connections</span
                 >
               </div>
               <div class="canvas-tools">
-                <button id="fitBtn" title="Fit workflow to canvas">
-                  Fit view</button
+                <button
+                  id="fitBtn"
+                  title="Fit workflow to canvas"
+                  data-i18n-title="fitTitle"
+                >
+                  <span data-i18n="fitView">Fit view</span></button
                 ><span class="tool-divider"></span
-                ><button id="zoomOut" title="Zoom out" aria-label="Zoom out">
+                ><button
+                  id="zoomOut"
+                  title="Zoom out"
+                  aria-label="Zoom out"
+                  data-i18n-title="zoomOut"
+                  data-i18n-aria="zoomOut"
+                >
                   −</button
                 ><span id="zoomLabel">100%</span
-                ><button id="zoomIn" title="Zoom in" aria-label="Zoom in">
+                ><button
+                  id="zoomIn"
+                  title="Zoom in"
+                  aria-label="Zoom in"
+                  data-i18n-title="zoomIn"
+                  data-i18n-aria="zoomIn"
+                >
                   +
                 </button>
               </div>
             </div>
             <div id="canvasWrap" class="canvas-wrap">
-              <svg id="canvas" role="img" aria-label="Editable workflow graph">
+              <svg
+                id="canvas"
+                role="img"
+                aria-label="Editable workflow graph"
+                data-i18n-aria="canvasLabel"
+              >
                 <defs>
                   <marker
                     id="arrow"
@@ -149,30 +220,34 @@
               </svg>
               <div id="emptyState" class="empty-state" hidden>
                 <div class="empty-glyph">✳</div>
-                <h3>Your canvas is ready</h3>
-                <p>
+                <h3 data-i18n="emptyTitle">Your canvas is ready</h3>
+                <p data-i18n="emptyHint">
                   Add an action from the library, or load a template to get
                   started.
                 </p>
                 <button id="emptyAdd" class="button primary">
-                  + Add first action
+                  <span data-i18n="emptyAdd">+ Add first action</span>
                 </button>
               </div>
-              <div class="canvas-tip">
+              <div class="canvas-tip" data-i18n="canvasTip">
                 Drag nodes · Drag connectors to link · Drag background to pan
               </div>
             </div>
             <div class="statusbar">
               <span id="statusText"
                 ><span class="status-dot"></span> Ready to build</span
-              ><span>NUMA / CXL STRATEGY WORKSPACE</span>
+              ><span data-i18n="workspace">NUMA / CXL STRATEGY WORKSPACE</span>
             </div>
           </section>
-          <aside class="inspector" aria-label="Action settings">
+          <aside
+            class="inspector"
+            aria-label="Action settings"
+            data-i18n-aria="settingsLabel"
+          >
             <div class="panel-title">
               <div>
-                <span class="kicker">02 / CONFIGURE</span>
-                <h2>Settings</h2>
+                <span class="kicker" data-i18n="configure">02 / CONFIGURE</span>
+                <h2 data-i18n="settings">Settings</h2>
               </div>
               <span class="settings-icon">⚙</span>
             </div>
@@ -181,8 +256,9 @@
         </main>
         <div class="output-bar">
           <div class="output-label">
-            <span class="output-light"></span> EXECUTION OUTPUT
-            <span class="output-help"
+            <span class="output-light"></span>
+            <span data-i18n="output">EXECUTION OUTPUT</span>
+            <span class="output-help" data-i18n="synthetic"
               >Run against a five-item synthetic workload</span
             >
           </div>

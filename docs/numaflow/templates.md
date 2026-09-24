@@ -10,8 +10,8 @@ DAG，带**用途说明 + 适用场景 + 默认参数**，新手只需按负载�
 ./build/numaflow templates
 # 导出某个模板的 DAG JSON
 ./build/numaflow template tier_caat tier_caat.json
-# GUI：顶部下拉框选模板 -> Load Template，DAG 自动铺到画布
-python gui/server.py    # http://127.0.0.1:8090
+# GUI：顶部下拉框选模板 -> 加载，DAG 自动铺到画布；右上角可切换简体中文
+python3 gui/server.py    # http://127.0.0.1:8090
 ```
 
 ## 模板分类

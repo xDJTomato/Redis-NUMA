@@ -38,6 +38,17 @@ cd src && make clean && make -j$(nproc)
 ./redis-cli numa strategy list
 ```
 
+### NUMAflow workflow editor
+
+```bash
+make -C numaflow
+python3 numaflow/gui/server.py   # open http://127.0.0.1:8090/
+```
+
+Use the **English / 简体中文** menu to switch languages. Selecting an action explains its
+input, output, mode and place in a workflow; existing template operation IDs are
+still supported. The Run button tests against a synthetic workload, not live Redis.
+
 ### Full validation in one command
 
 ```bash
